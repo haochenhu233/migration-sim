@@ -22,17 +22,18 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 ## Phase 1 — test apps + verifier + baseline
 
 **1a. The `/check` contract (the interface everything else builds on)**
-- [ ] spec written: JSON fields (`app, expects, endpoint, server, version, auth_user, roundtrip, dataset, canary, since_start`) and per-mode pass criteria
-- [ ] pass criteria per usage mode defined (cache / session / store / producer / consumer / lock)
+- [x] spec written: `CHECK-CONTRACT.md` — fields, per-mode `mode_data`, pass criteria, env config
+- [x] pass criteria per usage mode defined (cache / session / store / producer / consumer / lock)
 
 **1b. The Python probe app (`apps/sim-py`, Flask + redis-py)**
-- [ ] usage modes: `SIM_MODE=cache|session|store|producer|consumer|lock`
-- [ ] credential sources: `SIM_SOURCE=vcap|env|ups` (+ service-key runner script)
-- [ ] auth styles: `SIM_AUTH=password|username` (password-only vs username-aware)
-- [ ] self-generated ground truth: deterministic dataset + checksum (store), gapless sequence (producer/consumer), session token minted pre-cutover (session), lock canary (lock)
-- [ ] command-family smoke in `/check` (SET/GET, hash, EVAL, MULTI, Streams, pub/sub) per mode
-- [ ] manifests for every variant (table below)
-- [ ] deployed to SBX; `/check` green against a Redis service
+- [x] usage modes: `SIM_MODE=cache|session|store|producer|consumer|lock` — all six smoke-tested locally (fakeredis)
+- [x] credential sources: `SIM_SOURCE=vcap|env|ups` (`SIM_SERVICE_NAME` selects a binding for multi-bind apps)
+- [ ] service-key runner script (`sim-keyuser`)
+- [x] auth styles: `SIM_AUTH=password|username`
+- [x] self-generated ground truth: deterministic dataset + checksum (store), Redis-counter sequence with gap/duplicate detection (consumer), deterministic session token (session), per-window lock + per-instance run log (lock), canary key at first start
+- [x] command-family smoke in `/check` (string, hash, list, zset, eval, multi, stream, pubsub)
+- [x] manifests: `manifests/core.yml` (6 usage apps) + `manifests/access-variants.yml` (pinned, static-env, ups, password-only, username-aware, pipeline a/b); `scripts/create-services.sh`
+- [ ] deployed to SBX; `/check` green against a Redis service (real `server`/`auth_user`/`eval` values confirmed — fakeredis can't)
 
 **1c. Real-stack apps**
 - [ ] `apps/sim-spring` — Spring Boot + Spring Data Redis (Lettuce); `spring.redis.username` handling; optional Spring Cloud Config Server wiring (hidden-config case)
@@ -40,9 +41,10 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] both implement the same `/check` contract
 
 **1d. The verifier (`verify/`)**
-- [ ] `verify.sh`: polls every app's `/check` every N s → timeline file (per app, per poll)
+- [x] `verify/poll.sh`: polls every app's `/check` every N s → timeline JSONL (`verify/data/`)
+- [x] `verify/apps-list.sh`: builds `apps.txt` (sim-* apps → routes) from the cf target
 - [ ] expectation tables per scenario (what each app MUST report after each step)
-- [ ] baseline capture command (snapshot all `/check` before any migration)
+- [x] `verify/snapshot.sh [label]`: one-shot capture of all `/check` (the baseline tool)
 - [ ] diff/report: switched? functional? data intact? downtime seconds? errors/reconnects? latency p50/p99 vs baseline?
 - [ ] **baseline captured** for the Phase-2 population (this is the "before")
 
@@ -119,3 +121,9 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 ## Log
 
 - 2026-09-20 — plan created; Phase 0 prerequisites listed; nothing started.
+- 2026-09-20 — Phase 1 started: `/check` contract written; `sim-py` probe built with all six
+  usage modes + three credential sources + two auth styles, smoke-tested locally against
+  fakeredis (lock-mode double-exec false positive found & fixed: per-window lock keys +
+  per-instance run log); manifests for 13 app variants; verifier snapshot/poll/apps-list
+  scripts. Next: deploy to SBX against real Redis, then Spring/.NET apps and expectation
+  tables. Phase 1 = `[~]`.

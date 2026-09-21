@@ -1,0 +1,48 @@
+# Core usage-pattern apps -- all cf-bind, one Redis service each (or shared where noted).
+# Deploy:  cf push -f manifests/core.yml            (from apps/sim-py/)
+# Services referenced must exist first -- see ../../scripts/create-services.sh
+---
+defaults: &defaults
+  path: .
+  buildpacks: [python_buildpack]
+  memory: 128M
+  disk_quota: 512M
+  health-check-type: http
+  health-check-http-endpoint: /healthz
+  instances: 2
+  command: python app.py
+
+applications:
+- name: sim-cache-bound
+  <<: *defaults
+  services: [sim-redis-cache]
+  env: { SIM_MODE: cache, SIM_EXPECTS: cf-bind }
+
+- name: sim-session-bound
+  <<: *defaults
+  services: [sim-redis-session]
+  env: { SIM_MODE: session, SIM_EXPECTS: cf-bind }
+
+- name: sim-store-bound
+  <<: *defaults
+  instances: 1
+  services: [sim-redis-store]
+  env: { SIM_MODE: store, SIM_EXPECTS: cf-bind, SIM_KEYS: "1000" }
+
+- name: sim-producer
+  <<: *defaults
+  instances: 1
+  services: [sim-redis-queue]
+  env: { SIM_MODE: producer, SIM_EXPECTS: cf-bind, SIM_QUEUE: "queue:sim" }
+
+- name: sim-consumer
+  <<: *defaults
+  instances: 1
+  services: [sim-redis-queue]
+  env: { SIM_MODE: consumer, SIM_EXPECTS: cf-bind, SIM_QUEUE: "queue:sim" }
+
+- name: sim-lock
+  <<: *defaults
+  instances: 3
+  services: [sim-redis-lock]
+  env: { SIM_MODE: lock, SIM_EXPECTS: cf-bind }
