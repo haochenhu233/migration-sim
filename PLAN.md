@@ -67,6 +67,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 | `sim-batch` | cf-bind, connects on schedule (CF task) | store | idle ≠ exempt: first reconnect lands on Valkey | [ ] |
 | `sim-spring-*` | cf-bind | cache + session | real Java stack | [ ] |
 | `sim-win-bound` | cf-bind, Windows | cache | same story on Windows | [ ] |
+| `sim-tls-bound` | cf-bind, connects on `tls_port` (16379) | cache | TLS consumers: Valkey target must be a TLS plan + cert trusted (found in NP: a real app uses 16379) | [ ] |
 
 ## Phase 2 — realistic population (~100+ live connections)
 
@@ -117,6 +118,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] data-copy mechanism: exists to test, or does `sim-store-bound` first just *measure* loss to give the copy tool a target?
 - [ ] SBX quotas (apps, service instances, memory) — enough for the Phase-2 population?
 - [ ] which Windows stack / .NET runtime is standard in the client estate?
+- [ ] how many real consumers use the TLS port (16379)? (census has the port -- `awk -F'\t' '$4==16379' backward/02_conns.tsv`) -> sizes the TLS-plan requirement for Valkey
 
 ## Log
 
