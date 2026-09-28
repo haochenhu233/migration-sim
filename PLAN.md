@@ -78,22 +78,32 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] discovery toolkit run against SBX → `merged_report` shows the intended shape (also validates the toolkit once more)
 - [ ] verifier baseline captured (Phase 1d last item)
 
-## Phase 3 — migration script + three scenarios
+## Phase 3 — migration tool: operator layer first (see `migrate/DESIGN.md`)
 
-**3a. The migration script (`migrate/`)**
-- [ ] per service: create Valkey (classic plan) → per app: bind valkey → unbind redis → restart → verify → Redis to standby
-- [ ] per-app/per-service action log (timestamps) — the report joins on this
-- [ ] wave definition input (which services, which order, pipeline pairs together)
-- [ ] confirm gate + grace before any retirement; dry-run mode
-- [ ] handles: pinned-env apps (report, do not "fix" silently), UPS, service keys (create new key), multi-instance apps, Windows apps
-- [ ] data copy for store-mode services (RDB snapshot or brief sync) + key-count verification
+**3a. Design & ledger**
+- [x] `migrate/DESIGN.md`: ledger (append-only `ledger.jsonl`, state = last event), per-app state machine, rollback-per-step table, commands, dashboard, restart semantics, accident matrix
+- [ ] ledger schema frozen; `state-of` jq expression written and shared by status/watch/rollback/report
 
-**3b. Scenarios**
-- [ ] S1 happy migration of the whole population in 2–3 waves
-- [ ] S2 rollback: re-bind one wave back to Redis, prove "minutes", data intact on standby
-- [ ] S3 failure injection: one service fails verification mid-wave → only that wave rolls back
-- [ ] S4 secure-plan variant: migrate `sim-password-only` + `sim-username-aware` onto a `-secure` plan → WRONGPASS vs OK captured as evidence
-- [ ] S5 pipeline ordering: migrate A and B in the wrong order once (prove the break), then correctly
+**3b. The CLI (`migrate/migrate.sh`) — in this order**
+- [ ] `plan` → `waves.yml` from the merged report (pipeline pairs together, hazards + data-store flagged)
+- [ ] `status` / `watch` dashboard (build BEFORE apply — the operator must see before acting)
+- [ ] `preflight --wave N` incl. blast-radius line; lock file
+- [ ] `dry-run --wave N` with rollback row per step
+- [ ] `apply` — idempotent, ledger-driven, STOP file, Ctrl-C safe, rolling restart for ≥2 instances, soak timer
+- [ ] `verify` — app health · Valkey-side census (reuse discovery worker) · `/check` · key counts · drift check
+- [ ] `rollback --app/--service/--wave` per the table
+- [ ] `confirm` / `retire` (confirm + grace + double prompt)
+- [ ] `report --wave N` evidence pack
+- [ ] data copy for store-mode services (RDB snapshot / brief sync) + key-count verification
+- [ ] handles pinned-env apps (refuse in preflight), UPS, service keys (new key), multi-instance, Windows, TLS consumers (TLS plan + cert trust)
+
+**3c. Scenarios (SBX, 6 Redis + 6 Valkey, waves of two)**
+- [ ] S1 happy migration of the population in three waves
+- [ ] S2 rollback: one wave back to Redis — prove "minutes", data intact on standby
+- [ ] S3 **accident drill**: every row of the accident matrix, with client devops on the call
+- [ ] S4 secure-plan variant: `sim-password-only` + `sim-username-aware` → WRONGPASS vs OK captured
+- [ ] S5 pipeline ordering: wrong order once (prove the break), then correct
+- [ ] S6 TLS consumer onto a TLS-enabled Valkey plan
 
 ## Phase 4 — verification & report
 
@@ -110,6 +120,8 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - 2026-09-20 — scale via instances + pools (~25 apps → 100+ connections), not 100 distinct apps; population mirrors real proportions.
 - 2026-09-20 — usage pattern = a mode of one Python probe (all cf-bind); access-pattern variants only in cache mode; Spring + .NET for real-stack fidelity.
 - 2026-09-20 — migration waves bind `-classic` plans (no app code change); `-secure` is an explicit scenario (S4), not the default.
+- 2026-09-27 — **SBX = functional rehearsal at 6 Redis + 6 Valkey (12 service IPs)**; scenarios recycle IPs by retiring after standby; **lab = scale rehearsal** (API limits, director load, wave parallelism). Attaching the idle subnet to the -ocf network is NOT pursued (cloud-config + routing + CF ASG work for capacity the lab gives free).
+- 2026-09-28 — **operator layer is the product**: ledger-driven CLI, terminal dashboard (`watch`), per-step rollback, accident drill — before any scale. No new UI.
 
 ## Open questions
 
@@ -123,6 +135,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 ## Log
 
 - 2026-09-20 — plan created; Phase 0 prerequisites listed; nothing started.
+- 2026-09-28 — Phase 3 redesigned around the operator layer (`migrate/DESIGN.md`); SBX sized to 6+6; lock service merged into the queue Redis.
 - 2026-09-20 — Phase 1 started: `/check` contract written; `sim-py` probe built with all six
   usage modes + three credential sources + two auth styles, smoke-tested locally against
   fakeredis (lock-mode double-exec false positive found & fixed: per-window lock keys +

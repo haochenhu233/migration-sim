@@ -44,5 +44,5 @@ applications:
 - name: sim-lock
   <<: *defaults
   instances: 3
-  services: [sim-redis-lock]
+  services: [sim-redis-queue]
   env: { SIM_MODE: lock, SIM_EXPECTS: cf-bind }
