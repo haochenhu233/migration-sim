@@ -100,7 +100,32 @@ has a factual answer.
 | `retire --service Y` | refuses without confirm + grace; asks twice; the only irreversible step |
 | `report --wave N` | evidence pack from the ledger (markdown): per app switched/verified/downtime, timeline, incidents, rollbacks, operators |
 
-## 5. Dashboard
+## 5. Dashboard — two levels
+
+**Level 1 — project summary** (`migrate.sh status`, no arguments): one line per wave plus a
+TOTAL line and a progress bar. Per wave: services / Valkey created / create-failed / on
+standby / retired · connections / migrated (%) / verified (%) / failed / rolled-back /
+in-progress / pending. "Connection" = one app↔service pair (a row of the plan) — the same unit
+the discovery report uses, so the operator's "how far are we" is directly comparable to the
+"how much is there" they started from.
+
+**Level 2 — wave detail** (`status --wave N`): the per-service table below, plus an attention
+list of failed/rolled-back apps.
+
+**Derived snapshot files** (`runs/<env>/status/`, rewritten on every `status` run):
+`summary.tsv`, `wave-N.tsv`, `failed.tsv`, `migrated.tsv`. They are **views, never inputs** —
+the ledger stays the only source of truth — but they make the state readable without the
+tool (Excel, a shared drive, a status mail) and survive a broken tool. Regenerate with one
+command; never edit.
+
+**Scale & robustness (measured):** a synthetic 800-connection plan with a **50,000-line
+ledger** (≈20× a realistic ledger — 800 connections produce ~3k events; retries and rollbacks
+maybe 10k) renders the project summary in **0.7 s** and a wave view in **0.65 s**, so `watch`
+every 3 s is fine for the whole migration. The parser skips an unparsable line (the only
+realistic corruption: a line truncated by a crash mid-write) and reports the count instead of
+failing; the ledger is append-only text, so the backup policy is a copy per day (`cp`/rsync)
+and the drift check against real CF state catches any step that ran but never got recorded.
+
 
 `watch -n 3 -c migrate.sh status --wave 2` — one screen, rendered from the ledger:
 
@@ -127,7 +152,7 @@ Suggested tmux layout: status (top) · `tail -f commands.log` (bottom-left) · s
 
 | accident | tool behaviour |
 |---|---|
-| verify fails (can't connect, WRONGPASS from a wrong plan, cold-cache latency misread) | rollback **that app**; wave pauses (default) or continues (`--on-fail continue`) |
+| verify fails (can't connect, WRONGPASS from a wrong plan, cold-cache latency misread) | **auto-rollback that app** (rebind Redis + restart, then *verify the rollback*: app connected to Redis again → `rollback-verified`); the app team sees a working app, the ledger sees an incident. The wave **continues** with other apps (they're independent) and the service is marked ATTENTION, never retired. **Circuit breaker:** 3 failures in a row ⇒ systemic (wrong plan family, broker down) ⇒ wave pauses for the operator |
 | operator Ctrl-C / SSH drop mid-step | current step completes and is recorded; `apply` resumes from the ledger |
 | CF API 429/5xx, broker bind timeout, Valkey create fails | bounded retries with backoff → app marked `blocked`, never skipped silently |
 | team pipeline re-pushes during the window, rebinding old Redis | `verify` reports **drift** as an incident, not success |

@@ -10,9 +10,14 @@ PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 
 # ---- the ONE rule: an app's (or service's) state = its last ledger event -----------------------
 # Emits TSV: service \t app \t state \t ts \t note      (app "" = service-level events)
+ledger_lines(){ # every parsable line as compact JSON; a truncated/garbled line is skipped, not fatal
+  [ -s "$LEDGER" ] || return 0
+  jq -R -c 'fromjson? // empty' "$LEDGER"
+}
+ledger_bad(){ [ -s "$LEDGER" ] || { echo 0; return; }; echo $(( $(grep -c . "$LEDGER") - $(ledger_lines | grep -c .) )); }
 ledger_states(){
   [ -s "$LEDGER" ] || return 0
-  jq -rs --arg w "$WAVE" '
+  ledger_lines | jq -rs --arg w "$WAVE" '
     map(select($w=="" or (.wave|tostring)==$w))
     | group_by([.service, .app]) | map(last)                      # last event per (service, app)
     | .[] | [ .service, .app,
@@ -21,10 +26,10 @@ ledger_states(){
               (if .step=="confirm" and .outcome=="ok"
                then ((.ts|fromdateiso8601) + ((((.note|capture("grace (?<h>[0-9]+)h")) // {h:"24"}).h|tonumber)*3600)
                      | strftime("%m-%d %H:%M"))
-               else "" end) ] | @tsv' "$LEDGER"
+               else "" end) ] | @tsv'
 }
 wave_started(){ [ -s "$LEDGER" ] || { echo "-"; return; }
-  jq -r --arg w "$WAVE" 'select($w=="" or (.wave|tostring)==$w) | .ts' "$LEDGER" | sort | head -1 | cut -c12-19; }
+  ledger_lines | jq -r --arg w "$WAVE" 'select($w=="" or (.wave|tostring)==$w) | .ts' | sort | head -1 | cut -c12-19; }
 
 cmd_status(){
   [ -s "$PLAN" ] || { echo "no $PLAN -- run: migrate.sh plan <merged_report.csv>"; exit 1; }
@@ -88,7 +93,48 @@ cmd_status(){
   rm -f "$RUN/.states.tsv"
 }
 
+# ---- project summary: per wave + totals, percentages; also writes derived snapshots ------------
+cmd_summary(){
+  [ -s "$PLAN" ] || { echo "no $PLAN -- run: migrate.sh plan <merged_report.csv>"; exit 1; }
+  local bad; bad=$(ledger_bad); mkdir -p "$RUN/status"
+  WAVE="" ledger_states > "$RUN/.states.tsv"
+  printf 'wave\tservice\tapp\tstate\tnote\n' > "$RUN/status/failed.tsv"; printf 'wave\tservice\tapp\tstate\n' > "$RUN/status/migrated.tsv"
+  awk -F'\t' -v OFS='\t' -v bad="$bad" -v sdir="$RUN/status" -v now="$(date -u +%FT%TZ)" '
+    function rank(st) { if (st ~ /fail|blocked/) return -1; if (st=="rollback") return 0
+      if (st=="bind-valkey") return 2; if (st=="unbind-redis") return 3; if (st=="restart") return 4; if (st=="verify") return 5; return 1 }
+    function pct(a,b) { return b ? sprintf("%3d%%", a*100/b) : "  -" }
+    FILENAME==ARGV[1] { if ($2=="") svc_ev[$1]=$3; else { st[$1 SUBSEP $2]=$3; note[$1 SUBSEP $2]=$5 }; next }
+    FNR==1 { next }
+    { w=$1; s=$2; a=$5; if (!(w in seenw)) { worder[++nw]=w; seenw[w]=1 }
+      if (!(s in seens)) { seens[s]=1; wsvc[w]++; ev=svc_ev[s]
+        if (ev=="create-valkey" || ev=="confirm" || ev=="retire") wcreated[w]++
+        if (ev ~ /create-valkey:fail/) wcfail[w]++
+        if (ev=="confirm") wstandby[w]++
+        if (ev=="retire")  wretired[w]++ }
+      wconn[w]++; k=s SUBSEP a; state=(k in st)?st[k]:"pending"; r=rank(state)
+      if (r>=4) wmig[w]++;  if (r==5) wver[w]++;  if (r<0) { wfail[w]++; print w, s, a, state, note[k] >> (sdir "/failed.tsv") }
+      if (r==0) wrb[w]++;   if (r==1) wpend[w]++;  if (r==2 || r==3) wprog[w]++
+      if (r>=4) print w, s, a, state >> (sdir "/migrated.tsv")
+      print w, s, a, state, note[k] > (sdir "/wave-" w ".tsv") }
+    END {
+      print "generated " now "  (ledger lines skipped as unparsable: " bad ")" > (sdir "/summary.tsv")
+      print "wave\tservices\tcreated\tcreate_fail\tstandby\tretired\tconnections\tmigrated\tverified\tfailed\trolled_back\tin_progress\tpending" > (sdir "/summary.tsv")
+      printf "%-5s %8s %8s %7s %7s %7s | %11s %14s %14s %7s %11s %8s %7s\n", "wave","services","created","c-fail","standby","retired","connections","migrated","verified","failed","rolled-back","in-prog","pending"
+      for (i=1;i<=nw;i++) { w=worder[i]
+        printf "%-5s %8d %8d %7d %7d %7d | %11d %9d %4s %9d %4s %7d %11d %8d %7d\n", w, wsvc[w], wcreated[w]+0, wcfail[w]+0, wstandby[w]+0, wretired[w]+0, wconn[w], wmig[w]+0, pct(wmig[w],wconn[w]), wver[w]+0, pct(wver[w],wconn[w]), wfail[w]+0, wrb[w]+0, wprog[w]+0, wpend[w]+0
+        printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", w, wsvc[w], wcreated[w]+0, wcfail[w]+0, wstandby[w]+0, wretired[w]+0, wconn[w], wmig[w]+0, wver[w]+0, wfail[w]+0, wrb[w]+0, wprog[w]+0, wpend[w]+0 > (sdir "/summary.tsv")
+        T[1]+=wsvc[w]; T[2]+=wcreated[w]; T[3]+=wcfail[w]; T[4]+=wstandby[w]; T[5]+=wretired[w]; T[6]+=wconn[w]; T[7]+=wmig[w]; T[8]+=wver[w]; T[9]+=wfail[w]; T[10]+=wrb[w]; T[11]+=wpend[w]; T[12]+=wprog[w] }
+      printf "%-5s %8d %8d %7d %7d %7d | %11d %9d %4s %9d %4s %7d %11d %8d %7d\n", "TOTAL", T[1],T[2],T[3],T[4],T[5],T[6],T[7],pct(T[7],T[6]),T[8],pct(T[8],T[6]),T[9],T[10],T[12],T[11]
+      printf "TOTAL\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", T[1],T[2],T[3],T[4],T[5],T[6],T[7],T[8],T[9],T[10],T[12],T[11] > (sdir "/summary.tsv")
+      n=40; f=T[6]?int(n*T[8]/T[6]):0; bar=""; for (j=0;j<n;j++) bar=bar (j<f?"#":".")
+      printf "\nverified  [%s] %s of %d connections   |  services retired %d/%d\n", bar, pct(T[8],T[6]), T[6], T[5], T[1]
+      if (T[9]>0) printf "!! %d connection(s) failed/blocked -- see status/failed.tsv or: migrate.sh status --wave N\n", T[9]
+      if (bad>0)  printf "!! %d ledger line(s) unparsable (crash mid-write?) -- skipped; check the tail of ledger.jsonl\n", bad
+    }' "$RUN/.states.tsv" "$PLAN"
+  rm -f "$RUN/.states.tsv"
+}
+
 case "$SUB" in
-  status) cmd_status ;;
+  status) if [ -n "$WAVE" ]; then cmd_status; else cmd_summary; fi ;;
   *) echo "usage: migrate.sh status [--wave N] [--run <dir>]"; exit 1 ;;
 esac

@@ -1,0 +1,8 @@
+2	orders-cache	orders-api	verify	census: 2 conns on valkey; app healthy
+2	orders-cache	orders-worker	rollback	rebind redis + restart; cause: verify fail (NOAUTH -> check plan family)
+2	orders-cache	orders-report	unbind-redis	
+2	session-store	web-portal	verify	
+2	session-store	web-admin	verify	
+2	pay-queue	pay-producer	pending	
+2	pay-queue	pay-consumer	pending	
+2	inv-cache	inventory	pending	
