@@ -44,11 +44,11 @@ jq -r 'select(.app=="orders-api") | "\(.ts) \(.step) \(.outcome) \(.note)"' ledg
 jq -r 'select(.outcome!="ok") | "\(.ts) \(.service)/\(.app) \(.step): \(.note)"' ledger.jsonl  # every incident
 ```
 
-**Where it lives.** `runs/<env>/ledger.jsonl` next to `waves.yml`, `commands.log` (every cf/
+**Where it lives.** `runs/<env>/ledger.jsonl` next to `waves.tsv` (the plan is a tab file, not YAML -- editable in Excel, no YAML parser needed on the bastion), `commands.log` (every cf/
 genesis command with timestamp and exit code) and `lock`. Copy the directory and you have the
 complete record of the migration; git-track it if you want history of history.
 
-**What it is not.** Not a lock (that's the `lock` file), not the plan (that's `waves.yml`), and
+**What it is not.** Not a lock (that's the `lock` file), not the plan (that's `waves.tsv`), and
 never a source of truth about the *platform* — before acting, `apply` always re-reads reality
 (`cf` bindings, app state) and reconciles: if the ledger says "bound to valkey" but CF doesn't,
 the ledger gets a `drift` event and the operator is asked, not overridden.
@@ -89,7 +89,7 @@ has a factual answer.
 
 | command | does |
 |---|---|
-| `plan <merged_report.csv>` | writes `waves.yml`: services per wave (operator edits), apps per service (from the report), pipeline pairs kept in one wave, hazard apps flagged, data-store services flagged for copy |
+| `plan <merged_report.csv>` | writes `waves.tsv` (`wave, service, redis_si_guid, valkey_plan, app, app_guid, flags`): services per wave (operator edits), apps per service (from the report), pipeline pairs kept in one wave, hazard apps flagged, data-store services flagged for copy |
 | `preflight --wave N` | lock free · classic plan visible · IP/quota headroom · every app running · no pending service operations · hazard apps' env fixed · pipeline pairs complete → prints the **blast radius** (services / apps / teams) |
 | `dry-run --wave N` | every command in order, with the rollback row after each |
 | `apply --wave N [--service Y] [--app X]` | executes; idempotent via the ledger; `STOP` file honored between steps; Ctrl-C finishes the current step, records it, exits |

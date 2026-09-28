@@ -82,11 +82,11 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 
 **3a. Design & ledger**
 - [x] `migrate/DESIGN.md`: ledger (append-only `ledger.jsonl`, state = last event), per-app state machine, rollback-per-step table, commands, dashboard, restart semantics, accident matrix
-- [ ] ledger schema frozen; `state-of` jq expression written and shared by status/watch/rollback/report
+- [x] ledger schema frozen (`ts, wave, service, app, step, outcome, ms, op, note`; app="" = service-level); `ledger_states` jq = the one state rule; plan file = `waves.tsv`
 
 **3b. The CLI (`migrate/migrate.sh`) — in this order**
 - [ ] `plan` → `waves.yml` from the merged report (pipeline pairs together, hazards + data-store flagged)
-- [ ] `status` / `watch` dashboard (build BEFORE apply — the operator must see before acting)
+- [x] `status` dashboard working on `migrate/example/` (phases, switched/verified, standby clock, last event, attention list, hazard warning); `watch -n 3 -c migrate.sh status --wave N`
 - [ ] `preflight --wave N` incl. blast-radius line; lock file
 - [ ] `dry-run --wave N` with rollback row per step
 - [ ] `apply` — idempotent, ledger-driven, STOP file, Ctrl-C safe, rolling restart for ≥2 instances, soak timer
@@ -135,6 +135,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 ## Log
 
 - 2026-09-20 — plan created; Phase 0 prerequisites listed; nothing started.
+- 2026-09-28 — `migrate.sh status` built and demonstrated on a sample ledger (`migrate/example/`); plan file settled as `waves.tsv`.
 - 2026-09-28 — Phase 3 redesigned around the operator layer (`migrate/DESIGN.md`); SBX sized to 6+6; lock service merged into the queue Redis.
 - 2026-09-20 — Phase 1 started: `/check` contract written; `sim-py` probe built with all six
   usage modes + three credential sources + two auth styles, smoke-tested locally against

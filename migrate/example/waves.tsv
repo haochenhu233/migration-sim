@@ -1,0 +1,10 @@
+wave	service	redis_si_guid	valkey_plan	app	app_guid	flags
+2	orders-cache	3f1a...c01	cache-small	orders-api	9a01...01	
+2	orders-cache	3f1a...c01	cache-small	orders-worker	9a01...02	
+2	orders-cache	3f1a...c01	cache-small	orders-report	9a01...03	idle
+2	session-store	3f1a...c02	cache-small	web-portal	9a01...04	session
+2	session-store	3f1a...c02	cache-small	web-admin	9a01...05	
+2	pay-queue	3f1a...c03	cache-small	pay-producer	9a01...06	pipeline:pay
+2	pay-queue	3f1a...c03	cache-small	pay-consumer	9a01...07	pipeline:pay
+2	inv-cache	3f1a...c04	cache-small	inventory	9a01...08	hazard:REDIS_HOST
+3	cart-cache	3f1a...c05	cache-small	cart	9a01...09	
