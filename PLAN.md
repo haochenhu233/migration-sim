@@ -136,6 +136,12 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 
 ## Log
 
+- 2026-09-30 — **Switching from tooling to theory validation.** Operator-layer work paused after
+  `status` (next when resumed: `plan` → `preflight` → `dry-run` → `apply`). Written for the SBX
+  session: `scenarios/THEORY-VALIDATION.md` — the by-hand four-step migration of the 6 services
+  with the sim apps, access-variant claims, store-loss measurement, rollback timing, results
+  table. Everything the tool later automates must reproduce that runbook.
+
 - 2026-09-20 — plan created; Phase 0 prerequisites listed; nothing started.
 - 2026-09-28 — `migrate.sh status` built and demonstrated on a sample ledger (`migrate/example/`); plan file settled as `waves.tsv`.
 - 2026-09-28 — Phase 3 redesigned around the operator layer (`migrate/DESIGN.md`); SBX sized to 6+6; lock service merged into the queue Redis.
