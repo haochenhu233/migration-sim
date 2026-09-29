@@ -117,6 +117,8 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 
 ## Decisions
 
+- 2026-10-01 — **Migration is a per-service substitution; the binding graph is preserved automatically** (each Redis → exactly one Valkey, every (app,Redis) → (app,Valkey)). Graph still matters operationally: waves built from connected components so a multi-bound app restarts once; cross-team shared services need a joint window; verify per app over all its connections.
+
 - 2026-09-20 — steps agreed: 0 prereqs → 1 apps+verifier+baseline → 2 population → 3 script+scenarios → 4 verify+report. Verifier is built with the apps (baseline before migration), not after.
 - 2026-09-20 — scale via instances + pools (~25 apps → 100+ connections), not 100 distinct apps; population mirrors real proportions.
 - 2026-09-20 — usage pattern = a mode of one Python probe (all cf-bind); access-pattern variants only in cache mode; Spring + .NET for real-stack fidelity.

@@ -89,7 +89,7 @@ has a factual answer.
 
 | command | does |
 |---|---|
-| `plan <merged_report.csv>` | writes `waves.tsv` (`wave, service, redis_si_guid, valkey_plan, app, app_guid, flags`): services per wave (operator edits), apps per service (from the report), pipeline pairs kept in one wave, hazard apps flagged, data-store services flagged for copy |
+| `plan <merged_report.csv>` | writes `waves.tsv`; **groups by connected component** of the binding graph (an app and every service it is bound to travel in one wave, so a multi-bound app restarts once) and reports services that span several teams (joint window needed); (`wave, service, redis_si_guid, valkey_plan, app, app_guid, flags`): services per wave (operator edits), apps per service (from the report), pipeline pairs kept in one wave, hazard apps flagged, data-store services flagged for copy |
 | `preflight --wave N` | lock free · classic plan visible · IP/quota headroom · every app running · no pending service operations · hazard apps' env fixed · pipeline pairs complete → prints the **blast radius** (services / apps / teams) |
 | `dry-run --wave N` | every command in order, with the rollback row after each |
 | `apply --wave N [--service Y] [--app X]` | executes; idempotent via the ledger; `STOP` file honored between steps; Ctrl-C finishes the current step, records it, exits |
@@ -142,6 +142,10 @@ Suggested tmux layout: status (top) · `tail -f commands.log` (bottom-left) · s
 (bottom-right). Dependencies: bash, jq, column, tput — nothing else.
 
 ## 6. Restart semantics (small detail, big UX difference)
+
+- **One restart per app per wave.** For an app bound to k services in the wave: bind all k
+  Valkeys, unbind all k Redis, then restart once. The ledger still records one event per
+  (service, app) step; the restart event is shared (same `ms`, note `shared restart`).
 
 - ≥2 instances → `cf restart --strategy rolling`: the app never fully stops; the poller shows it.
 - 1 instance → plain restart; the poller measures the gap. Both recorded with `ms`.
