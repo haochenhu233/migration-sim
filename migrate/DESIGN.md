@@ -73,6 +73,16 @@ Per-service state = the "lowest" state among its apps, plus the service-level st
 
 ## 3. Rollback, defined per step
 
+**Scope rule:** the unit of rollback is the **service** (all its apps), because apps sharing a
+Redis may share data through it; rolling back one app alone would split the group between
+Redis and Valkey. `rollback --app X` exists as an explicit override for apps known to be
+independent. Rollback of one service does not touch an app's other connections (an app on
+R1-rolled-back and V2 is fine — connections are independent), except for declared pipeline
+groups, which roll back together. Writes made to the Valkey between cutover and rollback are
+lost for that service (cache: irrelevant; store: the copy discipline keeps Redis authoritative
+until `confirm`, and rollback happens before `confirm` by construction).
+
+
 | app is at | rollback does | data risk |
 |---|---|---|
 | BOUND-V | unbind Valkey | none |
@@ -90,14 +100,14 @@ has a factual answer.
 | command | does |
 |---|---|
 | `plan <merged_report.csv>` | writes `waves.tsv`; **groups by connected component** of the binding graph (an app and every service it is bound to travel in one wave, so a multi-bound app restarts once) and reports services that span several teams (joint window needed); (`wave, service, redis_si_guid, valkey_plan, app, app_guid, flags`): services per wave (operator edits), apps per service (from the report), pipeline pairs kept in one wave, hazard apps flagged, data-store services flagged for copy |
-| `preflight --wave N` | lock free · classic plan visible · IP/quota headroom · every app running · no pending service operations · hazard apps' env fixed · pipeline pairs complete → prints the **blast radius** (services / apps / teams) |
+| `preflight --wave N` | lock free · classic plan visible · **IP headroom = free IPs on the services network ≥ Valkeys to create in the wave (+ the whole plan for a project-level preflight)** · quota · every app running · no pending service operations · hazard apps' env fixed · pipeline pairs complete → prints the **blast radius** (services / apps / teams) |
 | `dry-run --wave N` | every command in order, with the rollback row after each |
 | `apply --wave N [--service Y] [--app X]` | executes; idempotent via the ledger; `STOP` file honored between steps; Ctrl-C finishes the current step, records it, exits |
 | `status [--wave N]` / `watch` | the dashboard (§5) |
 | `verify --wave N` | app health · connection census on the Valkey side (discovery worker) · `/check` for sim apps · key counts where data was copied · **"bound to Redis again?"** drift check |
 | `rollback --app X` / `--service Y` / `--wave N` | per §3, reason recorded |
 | `confirm --service Y --by <team>` | app-team sign-off; starts the standby clock |
-| `retire --service Y` | **not part of the migration** — old Redis stays on standby indefinitely; retire only on explicit request, and even then: confirm + grace + asks twice; the only irreversible step |
+| `retire --service Y` | after the client's full confirmation, ~1–2 weeks post-cutover (standby grace default **14 days**); refuses before `confirm` + grace; asks twice; the only irreversible step |
 | `report --wave N` | evidence pack from the ledger (markdown): per app switched/verified/downtime, timeline, incidents, rollbacks, operators |
 
 ## 5. Dashboard — two levels
@@ -161,13 +171,22 @@ Suggested tmux layout: status (top) · `tail -f commands.log` (bottom-left) · s
 - **Replicate sharing.** If the Redis was shared into other spaces (`cf curl
   /v3/service_instances/<guid>/relationships/shared_spaces` — the cross-space consumers in the
   report), share the Valkey into the same spaces before binding those apps.
-- **Name swap after cutover.** The Valkey is created as `<redis-name>-valkey` (two instances
-  can't share a name in one space). Once every app of the service is verified:
-  `cf rename-service <name> <name>-redis-standby` then `cf rename-service <name>-valkey <name>`.
-  Renames don't touch existing bindings, and afterwards the teams' manifests and pipelines
-  (`services: [<name>]`) resolve to the **Valkey** — without the swap, the next `cf push` with
-  an old manifest silently re-binds the still-existing Redis (the "drift" accident). The swap
-  is a ledger step (`rename-swap`) and part of the SBX validation.
+- **Naming (decision pending — see the trade-off).** Two workable policies:
+  - **(A) keep the original name on the Valkey** — create as `<name>-valkey`, and at cutover
+    rename Redis → `<name>-redis-standby`, Valkey → `<name>`. Zero team-side change: every
+    manifest/pipeline `services: [<name>]` resolves to the Valkey from then on. Cosmetic cost:
+    a service called `pi-redis-strates` is a Valkey (the offering column in `cf services`
+    says so).
+  - **(B) substituted name** — `redis`→`valkey` case-preserving in the name
+    (`pi-redis-strates` → `pi-valkey-strates`, `AIPPRedisSvc` → `AIPPValkeySvc`; names without
+    "redis" get `-valkey`). Clean naming, but **every team must change the service name in
+    their manifests/pipelines** — the one team-side change this migration would otherwise
+    avoid — and until they do, a `cf push` either silently re-binds the old Redis (if it still
+    has its name) or fails loudly ("service instance not found") after it is renamed/retired.
+  - Either way: **rename the old Redis to `<name>-redis-standby` at cutover.** Its bindings are
+    unaffected, and a stale manifest then fails loudly instead of silently re-binding the old
+    Redis (the drift accident). With (B) the academy's ask list gains a 6th item ("update the
+    service name in your manifest during the standby weeks").
 
 ## 6a. Ordering policy
 
@@ -200,7 +219,7 @@ and lets us prove L1–L3 detect what `/check` sees.
 
 | accident | tool behaviour |
 |---|---|
-| verify fails (can't connect, WRONGPASS from a wrong plan, cold-cache latency misread) | **auto-rollback that app** (rebind Redis + restart, then *verify the rollback*: app connected to Redis again → `rollback-verified`); the app team sees a working app, the ledger sees an incident. The wave **continues** with other apps (they're independent) and the service is marked ATTENTION, never retired. **Circuit breaker:** 3 failures in a row ⇒ systemic (wrong plan family, broker down) ⇒ wave pauses for the operator |
+| verify fails (can't connect, WRONGPASS from a wrong plan, cold-cache latency misread) | **auto-rollback the whole SERVICE** (every app of that Redis already moved is rebound to it and restarted; apps not yet moved are skipped) — apps sharing a Redis may share data through it (queue, sessions, shared cache), so a partial rollback would split the group across two stores; the safe unit of rollback is the service, per-app rollback only as an explicit operator override (`--scope app`). Declared pipeline groups roll back as a group. Then (rebind Redis + restart, then *verify the rollback*: app connected to Redis again → `rollback-verified`); the app team sees a working app, the ledger sees an incident. The wave **continues** with other apps (they're independent) and the service is marked ATTENTION, never retired. **Circuit breaker:** 3 failures in a row ⇒ systemic (wrong plan family, broker down) ⇒ wave pauses for the operator |
 | operator Ctrl-C / SSH drop mid-step | current step completes and is recorded; `apply` resumes from the ledger |
 | CF API 429/5xx, broker bind timeout, Valkey create fails | bounded retries with backoff → app marked `blocked`, never skipped silently |
 | team pipeline re-pushes during the window, rebinding old Redis | `verify` reports **drift** as an incident, not success |

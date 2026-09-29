@@ -96,6 +96,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] `confirm` / `retire` (confirm + grace + double prompt)
 - [ ] `report --wave N` evidence pack
 - [ ] data copy for store-mode services (RDB snapshot / brief sync) + key-count verification
+- [ ] rollback scope = service (auto-rollback re-binds every moved app of the service); `--scope app` override
 - [ ] handles pinned-env apps (refuse in preflight), UPS, service keys (new key), multi-instance, Windows, TLS consumers (TLS plan + cert trust)
 
 **3c. Scenarios (SBX, 6 Redis + 6 Valkey, waves of two)**
@@ -117,6 +118,9 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 ---
 
 ## Decisions
+
+- 2026-10-03 — **Retirement happens** ~1–2 weeks after full confirmation (grace default 14 d), never automatically. **IP headroom is a preflight check**, not an assumption. **Rollback unit = the service** (all its apps; pipeline groups together); per-app only as explicit override.
+- 2026-10-03 — Valkey naming: **decision pending** — (A) keep original name on the Valkey via rename swap (zero team change) vs (B) `redis`→`valkey` substitution (clean names, every team edits its manifest). Either way the old Redis is renamed `-redis-standby` at cutover so stale manifests fail loudly instead of re-binding it.
 
 - 2026-10-02 — **Weekend maintenance window, not per-team windows.** Teams are informed; they deal with their apps' restart inside it. Waves are grouped technically (connected components, size), not by team scheduling.
 - 2026-10-02 — **Replacement Valkey in the same org+space as the Redis**, sharing replicated, created as `<name>-valkey`, then **name-swapped** after verification (Redis → `<name>-redis-standby`, Valkey → `<name>`) so team manifests/pipelines resolve to the Valkey. Validate the swap in SBX.
