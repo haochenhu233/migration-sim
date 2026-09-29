@@ -152,6 +152,33 @@ Suggested tmux layout: status (top) · `tail -f commands.log` (bottom-left) · s
 - **Soak timer** after restart before `verify` counts (default 30 s): lazy-reconnecting pools
   look broken for a moment and must not trigger a rollback.
 
+## 6a. Ordering policy
+
+Ordering between services is honored **only when a team declared it** (response-form Q3) and
+only within one wave. Otherwise the default is **no ordering**: the tool binds, unbinds and
+restarts each app once per wave, in any order. Teams that need a specific sequence and did not
+declare it in time handle it themselves in their window (e.g. by scaling/stopping a consumer
+first). This keeps the wave logic simple and puts the knowledge where it lives.
+
+## 6b. Verification for REAL apps (no `/check`)
+
+`/check` exists only on the sim apps. For client apps, `verify` uses platform-side evidence
+only — nothing is installed in or required from the app. Levels, all recorded per connection:
+
+| level | check | source | verdict it gives |
+|---|---|---|---|
+| L1 platform | binding is to the Valkey and **not** to the old Redis; all instances `running`; no crash events since the restart; health check passing | `cf curl` bindings, `/v3/processes/:guid/stats`, `cf events` | the migration steps *took* and the app came back |
+| L2 network | the app's containers hold established connections **to the Valkey IP** and **none to the old Redis IP** after the soak | the discovery census worker on the Valkey VM + cell attribution (same code as the scanner) | the app actually *talks* to Valkey; a pinned address or stale pool shows up as a Redis connection |
+| L3 server-side | on the Valkey: `CLIENT LIST` shows the app's cell IP with the expected user; `ACL LOG` has no auth failures from it; `INFO stats` rejected_connections unchanged | Valkey CLI (ACL is available on Valkey, unlike hardened Redis) | auth works — a password-only app on a `-secure` plan is caught here (`WRONGPASS` in `ACL LOG`) without touching the app |
+| L4 app signal | recent app logs grep for `NOAUTH|WRONGPASS|ECONNREFUSED|timed out|redis` errors in the soak window; optionally a **team-declared health URL** (response form) returns 200 | `cf logs --recent`, HTTP | the app itself is not complaining |
+| L5 data | where data was copied: `DBSIZE`/key counts Redis vs Valkey, sample-key reads | Redis + Valkey CLI | the copy is complete |
+
+**verified** = L1–L3 pass (L4 when available, L5 when applicable). The team's `confirm` stays
+the final human gate; verification is what lets us say "from the platform side it is good"
+with evidence in the ledger (`note` carries the L2/L3 facts, e.g. `census: 2 conns on valkey,
+0 on redis; ACL LOG clean`). The sim apps' `/check` is the stand-in for L4/L5 during rehearsal
+and lets us prove L1–L3 detect what `/check` sees.
+
 ## 7. Accident matrix — designed for, then rehearsed (Phase 3, S3)
 
 | accident | tool behaviour |

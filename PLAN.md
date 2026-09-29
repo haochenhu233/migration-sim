@@ -91,7 +91,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] `preflight --wave N` incl. blast-radius line; lock file
 - [ ] `dry-run --wave N` with rollback row per step
 - [ ] `apply` — idempotent, ledger-driven, STOP file, Ctrl-C safe, rolling restart for ≥2 instances, soak timer
-- [ ] `verify` — app health · Valkey-side census (reuse discovery worker) · `/check` · key counts · drift check
+- [ ] `verify` — L1 platform (bindings, running, crashes) · L2 network (census on Valkey: conns to Valkey, none to Redis) · L3 server-side (CLIENT LIST / ACL LOG on Valkey) · L4 logs + optional team health URL · L5 data counts; `/check` only for sim apps (DESIGN §6b)
 - [ ] `rollback --app/--service/--wave` per the table
 - [ ] `confirm` / `retire` (confirm + grace + double prompt)
 - [ ] `report --wave N` evidence pack
@@ -116,6 +116,9 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 ---
 
 ## Decisions
+
+- 2026-10-01 — **No ordering by default.** Ordering honored only when a team declared it on the form, within one wave; otherwise restart once per app per wave in any order — undeclared ordering needs are the team's to handle in their window.
+- 2026-10-01 — **Real-app verification is platform-side only** (L1 bindings/health, L2 connection census on the Valkey VM, L3 CLIENT LIST/ACL LOG on Valkey, L4 logs/health URL, L5 data counts); `/check` is sim-only.
 
 - 2026-10-01 — **Migration is a per-service substitution; the binding graph is preserved automatically** (each Redis → exactly one Valkey, every (app,Redis) → (app,Valkey)). Graph still matters operationally: waves built from connected components so a multi-bound app restarts once; cross-team shared services need a joint window; verify per app over all its connections.
 
