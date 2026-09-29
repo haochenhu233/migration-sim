@@ -97,7 +97,7 @@ has a factual answer.
 | `verify --wave N` | app health · connection census on the Valkey side (discovery worker) · `/check` for sim apps · key counts where data was copied · **"bound to Redis again?"** drift check |
 | `rollback --app X` / `--service Y` / `--wave N` | per §3, reason recorded |
 | `confirm --service Y --by <team>` | app-team sign-off; starts the standby clock |
-| `retire --service Y` | refuses without confirm + grace; asks twice; the only irreversible step |
+| `retire --service Y` | **not part of the migration** — old Redis stays on standby indefinitely; retire only on explicit request, and even then: confirm + grace + asks twice; the only irreversible step |
 | `report --wave N` | evidence pack from the ledger (markdown): per app switched/verified/downtime, timeline, incidents, rollbacks, operators |
 
 ## 5. Dashboard — two levels
@@ -152,6 +152,23 @@ Suggested tmux layout: status (top) · `tail -f commands.log` (bottom-left) · s
 - **Soak timer** after restart before `verify` counts (default 30 s): lazy-reconnecting pools
   look broken for a moment and must not trigger a rollback.
 
+## 6c. Placement, sharing and naming of the replacement Valkey
+
+- **Same org + space as the Redis it replaces** — always. `plan` takes `redis_service_org` /
+  `redis_service_space` from the report; `apply` targets that space for `create-service` and
+  for every bind (an app can only bind a service instance in its own space or one shared into
+  it).
+- **Replicate sharing.** If the Redis was shared into other spaces (`cf curl
+  /v3/service_instances/<guid>/relationships/shared_spaces` — the cross-space consumers in the
+  report), share the Valkey into the same spaces before binding those apps.
+- **Name swap after cutover.** The Valkey is created as `<redis-name>-valkey` (two instances
+  can't share a name in one space). Once every app of the service is verified:
+  `cf rename-service <name> <name>-redis-standby` then `cf rename-service <name>-valkey <name>`.
+  Renames don't touch existing bindings, and afterwards the teams' manifests and pipelines
+  (`services: [<name>]`) resolve to the **Valkey** — without the swap, the next `cf push` with
+  an old manifest silently re-binds the still-existing Redis (the "drift" accident). The swap
+  is a ledger step (`rename-swap`) and part of the SBX validation.
+
 ## 6a. Ordering policy
 
 Ordering between services is honored **only when a team declared it** (response-form Q3) and
@@ -173,7 +190,7 @@ only — nothing is installed in or required from the app. Levels, all recorded 
 | L4 app signal | recent app logs grep for `NOAUTH|WRONGPASS|ECONNREFUSED|timed out|redis` errors in the soak window; optionally a **team-declared health URL** (response form) returns 200 | `cf logs --recent`, HTTP | the app itself is not complaining |
 | L5 data | where data was copied: `DBSIZE`/key counts Redis vs Valkey, sample-key reads | Redis + Valkey CLI | the copy is complete |
 
-**verified** = L1–L3 pass (L4 when available, L5 when applicable). The team's `confirm` stays
+**verified** = L1–L3 pass. L4/L5 are usually unavailable for client apps and are optional extras, never gates. The team's `confirm` stays
 the final human gate; verification is what lets us say "from the platform side it is good"
 with evidence in the ledger (`note` carries the L2/L3 facts, e.g. `census: 2 conns on valkey,
 0 on redis; ACL LOG clean`). The sim apps' `/check` is the stand-in for L4/L5 during rehearsal

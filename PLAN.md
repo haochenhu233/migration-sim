@@ -105,6 +105,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] S4 secure-plan variant: `sim-password-only` + `sim-username-aware` → WRONGPASS vs OK captured
 - [ ] S5 pipeline ordering: wrong order once (prove the break), then correct
 - [ ] S6 TLS consumer onto a TLS-enabled Valkey plan
+- [ ] S7 name swap: rename Redis → `-redis-standby`, Valkey → original name; then `cf push` an app with its ORIGINAL manifest (`services: [<name>]`) and prove it binds the Valkey, not the Redis
 
 ## Phase 4 — verification & report
 
@@ -116,6 +117,10 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 ---
 
 ## Decisions
+
+- 2026-10-02 — **Weekend maintenance window, not per-team windows.** Teams are informed; they deal with their apps' restart inside it. Waves are grouped technically (connected components, size), not by team scheduling.
+- 2026-10-02 — **Replacement Valkey in the same org+space as the Redis**, sharing replicated, created as `<name>-valkey`, then **name-swapped** after verification (Redis → `<name>-redis-standby`, Valkey → `<name>`) so team manifests/pipelines resolve to the Valkey. Validate the swap in SBX.
+- 2026-10-02 — **No retiring** unless explicitly asked; old Redis stays on standby. Verification gate = L1–L3 only (L4/L5 optional).
 
 - 2026-10-01 — **No ordering by default.** Ordering honored only when a team declared it on the form, within one wave; otherwise restart once per app per wave in any order — undeclared ordering needs are the team's to handle in their window.
 - 2026-10-01 — **Real-app verification is platform-side only** (L1 bindings/health, L2 connection census on the Valkey VM, L3 CLIENT LIST/ACL LOG on Valkey, L4 logs/health URL, L5 data counts); `/check` is sim-only.
