@@ -16,4 +16,6 @@ while read -r name url; do
   fi
 done < "$LIST" >> "$OUT"
 echo "snapshot: $(wc -l < "$OUT" | tr -d ' ') app(s) -> $OUT"
-jq -r '[._app, (.mode//"-"), (.endpoint//"-"), (.server//"-"), (.connected|tostring), (.auth_user//"-")] | @tsv' "$OUT" | column -t
+{ printf 'APP\tMODE\tENDPOINT\tSERVER\tCONNECTED\tAUTH_USER\n'
+  jq -r '[._app, (.mode//"-"), (.endpoint//"-"), (.server//"-"), (.connected|tostring), (.auth_user//"-")] | @tsv' "$OUT"; } | column -t -s$'\t'
+echo "(AUTH_USER = ACL WHOAMI: n/a on hardened Redis is expected; becomes 'default' or the binding user on Valkey)"

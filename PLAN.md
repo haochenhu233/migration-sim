@@ -54,21 +54,21 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 
 | app | access | usage | proves | status |
 |---|---|---|---|---|
-| `sim-cache-bound` | cf-bind | cache | happy path: endpoint switch, `server=valkey`, cache refills | [ ] |
-| `sim-session-bound` | cf-bind | session | session continuity (or clean re-login) across cutover | [ ] |
-| `sim-store-bound` | cf-bind | store | data-copy correctness via checksum | [ ] |
-| `sim-producer` / `sim-consumer` | cf-bind (same Redis) | queue | gapless sequence: lost/duplicated messages counted | [ ] |
-| `sim-lock` | cf-bind | lock | double-execution count during switch | [ ] |
-| `sim-bound-pinned` | cf-bind + pinned `REDIS_HOST` | cache | THE hazard: still reports the OLD endpoint after migration | [ ] |
-| `sim-static-env` | env var only | cache | manual-update path | [ ] |
-| `sim-ups` | user-provided service | cache | UPS update + restage path | [ ] |
+| `sim-cache-bound` | cf-bind | cache | happy path: endpoint switch, `server=valkey`, cache refills | [x] up in SBX |
+| `sim-session-bound` | cf-bind | session | session continuity (or clean re-login) across cutover | [x] up in SBX |
+| `sim-store-bound` | cf-bind | store | data-copy correctness via checksum | [x] up in SBX |
+| `sim-producer` / `sim-consumer` | cf-bind (same Redis) | queue | gapless sequence: lost/duplicated messages counted | [x] up in SBX |
+| `sim-lock` | cf-bind | lock | double-execution count during switch | [x] up in SBX |
+| `sim-bound-pinned` | cf-bind + pinned `REDIS_HOST` | cache | THE hazard: still reports the OLD endpoint after migration | [x] up in SBX |
+| `sim-static-env` | env var only | cache | manual-update path | [x] up in SBX |
+| `sim-ups` | user-provided service | cache | UPS update + restage path | [x] up in SBX |
 | `sim-keyuser` | service key (task/script) | — | keys don't migrate | [ ] |
-| `sim-password-only` | cf-bind, `AUTH <pw>` | cache | classic OK / secure WRONGPASS — the plan-decision evidence | [ ] |
-| `sim-username-aware` | cf-bind, uses `username` | cache | secure opt-in path, `auth_user` = binding id | [ ] |
-| `sim-pipeline` | bound to Redis A **and** B, moves data A→B | store | ordering: breaks if A/B migrate in wrong order | [ ] |
+| `sim-password-only` | cf-bind, `AUTH <pw>` | cache | classic OK / secure WRONGPASS — the plan-decision evidence | [x] up in SBX |
+| `sim-username-aware` | cf-bind, uses `username` | cache | secure opt-in path, `auth_user` = binding id | [x] up in SBX |
+| `sim-pipeline` | bound to Redis A **and** B, moves data A→B | store | ordering: breaks if A/B migrate in wrong order | [x] up in SBX |
 | `sim-batch` | cf-bind, connects on schedule (CF task) | store | idle ≠ exempt: first reconnect lands on Valkey | [ ] |
 | `sim-spring-*` | cf-bind | cache + session | real Java stack | [ ] |
-| `sim-win-bound` | cf-bind, Windows | cache | same story on Windows | [ ] |
+| `sim-win-bound` | cf-bind, Windows | cache | same story on Windows | [x] up in SBX |
 | `sim-tls-bound` | cf-bind, connects on `tls_port` (16379) | cache | TLS consumers: Valkey target must be a TLS plan + cert trusted (found in NP: a real app uses 16379) | [ ] |
 
 ## Phase 2 — realistic population (~100+ live connections)
@@ -152,7 +152,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 
 ## Log
 
-- 2026-09-30 — **Population live in SBX.** Six core Go probe apps up, baseline captured (`verify/data/*-baseline.jsonl`). Next: access variants + Windows + TLS apps, Valkey twins, first migration (cache).
+- 2026-09-30 — **Full population live in SBX: 14 apps** (core six + pinned/static-env/UPS/password-only/username-aware/pipeline a+b + Windows), `baseline-all` captured. Six core Go probe apps up, baseline captured (`verify/data/*-baseline.jsonl`). Next: access variants + Windows + TLS apps, Valkey twins, first migration (cache).
 
 - 2026-09-30 — First SBX push of sim-py failed at staging: it named the ONLINE `python_buildpack`; the client runs offline `*_buildpack_system` buildpacks (as with `java_buildpack_system`). All manifests now use `binary_buildpack_system` (sim-py: `python_buildpack_system`). Ported the probe to Go (static binaries, binary_buildpack) -- also yields the Windows app from the same code. Tests green (miniredis).
 
