@@ -35,7 +35,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [x] manifests: `manifests/core.yml` (6 usage apps) + `manifests/access-variants.yml` (pinned, static-env, ups, password-only, username-aware, pipeline a/b); `scripts/create-services.sh`
 - [-] sim-py deployment: SBX has only the ONLINE python buildpack (downloads the runtime at staging; air-gapped -> fails). Kept as reference only.
 - [x] **`apps/sim-go`**: Go port of the probe (same contract + `SIM_TLS`), static binaries `bin/sim-linux` + `bin/sim-windows.exe`, `binary_buildpack` (no downloads); all six modes pass against miniredis; manifests core/access-variants/windows/tls
-- [ ] deployed to SBX; `/check` green against a Redis service
+- [x] deployed to SBX (2026-09-30): six core apps, `/check` green against real Redis — `server=redis`, connected, `auth_user=n/a` (ACL renamed on hardened Redis); credentials carry per-instance BOSH DNS hostnames, not IPs
 
 **1c. Real-stack apps**
 - [ ] `apps/sim-spring` — Spring Boot + Spring Data Redis (Lettuce); `spring.redis.username` handling; optional Spring Cloud Config Server wiring (hidden-config case)
@@ -151,6 +151,8 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] how many real consumers use the TLS port (16379)? (census has the port -- `awk -F'\t' '$4==16379' backward/02_conns.tsv`) -> sizes the TLS-plan requirement for Valkey
 
 ## Log
+
+- 2026-09-30 — **Population live in SBX.** Six core Go probe apps up, baseline captured (`verify/data/*-baseline.jsonl`). Next: access variants + Windows + TLS apps, Valkey twins, first migration (cache).
 
 - 2026-09-30 — First SBX push of sim-py failed at staging: it named the ONLINE `python_buildpack`; the client runs offline `*_buildpack_system` buildpacks (as with `java_buildpack_system`). All manifests now use `binary_buildpack_system` (sim-py: `python_buildpack_system`). Ported the probe to Go (static binaries, binary_buildpack) -- also yields the Windows app from the same code. Tests green (miniredis).
 
