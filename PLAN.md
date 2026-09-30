@@ -152,7 +152,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 
 ## Log
 
-- 2026-09-30 — First SBX push of sim-py failed at staging: online python buildpack, no egress. Ported the probe to Go (static binaries, binary_buildpack) -- also yields the Windows app from the same code. Tests green (miniredis).
+- 2026-09-30 — First SBX push of sim-py failed at staging: it named the ONLINE `python_buildpack`; the client runs offline `*_buildpack_system` buildpacks (as with `java_buildpack_system`). All manifests now use `binary_buildpack_system` (sim-py: `python_buildpack_system`). Ported the probe to Go (static binaries, binary_buildpack) -- also yields the Windows app from the same code. Tests green (miniredis).
 
 - 2026-09-30 — **Switching from tooling to theory validation.** Operator-layer work paused after
   `status` (next when resumed: `plan` → `preflight` → `dry-run` → `apply`). Written for the SBX

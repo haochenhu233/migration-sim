@@ -15,6 +15,7 @@ keep the old address, password-only apps break on `-secure` plans and work on `-
 - [ ] patched broker deployed (classic-plan unbind works)
 - [ ] 12 free IPs on the services network; quota for ~15 apps × 1–2 instances
 - [ ] `cf target -o <sim-org> -s <sim-space>`
+- [ ] **buildpacks are the offline `_system` ones** (`cf buildpacks`): manifests use `binary_buildpack_system`; a plain `binary_buildpack`/`python_buildpack` name is the ONLINE variant and fails at staging (no egress). Confirm the Windows binary buildpack's exact name.
 
 ## 1. Deploy the population
 

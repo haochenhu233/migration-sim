@@ -1,11 +1,13 @@
 # Windows-stack probe -- the SAME Go code, cross-compiled. Deploy from apps/sim-go/:
+# Buildpack: the client uses OFFLINE "_system" buildpacks (air-gapped); the Windows binary
+# buildpack may carry its own name -- check `cf buildpacks` (stack column = windows) and adjust.
 #   cf push -f manifests/windows.yml
 ---
 applications:
 - name: sim-win-bound
   path: .
   stack: windows
-  buildpacks: [binary_buildpack]
+  buildpacks: [binary_buildpack_system]
   command: .\bin\sim-windows.exe
   memory: 256M
   disk_quota: 1G

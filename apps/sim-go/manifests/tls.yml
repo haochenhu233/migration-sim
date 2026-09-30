@@ -3,7 +3,7 @@
 applications:
 - name: sim-tls-bound
   path: .
-  buildpacks: [binary_buildpack]
+  buildpacks: [binary_buildpack_system]
   command: ./bin/sim-linux
   memory: 64M
   disk_quota: 256M

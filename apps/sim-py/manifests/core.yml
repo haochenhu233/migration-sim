@@ -4,7 +4,7 @@
 ---
 defaults: &defaults
   path: .
-  buildpacks: [python_buildpack]
+  buildpacks: [python_buildpack_system]
   memory: 128M
   disk_quota: 512M
   health-check-type: http
