@@ -29,6 +29,8 @@ cd apps/sim-go && cf push -f manifests/windows.yml && cd ../..     # Windows sta
 bash verify/apps-list.sh
 bash verify/snapshot.sh baseline                            # every /check green, server=redis
 ```
+If a push fails with `./bin/sim-linux: No such file`, check `Downloaded droplet (…)` in the log: a ~2K droplet means the binary wasn't uploaded (manifest `path` is relative to the manifest file; the shipped manifests use `path: ..`). A healthy droplet is ~3 MB.
+
 Expect in the baseline: `connected=true`, `server=redis`, `auth_user=n/a` (hardened Redis),
 store `checksum_ok=true`, producer/consumer `gaps=0`, lock `double_exec=0`.
 

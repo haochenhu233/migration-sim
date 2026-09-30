@@ -4,7 +4,7 @@
 # sim-redis-cache (these apps deliberately copy credentials -- that IS the scenario).
 ---
 defaults: &defaults
-  path: .
+  path: ..          # relative to the MANIFEST file -> the app dir (apps/sim-go)
   buildpacks: [python_buildpack_system]
   memory: 128M
   disk_quota: 512M

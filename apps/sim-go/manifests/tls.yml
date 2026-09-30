@@ -2,9 +2,9 @@
 ---
 applications:
 - name: sim-tls-bound
-  path: .
+  path: ..          # relative to the MANIFEST file -> the app dir (apps/sim-go)
   buildpacks: [binary_buildpack_system]
-  command: ./bin/sim-linux
+  command: chmod +x bin/sim-linux && ./bin/sim-linux
   memory: 64M
   disk_quota: 256M
   instances: 1

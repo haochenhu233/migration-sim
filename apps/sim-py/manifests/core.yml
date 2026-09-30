@@ -3,7 +3,7 @@
 # Services referenced must exist first -- see ../../scripts/create-services.sh
 ---
 defaults: &defaults
-  path: .
+  path: ..          # relative to the MANIFEST file -> the app dir (apps/sim-go)
   buildpacks: [python_buildpack_system]
   memory: 128M
   disk_quota: 512M

@@ -3,14 +3,14 @@
 # Services referenced must exist first -- see ../../scripts/create-services.sh
 ---
 defaults: &defaults
-  path: .
+  path: ..          # relative to the MANIFEST file -> the app dir (apps/sim-go)
   buildpacks: [binary_buildpack_system]
   memory: 64M
   disk_quota: 512M
   health-check-type: http
   health-check-http-endpoint: /healthz
   instances: 2
-  command: ./bin/sim-linux
+  command: chmod +x bin/sim-linux && ./bin/sim-linux
 
 applications:
 - name: sim-cache-bound

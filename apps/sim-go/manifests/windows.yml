@@ -5,7 +5,7 @@
 ---
 applications:
 - name: sim-win-bound
-  path: .
+  path: ..          # relative to the MANIFEST file -> the app dir (apps/sim-go)
   stack: windows
   buildpacks: [binary_buildpack_system]
   command: .\bin\sim-windows.exe
