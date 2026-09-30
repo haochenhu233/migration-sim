@@ -33,11 +33,13 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [x] self-generated ground truth: deterministic dataset + checksum (store), Redis-counter sequence with gap/duplicate detection (consumer), deterministic session token (session), per-window lock + per-instance run log (lock), canary key at first start
 - [x] command-family smoke in `/check` (string, hash, list, zset, eval, multi, stream, pubsub)
 - [x] manifests: `manifests/core.yml` (6 usage apps) + `manifests/access-variants.yml` (pinned, static-env, ups, password-only, username-aware, pipeline a/b); `scripts/create-services.sh`
-- [ ] deployed to SBX; `/check` green against a Redis service (real `server`/`auth_user`/`eval` values confirmed — fakeredis can't)
+- [-] sim-py deployment: SBX has only the ONLINE python buildpack (downloads the runtime at staging; air-gapped -> fails). Kept as reference only.
+- [x] **`apps/sim-go`**: Go port of the probe (same contract + `SIM_TLS`), static binaries `bin/sim-linux` + `bin/sim-windows.exe`, `binary_buildpack` (no downloads); all six modes pass against miniredis; manifests core/access-variants/windows/tls
+- [ ] deployed to SBX; `/check` green against a Redis service
 
 **1c. Real-stack apps**
 - [ ] `apps/sim-spring` — Spring Boot + Spring Data Redis (Lettuce); `spring.redis.username` handling; optional Spring Cloud Config Server wiring (hidden-config case)
-- [ ] `apps/sim-win` — .NET + StackExchange.Redis on the Windows stack
+- [x] `apps/sim-win` → covered by `sim-go/bin/sim-windows.exe` (`manifests/windows.yml`); a .NET/StackExchange.Redis variant stays optional for client-stack fidelity
 - [ ] both implement the same `/check` contract
 
 **1d. The verifier (`verify/`)**
@@ -149,6 +151,8 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] how many real consumers use the TLS port (16379)? (census has the port -- `awk -F'\t' '$4==16379' backward/02_conns.tsv`) -> sizes the TLS-plan requirement for Valkey
 
 ## Log
+
+- 2026-09-30 — First SBX push of sim-py failed at staging: online python buildpack, no egress. Ported the probe to Go (static binaries, binary_buildpack) -- also yields the Windows app from the same code. Tests green (miniredis).
 
 - 2026-09-30 — **Switching from tooling to theory validation.** Operator-layer work paused after
   `status` (next when resumed: `plan` → `preflight` → `dry-run` → `apply`). Written for the SBX

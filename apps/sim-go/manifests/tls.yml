@@ -1,0 +1,14 @@
+# TLS consumer -- connects on the service's tls_port (S6). Needs a TLS-enabled plan/instance.
+---
+applications:
+- name: sim-tls-bound
+  path: .
+  buildpacks: [binary_buildpack]
+  command: ./bin/sim-linux
+  memory: 64M
+  disk_quota: 256M
+  instances: 1
+  health-check-type: http
+  health-check-http-endpoint: /healthz
+  services: [sim-redis-cache]
+  env: { SIM_MODE: cache, SIM_TLS: "1", SIM_EXPECTS: tls-consumer }

@@ -1,0 +1,16 @@
+# Windows-stack probe -- the SAME Go code, cross-compiled. Deploy from apps/sim-go/:
+#   cf push -f manifests/windows.yml
+---
+applications:
+- name: sim-win-bound
+  path: .
+  stack: windows
+  buildpacks: [binary_buildpack]
+  command: .\bin\sim-windows.exe
+  memory: 256M
+  disk_quota: 1G
+  instances: 1
+  health-check-type: http
+  health-check-http-endpoint: /healthz
+  services: [sim-redis-cache]
+  env: { SIM_MODE: cache, SIM_EXPECTS: cf-bind-windows }

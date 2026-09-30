@@ -20,10 +20,11 @@ keep the old address, password-only apps break on `-secure` plans and work on `-
 
 ```bash
 bash scripts/create-services.sh redis cache-small          # 6 Redis: cache, session, store, queue, pipe-a, pipe-b
-cd apps/sim-py && cf push -f manifests/core.yml && cd ../..  # cache, session, store, producer, consumer, lock
+cd apps/sim-go && cf push -f manifests/core.yml && cd ../..  # cache, session, store, producer, consumer, lock (static Go binary, binary_buildpack: no downloads)
 # access variants: fill the <REDIS-IP>/<PASSWORD> placeholders first (cf service-key sim-redis-cache k; cf service-key sim-redis-cache k)
 cf cups sim-ups-redis -p '{"host":"<ip>","port":6379,"password":"<pw>"}'
-cd apps/sim-py && cf push -f manifests/access-variants.yml && cd ../..
+cd apps/sim-go && cf push -f manifests/access-variants.yml && cd ../..
+cd apps/sim-go && cf push -f manifests/windows.yml && cd ../..     # Windows stack, same binary code
 bash verify/apps-list.sh
 bash verify/snapshot.sh baseline                            # every /check green, server=redis
 ```

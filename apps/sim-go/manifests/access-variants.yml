@@ -1,0 +1,67 @@
+# Access-pattern variants -- all cache mode; each one is a migration risk on purpose.
+# Deploy:  cf push -f manifests/access-variants.yml   (from apps/sim-go/)
+# Before pushing, fill in the <REDIS-IP>/<PASSWORD> placeholders from `cf service-key` of
+# sim-redis-cache (these apps deliberately copy credentials -- that IS the scenario).
+---
+defaults: &defaults
+  path: .
+  buildpacks: [binary_buildpack]
+  memory: 64M
+  disk_quota: 512M
+  health-check-type: http
+  health-check-http-endpoint: /healthz
+  instances: 1
+  command: ./bin/sim-linux
+
+applications:
+# THE hazard: bound AND a pinned copy of the address in env -> app keeps using the pinned one
+- name: sim-bound-pinned
+  <<: *defaults
+  services: [sim-redis-cache]
+  env:
+    SIM_MODE: cache
+    SIM_SOURCE: env            # ignores VCAP, uses the pinned vars below
+    SIM_EXPECTS: pinned-hazard
+    REDIS_HOST: "<REDIS-IP-of-sim-redis-cache>"
+    REDIS_PORT: "6379"
+    REDIS_PASSWORD: "<PASSWORD-of-sim-redis-cache>"
+
+# env-var only, no binding at all
+- name: sim-static-env
+  <<: *defaults
+  env:
+    SIM_MODE: cache
+    SIM_SOURCE: env
+    SIM_EXPECTS: static-ref
+    REDIS_HOST: "<REDIS-IP-of-sim-redis-cache>"
+    REDIS_PORT: "6379"
+    REDIS_PASSWORD: "<PASSWORD-of-sim-redis-cache>"
+
+# user-provided service holding copied credentials (create it first:
+#   cf cups sim-ups-redis -p '{"host":"<ip>","port":6379,"password":"<pw>"}')
+- name: sim-ups
+  <<: *defaults
+  services: [sim-ups-redis]
+  env: { SIM_MODE: cache, SIM_SOURCE: ups, SIM_EXPECTS: ups }
+
+# legacy client: one-arg AUTH, ignores any username -> breaks on -secure plans
+- name: sim-password-only
+  <<: *defaults
+  services: [sim-redis-cache]
+  env: { SIM_MODE: cache, SIM_AUTH: password, SIM_EXPECTS: password-only }
+
+# modern client: sends username when present -> works on both plan families
+- name: sim-username-aware
+  <<: *defaults
+  services: [sim-redis-cache]
+  env: { SIM_MODE: cache, SIM_AUTH: username, SIM_EXPECTS: username-aware }
+
+# bound to TWO services; this instance reads A (SIM_SERVICE_NAME selects the binding)
+- name: sim-pipeline-a
+  <<: *defaults
+  services: [sim-redis-pipe-a, sim-redis-pipe-b]
+  env: { SIM_MODE: producer, SIM_SERVICE_NAME: sim-redis-pipe-a, SIM_EXPECTS: pipeline, SIM_QUEUE: "queue:pipe" }
+- name: sim-pipeline-b
+  <<: *defaults
+  services: [sim-redis-pipe-a, sim-redis-pipe-b]
+  env: { SIM_MODE: consumer, SIM_SERVICE_NAME: sim-redis-pipe-a, SIM_EXPECTS: pipeline, SIM_QUEUE: "queue:pipe" }
