@@ -89,16 +89,72 @@ jq -r 'select(.mode=="store") | [._app, .server, .canary.survived_restart, .cana
 Expect: `redis`, `survived_restart=true` with the ORIGINAL (Sept 30) timestamp,
 `seeded_at_start=0` — nothing was lost on the standby side.
 
-### 8c — migrate WITH a data copy (only if a copy mechanism exists; otherwise skip)
+### 8c — migrate WITH a data copy
 
-Copy first (e.g. `redis-cli --rdb` / `DUMP`+`RESTORE` per key / replication — whatever the
-platform offers), then the four steps, then:
+Three copy methods, best first. Which ones work depends on the Redis hardening
+(`rename-command`), so check that first — on the REDIS VM:
+
 ```bash
+genesis @<env> b -d <redis-store-deployment> ssh           # the sim-redis-store VM
+sudo grep -hiE 'rename-command' /var/vcap/jobs/*/config/* | sort -u   # look for SYNC/PSYNC/MIGRATE/CONFIG
+RC=$(ls /var/vcap/packages/*redis*/bin/redis-cli | head -1); RPW=$(sudo grep -h '^requirepass' /var/vcap/jobs/*/config/*.conf | awk '{print $2}')
+$RC -a "$RPW" --no-auth-warning DBSIZE                      # the number the copy must reproduce
+```
+Hostnames/passwords for both services come from `cf service-key sim-redis-store k` /
+`cf service-key sim-valkey-store k` (classic plan: the password IS the requirepass).
+
+**Method 1 — live replication (preferred: exact, keeps TTLs, no files).** The Valkey becomes
+a temporary replica of the Redis, syncs the full dataset, then is promoted. Needs `PSYNC`
+not renamed on the Redis and `CONFIG` available on the Valkey. Do this BEFORE binding apps
+(a replica is read-only). On the VALKEY VM:
+
+```bash
+genesis @<env> b -d <valkey-store-deployment> ssh
+VC=$(ls /var/vcap/packages/*valkey*/bin/valkey-cli | head -1); VPW=$(sudo grep -h '^requirepass' /var/vcap/jobs/*/config/*.conf | awk '{print $2}')
+$VC -a "$VPW" --no-auth-warning CONFIG SET masterauth '<redis-password>'
+$VC -a "$VPW" --no-auth-warning REPLICAOF <redis-host> 6379
+# wait until synced:
+$VC -a "$VPW" --no-auth-warning INFO replication | grep -E 'master_link_status|master_sync_in_progress'   # up / 0
+$VC -a "$VPW" --no-auth-warning DBSIZE                      # == the Redis DBSIZE
+$VC -a "$VPW" --no-auth-warning REPLICAOF NO ONE            # promote: Valkey is now its own primary, data kept
+$VC -a "$VPW" --no-auth-warning CONFIG SET masterauth ''
+```
+If `master_link_status` stays `down` → the Redis refuses replication (PSYNC renamed) → Method 2.
+
+**Method 2 — server-to-server `MIGRATE` (per key, atomic, source kept with COPY).** Needs
+`MIGRATE` not renamed on the Redis and network Redis VM → Valkey:6379. On the REDIS VM:
+
+```bash
+$RC -a "$RPW" --no-auth-warning --scan \
+ | xargs -r -n 100 sh -c '"$0" -a "$1" --no-auth-warning MIGRATE "$2" 6379 "" 0 5000 COPY REPLACE AUTH "$3" KEYS "$@"' "$RC" "$RPW" <valkey-host> '<valkey-password>'
+$RC -a "$RPW" --no-auth-warning DBSIZE          # source still intact (COPY)
+```
+
+**Method 3 — DUMP/RESTORE through the bastion (always works, slowest; TTLs re-applied).**
+From the bastion with a redis-cli that reaches both hosts:
+
+```bash
+SRC="redis-cli -h <redis-host> -a <redis-password> --no-auth-warning"; DST="redis-cli -h <valkey-host> -a <valkey-password> --no-auth-warning"
+$SRC --scan | while read -r k; do
+  ttl=$($SRC PTTL "$k"); [ "$ttl" -lt 0 ] && ttl=0
+  $SRC --no-raw DUMP "$k" >/dev/null 2>&1   # (sanity)
+  $SRC DUMP "$k" | $DST -x RESTORE "$k" "$ttl" REPLACE >/dev/null
+done
+$DST DBSIZE
+```
+
+**Then the four steps and the verdict:**
+```bash
+APP=sim-store-bound
+cf bind-service $APP sim-valkey-store && cf unbind-service $APP sim-redis-store && cf restart $APP
+sleep 30
 bash verify/snapshot.sh store-copy
 f=$(ls -t verify/data/*store-copy.jsonl | head -1)
 jq -r 'select(.mode=="store") | [._app, .server, .canary.survived_restart, .canary.written_at, .mode_data.seeded_at_start, .mode_data.checksum_ok] | @tsv' "$f"
 ```
-Pass: `valkey`, `survived_restart=true` (original timestamp), `seeded_at_start=0`, `checksum_ok=true`.
+Pass: `valkey`, `survived_restart=true` with the **Sept 30** timestamp, `seeded_at_start=0`,
+`checksum_ok=true` — the dataset moved intact. Record which method worked: that becomes the
+migration tool's `copy-data` step, and the hardening check becomes a preflight item.
 
 ## 9. Session service
 
