@@ -102,7 +102,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] handles pinned-env apps (refuse in preflight), UPS, service keys (new key), multi-instance, Windows, TLS consumers (TLS plan + cert trust)
 
 **3c. Scenarios (SBX, 6 Redis + 6 Valkey, waves of two)**
-- [ ] S1 happy migration of the population in three waves
+- [~] S1 happy migration: cache service fully migrated incl. all access variants (2026-10-01); queue/store/session/pipeline next
 - [ ] S2 rollback: one wave back to Redis — prove "minutes", data intact on standby
 - [ ] S3 **accident drill**: every row of the accident matrix, with client devops on the call
 - [ ] S4 secure-plan variant: `sim-password-only` + `sim-username-aware` → WRONGPASS vs OK captured
@@ -151,6 +151,8 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] how many real consumers use the TLS port (16379)? (census has the port -- `awk -F'\t' '$4==16379' backward/02_conns.tsv`) -> sizes the TLS-plan requirement for Valkey
 
 ## Log
+
+- 2026-10-01 — **Theory validated for the core claim + every access pattern on the cache service:** sim-cache-bound migrated (4 commands, server=valkey, auth_user=default); pinned hazard shown live (binding moved, app stayed on Redis) and fixed; username-aware, password-only (classic), Windows, UPS (via update-user-provided-service), static-env (via set-env) all on Valkey. Remaining blocks scripted in `scenarios/SESSION-COMMANDS.md` (queue group, downtime, store loss/copy, session, pipeline order, timed rollback, retire).
 
 - 2026-09-30 — **Full population live in SBX: 14 apps** (core six + pinned/static-env/UPS/password-only/username-aware/pipeline a+b + Windows), `baseline-all` captured. Six core Go probe apps up, baseline captured (`verify/data/*-baseline.jsonl`). Next: access variants + Windows + TLS apps, Valkey twins, first migration (cache).
 
