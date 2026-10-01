@@ -99,6 +99,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] `report --wave N` evidence pack
 - [ ] data copy for store-mode services (RDB snapshot / brief sync) + key-count verification
 - [ ] rollback scope = service (auto-rollback re-binds every moved app of the service); `--scope app` override
+- [ ] preflight: Valkey plan `persistent` parity with the Redis plan
 - [ ] handles pinned-env apps (refuse in preflight), UPS, service keys (new key), multi-instance, Windows, TLS consumers (TLS plan + cert trust)
 
 **3c. Scenarios (SBX, 6 Redis + 6 Valkey, waves of two)**
@@ -120,6 +121,8 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 ---
 
 ## Decisions
+
+- 2026-10-01 — **State reset is a known experience for the app teams**: three years of Redis stemcell/release upgrades recreated the service VMs and teams were fine. Pending one check (are the plans `persistent`? → AOF on persistent disk survives recreation), this either (a) proves tolerance of full state reset → data copy becomes opt-in only, academy line "same event as the upgrades you've been through", or (b) proves restart tolerance only → keep the "flag real data" ask. **Parity rule either way:** the Valkey plan's `persistent` must match the Redis plan it replaces (preflight check).
 
 - 2026-10-03 — **Retirement happens** ~1–2 weeks after full confirmation (grace default 14 d), never automatically. **IP headroom is a preflight check**, not an assumption. **Rollback unit = the service** (all its apps; pipeline groups together); per-app only as explicit override.
 - 2026-10-03 — Valkey naming: **preference = (B) substituted names** (`redis`→`valkey`, case-preserving; `-valkey` suffix when the name has no "redis"), pending the client's decision. Teams update manifests/pipelines at their own pace during the standby weeks; the old Redis is renamed `<name>-redis-standby` at cutover so a stale manifest fails loudly ("service instance not found") instead of silently re-binding it. Consequences owned: 6th academy ask ("update the service name in your manifest"), and a periodic drift scan during standby (apps bound back to a `-redis-standby` service).
@@ -148,6 +151,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] data-copy mechanism: exists to test, or does `sim-store-bound` first just *measure* loss to give the copy tool a target?
 - [ ] SBX quotas (apps, service instances, memory) — enough for the Phase-2 population?
 - [ ] which Windows stack / .NET runtime is standard in the client estate?
+- [ ] are the client's Redis plans `persistent: true`? (`appendonly yes` in redis.conf on a service VM) — decides whether upgrade history = reset tolerance
 - [ ] how many real consumers use the TLS port (16379)? (census has the port -- `awk -F'\t' '$4==16379' backward/02_conns.tsv`) -> sizes the TLS-plan requirement for Valkey
 
 ## Log
