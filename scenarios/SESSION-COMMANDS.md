@@ -68,12 +68,13 @@ cf bind-service $APP sim-valkey-store && cf unbind-service $APP sim-redis-store 
 sleep 30
 bash verify/snapshot.sh store-nocopy
 f=$(ls -t verify/data/*store-nocopy.jsonl | head -1)
-jq -r 'select(.mode=="store") | [._app, .server, .canary.present, (.mode_data|tostring)] | @tsv' "$f"
+jq -r 'select(.mode=="store") | [._app, .server, .canary.survived_restart, .canary.written_at, .mode_data.seeded_at_start, .mode_data.checksum_ok] | @tsv' "$f"
 ```
-Expect: `found=0`... BUT NOTE: the probe re-seeds its dataset on start (deterministic values),
-so `found` will climb back to 1000 with `checksum_ok=true` — the real signal is
-**`canary.present=false`** (the first-start timestamp did not survive) and `expected` vs
-`found` in the first seconds. The canary is the "was my data copied?" indicator.
+Read it as: **`survived_restart=false` + `seeded_at_start=1000`** = the store was EMPTY when
+the app came up: the old data did not survive (expected without a copy). The probe re-creates
+its deterministic dataset on start, so `found`/`checksum_ok` go green again within seconds —
+those say the app works, not that data survived. (`survived_restart=true` +
+`seeded_at_start=0` is what a successful copy looks like.)
 
 ### 8b — roll back (Redis never touched → canary present again)
 
@@ -83,10 +84,10 @@ cf bind-service $APP sim-redis-store && cf unbind-service $APP sim-valkey-store 
 sleep 30
 bash verify/snapshot.sh store-rollback
 f=$(ls -t verify/data/*store-rollback.jsonl | head -1)
-jq -r 'select(.mode=="store") | [._app, .server, .canary.present, .canary.written_at] | @tsv' "$f"
+jq -r 'select(.mode=="store") | [._app, .server, .canary.survived_restart, .canary.written_at, .mode_data.seeded_at_start] | @tsv' "$f"
 ```
-Expect: `redis`, `canary.present=true` with the ORIGINAL timestamp — nothing was lost on the
-standby side.
+Expect: `redis`, `survived_restart=true` with the ORIGINAL (Sept 30) timestamp,
+`seeded_at_start=0` — nothing was lost on the standby side.
 
 ### 8c — migrate WITH a data copy (only if a copy mechanism exists; otherwise skip)
 
@@ -95,9 +96,9 @@ platform offers), then the four steps, then:
 ```bash
 bash verify/snapshot.sh store-copy
 f=$(ls -t verify/data/*store-copy.jsonl | head -1)
-jq -r 'select(.mode=="store") | [._app, .server, .canary.present, .canary.written_at, (.mode_data|tostring)] | @tsv' "$f"
+jq -r 'select(.mode=="store") | [._app, .server, .canary.survived_restart, .canary.written_at, .mode_data.seeded_at_start, .mode_data.checksum_ok] | @tsv' "$f"
 ```
-Pass: `valkey`, `canary.present=true` with the original timestamp, `checksum_ok=true`.
+Pass: `valkey`, `survived_restart=true` (original timestamp), `seeded_at_start=0`, `checksum_ok=true`.
 
 ## 9. Session service
 
@@ -107,9 +108,9 @@ cf bind-service $APP sim-valkey-session && cf unbind-service $APP sim-redis-sess
 sleep 30
 bash verify/snapshot.sh after-session
 f=$(ls -t verify/data/*after-session.jsonl | head -1)
-jq -r 'select(.mode=="session") | [._app, .server, .canary.present, (.mode_data|tostring)] | @tsv' "$f"
+jq -r 'select(.mode=="session") | [._app, .server, .canary.survived_restart, (.mode_data|tostring)] | @tsv' "$f"
 ```
-Read: `reminted` increased by 1 and `canary.present=false` → the session did NOT survive
+Read: `reminted=1` and `canary.survived_restart=false` → the session did NOT survive
 (users would log in again). With a copy it would (`reminted` unchanged, canary present).
 
 ## 10. Pipeline ordering — a → b, wrong order first

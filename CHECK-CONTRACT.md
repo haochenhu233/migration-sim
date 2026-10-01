@@ -25,7 +25,7 @@ and keeps reporting** instead of being restarted by the platform.
 | `roundtrip_ms` | number | SET/GET/DEL of a nonce, milliseconds (null if failed) |
 | `error` | string | last error text if `connected=false` |
 | `families` | object | command-family smoke: `{string, hash, list, zset, eval, multi, stream, pubsub}` → `ok` / error text |
-| `canary` | object | `{key, written_at, present}` — a key written at FIRST start with a timestamp; deterministic name so it survives app restarts; `present=true` after cutover means the data was copied |
+| `canary` | object | `{key, written_at, present, survived_restart}` — a key the app writes if absent at every start (SetNX). `present` alone proves nothing (the app recreates it); **`survived_restart`** = the stored timestamp predates this process → the data outlived the restart (copied / same store). |
 | `since_start` | object | `{ops, errors, reconnects, started_at}` — counters since the process started |
 | `latency_ms` | object | `{p50, p99}` over the last 200 worker operations |
 | `mode_data` | object | mode-specific block below |
@@ -45,8 +45,9 @@ deterministic computation) and `connected`. After cutover: `misses` spike then `
 the report shows which happened.
 
 **store** — N deterministic keys (`store:<app>:<i>`), never overwritten if present.
-`{expected, found, checksum_ok, missing_sample}` · **pass**: `found == expected` and
-`checksum_ok`. Anything else after cutover = data loss, quantified.
+`{expected, found, checksum_ok, missing_sample, seeded_at_start}` · the app re-creates missing keys at start, so
+`found`/`checksum_ok` mean "works", not "survived"; **`seeded_at_start`** = keys that were missing when the process
+came up: `0` = dataset survived (copied / same store), `N` = it was (re)created now — data loss, quantified.
 
 **producer** — pushes `{seq, ts}` to a list, `seq` from a Redis counter.
 `{queue, last_seq, pushed}` · **pass**: `pushed` still increasing after cutover.

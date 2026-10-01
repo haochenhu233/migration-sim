@@ -262,10 +262,20 @@ func (a *App) workSession() {
 func (a *App) workStore() {
 	_ = a.timed(func() error { // seed once, never overwrite: a copied dataset must survive
 		p := a.R.Pipeline()
+		cmds := make([]*redis.BoolCmd, a.NKeys)
 		for i := 0; i < a.NKeys; i++ {
-			p.SetNX(ctx, a.storeKey(i), a.dval(i), 0)
+			cmds[i] = p.SetNX(ctx, a.storeKey(i), a.dval(i), 0)
 		}
 		_, e := p.Exec(ctx)
+		if e == nil { // keys created NOW = keys that were missing when this process started
+			n := 0
+			for _, c := range cmds {
+				if c.Val() {
+					n++
+				}
+			}
+			a.set("seeded_at_start", n) // 0 = dataset was already there (survived / copied); N = recreated
+		}
 		return e
 	})
 	for i := 0; ; i++ {
@@ -493,9 +503,10 @@ func (a *App) check(w http.ResponseWriter, _ *http.Request) {
 	if err != nil {
 		connected, rtv, errS = false, nil, err.Error()
 	}
-	canary := map[string]any{"key": a.canaryKey(), "written_at": nil, "present": false}
+	canary := map[string]any{"key": a.canaryKey(), "written_at": nil, "present": false, "survived_restart": false}
 	if v, e := a.R.Get(ctx, a.canaryKey()).Result(); e == nil {
 		canary["written_at"], canary["present"] = v, true
+		canary["survived_restart"] = v < a.Started // written before this process started => data outlived the restart
 	}
 	a.mu.Lock()
 	ss := map[string]any{"ops": a.ops, "errors": a.errs, "reconnects": a.reconnects, "started_at": a.Started}
