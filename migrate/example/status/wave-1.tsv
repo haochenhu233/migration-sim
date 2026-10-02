@@ -1,0 +1,4 @@
+1	cache-0	app-0	verify	census: conns on valkey; app healthy
+1	cache-16	app-16	pending	
+1	cache-22	app-22	pending	
+1	cache-24	app-24	pending	

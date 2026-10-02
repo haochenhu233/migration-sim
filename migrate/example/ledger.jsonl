@@ -1,23 +1,27 @@
-{"ts":"2026-10-14T14:02:00Z","wave":2,"service":"orders-cache","app":"","step":"create-valkey","outcome":"ok","ms":184000,"op":"jsmith","note":"valkey-cache-small-... ip 10.237.9.12"}
-{"ts":"2026-10-14T14:05:11Z","wave":2,"service":"orders-cache","app":"orders-api","step":"bind-valkey","outcome":"ok","ms":2140,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:05:19Z","wave":2,"service":"orders-cache","app":"orders-api","step":"unbind-redis","outcome":"ok","ms":1830,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:06:02Z","wave":2,"service":"orders-cache","app":"orders-api","step":"restart","outcome":"ok","ms":41200,"op":"jsmith","note":"rolling, 2 instances"}
-{"ts":"2026-10-14T14:06:45Z","wave":2,"service":"orders-cache","app":"orders-api","step":"verify","outcome":"ok","ms":900,"op":"jsmith","note":"census: 2 conns on valkey; app healthy"}
-{"ts":"2026-10-14T14:07:01Z","wave":2,"service":"orders-cache","app":"orders-worker","step":"bind-valkey","outcome":"ok","ms":1990,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:07:08Z","wave":2,"service":"orders-cache","app":"orders-worker","step":"unbind-redis","outcome":"ok","ms":1700,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:07:50Z","wave":2,"service":"orders-cache","app":"orders-worker","step":"restart","outcome":"ok","ms":38000,"op":"jsmith","note":"1 instance, 38s gap"}
-{"ts":"2026-10-14T14:08:40Z","wave":2,"service":"orders-cache","app":"orders-worker","step":"verify","outcome":"fail","ms":30500,"op":"jsmith","note":"no connection on valkey after soak 30s; app log: NOAUTH"}
-{"ts":"2026-10-14T14:09:30Z","wave":2,"service":"orders-cache","app":"orders-worker","step":"rollback","outcome":"ok","ms":44000,"op":"jsmith","note":"rebind redis + restart; cause: verify fail (NOAUTH -> check plan family)"}
-{"ts":"2026-10-14T14:10:02Z","wave":2,"service":"orders-cache","app":"orders-report","step":"bind-valkey","outcome":"ok","ms":2010,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:10:09Z","wave":2,"service":"orders-cache","app":"orders-report","step":"unbind-redis","outcome":"ok","ms":1650,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:01:30Z","wave":2,"service":"session-store","app":"","step":"create-valkey","outcome":"ok","ms":176000,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:11:00Z","wave":2,"service":"session-store","app":"web-portal","step":"bind-valkey","outcome":"ok","ms":2200,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:11:07Z","wave":2,"service":"session-store","app":"web-portal","step":"unbind-redis","outcome":"ok","ms":1800,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:11:50Z","wave":2,"service":"session-store","app":"web-portal","step":"restart","outcome":"ok","ms":40100,"op":"jsmith","note":"rolling"}
-{"ts":"2026-10-14T14:12:30Z","wave":2,"service":"session-store","app":"web-portal","step":"verify","outcome":"ok","ms":800,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:12:40Z","wave":2,"service":"session-store","app":"web-admin","step":"bind-valkey","outcome":"ok","ms":2100,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:12:47Z","wave":2,"service":"session-store","app":"web-admin","step":"unbind-redis","outcome":"ok","ms":1750,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:13:30Z","wave":2,"service":"session-store","app":"web-admin","step":"restart","outcome":"ok","ms":39000,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:14:05Z","wave":2,"service":"session-store","app":"web-admin","step":"verify","outcome":"ok","ms":850,"op":"jsmith","note":""}
-{"ts":"2026-10-14T14:19:03Z","wave":2,"service":"session-store","app":"","step":"confirm","outcome":"ok","ms":0,"op":"jsmith","note":"by team-b (a.lee); grace 24h"}
-{"ts":"2026-10-14T14:15:00Z","wave":2,"service":"pay-queue","app":"","step":"create-valkey","outcome":"fail","ms":600000,"op":"jsmith","note":"bosh task 4412 timed out; retry 2/3"}
+{"ts": "2026-10-14T14:00:20Z", "wave": 1, "service": "2f6fe3d9-1e8a-48cf-ae53-4d6e0f5ca70a", "app": "", "step": "rename-standby", "outcome": "ok", "ms": 800, "op": "jsmith", "note": "cache-0 -> cache-0-redis-standby"}
+{"ts": "2026-10-14T14:00:59Z", "wave": 1, "service": "2f6fe3d9-1e8a-48cf-ae53-4d6e0f5ca70a", "app": "", "step": "create-valkey", "outcome": "ok", "ms": 184000, "op": "jsmith", "note": "valkey created as cache-0"}
+{"ts": "2026-10-14T14:01:12Z", "wave": 1, "service": "2f6fe3d9-1e8a-48cf-ae53-4d6e0f5ca70a", "app": "860c4212-e028-4013-ba36-4cab96e5aa45", "step": "bind-valkey", "outcome": "ok", "ms": 2000, "op": "jsmith", "note": ""}
+{"ts": "2026-10-14T14:01:40Z", "wave": 1, "service": "2f6fe3d9-1e8a-48cf-ae53-4d6e0f5ca70a", "app": "860c4212-e028-4013-ba36-4cab96e5aa45", "step": "unbind-redis", "outcome": "ok", "ms": 2000, "op": "jsmith", "note": ""}
+{"ts": "2026-10-14T14:02:15Z", "wave": 1, "service": "2f6fe3d9-1e8a-48cf-ae53-4d6e0f5ca70a", "app": "860c4212-e028-4013-ba36-4cab96e5aa45", "step": "restart", "outcome": "ok", "ms": 41000, "op": "jsmith", "note": "rolling"}
+{"ts": "2026-10-14T14:02:24Z", "wave": 1, "service": "2f6fe3d9-1e8a-48cf-ae53-4d6e0f5ca70a", "app": "860c4212-e028-4013-ba36-4cab96e5aa45", "step": "verify", "outcome": "ok", "ms": 900, "op": "jsmith", "note": "census: conns on valkey; app healthy"}
+{"ts": "2026-10-14T14:02:29Z", "wave": 1, "service": "2f6fe3d9-1e8a-48cf-ae53-4d6e0f5ca70a", "app": "", "step": "confirm", "outcome": "ok", "ms": 0, "op": "jsmith", "note": "by team-a; grace 24h"}
+{"ts": "2026-10-14T14:03:04Z", "wave": 2, "service": "130952d2-5373-454f-909c-54520fe4d24d", "app": "", "step": "rename-standby", "outcome": "ok", "ms": 800, "op": "jsmith", "note": "cache-3 -> cache-3-redis-standby"}
+{"ts": "2026-10-14T14:03:25Z", "wave": 2, "service": "130952d2-5373-454f-909c-54520fe4d24d", "app": "", "step": "create-valkey", "outcome": "ok", "ms": 184000, "op": "jsmith", "note": "valkey created as cache-3"}
+{"ts": "2026-10-14T14:04:05Z", "wave": 2, "service": "130952d2-5373-454f-909c-54520fe4d24d", "app": "dbbfa891-94ba-408b-9476-12515a6f2bd5", "step": "bind-valkey", "outcome": "ok", "ms": 2000, "op": "jsmith", "note": ""}
+{"ts": "2026-10-14T14:04:24Z", "wave": 2, "service": "130952d2-5373-454f-909c-54520fe4d24d", "app": "dbbfa891-94ba-408b-9476-12515a6f2bd5", "step": "unbind-redis", "outcome": "ok", "ms": 2000, "op": "jsmith", "note": ""}
+{"ts": "2026-10-14T14:04:41Z", "wave": 2, "service": "130952d2-5373-454f-909c-54520fe4d24d", "app": "dbbfa891-94ba-408b-9476-12515a6f2bd5", "step": "restart", "outcome": "ok", "ms": 41000, "op": "jsmith", "note": "rolling"}
+{"ts": "2026-10-14T14:05:16Z", "wave": 2, "service": "130952d2-5373-454f-909c-54520fe4d24d", "app": "dbbfa891-94ba-408b-9476-12515a6f2bd5", "step": "verify", "outcome": "fail", "ms": 30500, "op": "jsmith", "note": "no connection on valkey after soak 30s; NOAUTH"}
+{"ts": "2026-10-14T14:05:55Z", "wave": 2, "service": "130952d2-5373-454f-909c-54520fe4d24d", "app": "dbbfa891-94ba-408b-9476-12515a6f2bd5", "step": "rollback", "outcome": "ok", "ms": 44000, "op": "jsmith", "note": "service-scope rollback; cause: verify fail"}
+{"ts": "2026-10-14T14:06:35Z", "wave": 2, "service": "2a620cd6-8c54-417f-80b8-e5bb304c0d14", "app": "", "step": "rename-standby", "outcome": "ok", "ms": 800, "op": "jsmith", "note": "cache-4 -> cache-4-redis-standby"}
+{"ts": "2026-10-14T14:07:10Z", "wave": 2, "service": "2a620cd6-8c54-417f-80b8-e5bb304c0d14", "app": "", "step": "create-valkey", "outcome": "ok", "ms": 184000, "op": "jsmith", "note": "valkey created as cache-4"}
+{"ts": "2026-10-14T14:07:40Z", "wave": 2, "service": "2a620cd6-8c54-417f-80b8-e5bb304c0d14", "app": "df17eae3-4ffc-4cba-852a-ddf0727d23fb", "step": "bind-valkey", "outcome": "ok", "ms": 2000, "op": "jsmith", "note": ""}
+{"ts": "2026-10-14T14:07:54Z", "wave": 2, "service": "2a620cd6-8c54-417f-80b8-e5bb304c0d14", "app": "df17eae3-4ffc-4cba-852a-ddf0727d23fb", "step": "unbind-redis", "outcome": "ok", "ms": 2000, "op": "jsmith", "note": ""}
+{"ts": "2026-10-14T14:08:13Z", "wave": 2, "service": "2a620cd6-8c54-417f-80b8-e5bb304c0d14", "app": "df17eae3-4ffc-4cba-852a-ddf0727d23fb", "step": "restart", "outcome": "ok", "ms": 41000, "op": "jsmith", "note": "rolling"}
+{"ts": "2026-10-14T14:08:27Z", "wave": 2, "service": "2a620cd6-8c54-417f-80b8-e5bb304c0d14", "app": "df17eae3-4ffc-4cba-852a-ddf0727d23fb", "step": "verify", "outcome": "ok", "ms": 900, "op": "jsmith", "note": "census: conns on valkey; app healthy"}
+{"ts": "2026-10-14T14:09:05Z", "wave": 2, "service": "53219cf1-7f8b-4710-9c8a-7b60afbc1032", "app": "", "step": "rename-standby", "outcome": "ok", "ms": 800, "op": "jsmith", "note": "cache-8 -> cache-8-redis-standby"}
+{"ts": "2026-10-14T14:09:34Z", "wave": 2, "service": "53219cf1-7f8b-4710-9c8a-7b60afbc1032", "app": "", "step": "create-valkey", "outcome": "ok", "ms": 184000, "op": "jsmith", "note": "valkey created as cache-8"}
+{"ts": "2026-10-14T14:09:39Z", "wave": 2, "service": "53219cf1-7f8b-4710-9c8a-7b60afbc1032", "app": "d7f82725-3901-4212-b354-f57290e56de8", "step": "bind-valkey", "outcome": "ok", "ms": 2000, "op": "jsmith", "note": ""}
+{"ts": "2026-10-14T14:09:48Z", "wave": 2, "service": "53219cf1-7f8b-4710-9c8a-7b60afbc1032", "app": "d7f82725-3901-4212-b354-f57290e56de8", "step": "unbind-redis", "outcome": "ok", "ms": 2000, "op": "jsmith", "note": ""}
+{"ts": "2026-10-14T14:10:03Z", "wave": 2, "service": "53219cf1-7f8b-4710-9c8a-7b60afbc1032", "app": "d7f82725-3901-4212-b354-f57290e56de8", "step": "restart", "outcome": "ok", "ms": 41000, "op": "jsmith", "note": "rolling"}
+{"ts": "2026-10-14T14:10:10Z", "wave": 2, "service": "53219cf1-7f8b-4710-9c8a-7b60afbc1032", "app": "d7f82725-3901-4212-b354-f57290e56de8", "step": "verify", "outcome": "ok", "ms": 900, "op": "jsmith", "note": "census: conns on valkey; app healthy"}
+{"ts": "2026-10-14T14:10:34Z", "wave": 2, "service": "450f04a9-638c-4343-a7f9-c9c7cd968830", "app": "", "step": "create-valkey", "outcome": "fail", "ms": 600000, "op": "jsmith", "note": "bosh task 4412 timed out; retry 2/3"}

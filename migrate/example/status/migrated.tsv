@@ -1,4 +1,4 @@
 wave	service	app	state
-2	orders-cache	orders-api	verify
-2	session-store	web-portal	verify
-2	session-store	web-admin	verify
+1	cache-0	app-0	verify
+2	cache-4	app-4	verify
+2	cache-8	app-8	verify

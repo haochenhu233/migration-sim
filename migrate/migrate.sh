@@ -5,8 +5,101 @@
 set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
-while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; *) shift;; esac; done
+WSIZE=""; ARG=""
+while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --wave-size) WSIZE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
 PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
+
+
+# ---- plan: merged/aggregated report -> waves.tsv (detailed, stays in env) + plan-summary.md (aggregates only)
+#   migrate.sh plan <merged_report.csv|aggregated_report.csv> [--run <dir>] [--wave-size N]
+# Waves = connected components of the app<->service binding graph (an app and every service it
+# is bound to travel together => one restart per app), packed largest-first, max N services per
+# wave (a component larger than N gets its own wave). Services keyed by GUID (DESIGN 1a).
+cmd_plan(){
+  local rep="$1"; [ -s "$rep" ] || { echo "usage: migrate.sh plan <report.csv> [--run dir] [--wave-size N]"; exit 1; }
+  mkdir -p "$RUN"
+  awk -F',' -v OFS='\t' -v wsize="${WSIZE:-10}" -v run="$RUN" -v now="$(date -u +%FT%TZ)" '
+    function find(x){ while (par[x]!=x) { par[x]=par[par[x]]; x=par[x] } return x }
+    function union(a,b,  ra,rb){ ra=find(a); rb=find(b); if (ra!=rb) par[rb]=ra }
+    function plan_of(dep,  p){ p=dep; sub(/^(redis|valkey)-/,"",p); sub(/-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,"",p); return p }
+    NR==1 { for (i=1;i<=NF;i++) col[$i]=i; LIVE=("ever_live" in col)?col["ever_live"]:col["live_connection"]; next }
+    {
+      gsub(/\r$/,"")
+      ag=$col["app_guid"]; sg=$col["service_instance_guid"]
+      if (ag=="" || sg=="" || sg=="?" || $col["app_name"] ~ /^EXTERNAL/) { skipped++; next }
+      if ($col["deployment_exists"]=="no") { ghosts[sg]=1; ghostrows++; next }
+      k=ag SUBSEP sg; if (k in seen) next; seen[k]=1; rows++
+      app[ag]=$col["app_name"]; aorg[ag]=$col["org"]; asp[ag]=$col["space"]; aplat[ag]=$col["platform"]
+      svc[sg]=$col["redis_service_name"]; sorg[sg]=$col["redis_service_org"]; ssp[sg]=$col["redis_service_space"]
+      splan[sg]=plan_of($col["redis_deployment"]); sdep[sg]=$col["redis_deployment"]
+      edge[rows]=k
+      if ($col["method"]=="cf-bind" && $col["static_ref"]!="") { hz[k]=1; nhz++; hzapp[ag]=1 }
+      if ($LIVE=="no") { idle[k]=1; nidle++ } else live[k]=1
+      if ($col["org"]!=$col["redis_service_org"] || $col["space"]!=$col["redis_service_space"]) { xs[k]=1; xsvc[sg]=1 }
+      nbound[ag]++; sapps[sg]++
+      if (!("a"ag in par)) par["a"ag]="a"ag; if (!("s"sg in par)) par["s"sg]="s"sg; union("a"ag,"s"sg)
+    }
+    END {
+      # components
+      for (a in app) { r=find("a"a); capp[r]++; cmembers_a[r]=cmembers_a[r] " " a }
+      for (sg in svc){ r=find("s"sg); csvc[r]++; cmembers_s[r]=cmembers_s[r] " " sg; comp_of[sg]=r }
+      nc=0; for (r in csvc) { cl[++nc]=r }
+      # sort components by services desc (simple insertion sort; nc is small: <= #services)
+      for (i=2;i<=nc;i++){ v=cl[i]; j=i-1; while (j>0 && (csvc[cl[j]]<csvc[v] || (csvc[cl[j]]==csvc[v] && capp[cl[j]]<capp[v]))) { cl[j+1]=cl[j]; j-- } cl[j+1]=v }
+      # pack into waves largest-first
+      w=1; used=0
+      for (i=1;i<=nc;i++) { r=cl[i]
+        if (used>0 && used+csvc[r] > wsize) { w++; used=0 }
+        cw[r]=w; used+=csvc[r]; wsvc[w]+=csvc[r]; wapp[w]+=capp[r]; wcomp[w]++
+        if (csvc[r]>wsize) { w++; used=0 }   # an oversized component owns its wave
+      }
+      nw=w; if (used==0) nw=w-1
+      # ---- waves.tsv (detailed; stays in the env)
+      f=run "/waves.tsv"
+      print "wave","component","service","service_guid","service_org","service_space","valkey_plan","app","app_guid","app_org","app_space","flags" > f
+      for (i=1;i<=rows;i++) { k=edge[i]; split(k, kk, SUBSEP); ag=kk[1]; sg=kk[2]; r=comp_of[sg]
+        fl=""; if (k in hz) fl=fl "hazard,"; if (k in idle) fl=fl "idle,"; if (k in xs) fl=fl "cross-space,"
+        if (nbound[ag]>1) fl=fl "multi-bound,"; if (aplat[ag]=="windows") fl=fl "windows,"; sub(/,$/,"",fl)
+        cid=substr(r,2,8)
+        print cw[r], cid, svc[sg], sg, sorg[sg], ssp[sg], splan[sg], app[ag], ag, aorg[ag], asp[ag], fl > f
+        wteams[cw[r] SUBSEP aorg[ag]]=1
+      }
+      # ---- components.tsv (detailed)
+      g=run "/components.tsv"; print "component","wave","services","apps","service_names" > g
+      for (i=1;i<=nc;i++) { r=cl[i]; names=""; n=split(cmembers_s[r], ms, " "); for (j=1;j<=n;j++) names=names (names==""?"":";") svc[ms[j]]
+        print substr(r,2,8), cw[r], csvc[r], capp[r], names > g }
+      # ---- plan-summary.md (AGGREGATES ONLY -- safe to share)
+      h=run "/plan-summary.md"
+      nsvc=0; for (sg in svc) nsvc++; napp=0; for (a in app) napp++
+      nmb=0; for (a in app) if (nbound[a]>1) nmb++
+      nxsvc=0; for (sg in xsvc) nxsvc++; nhzapp=0; for (a in hzapp) nhzapp++
+      nwin=0; for (a in app) if (aplat[a]=="windows") nwin++
+      norg=0; for (a in app) if (!(aorg[a] in orgs)) { orgs[aorg[a]]=1; norg++ }
+      ng=0; for (x in ghosts) ng++
+      # idle-only services: every connection idle
+      for (i=1;i<=rows;i++){ k=edge[i]; split(k,kk,SUBSEP); if (k in live) slive[kk[2]]=1 }
+      nidlesvc=0; for (sg in svc) if (!(sg in slive)) nidlesvc++
+      # component histogram
+      for (i=1;i<=nc;i++){ r=cl[i]; key=(csvc[r]==1 && capp[r]==1)?"1 svc / 1 app": (csvc[r]==1)?"1 svc / n apps": (csvc[r]<=3)?"2-3 svcs":(csvc[r]<=10)?"4-10 svcs":">10 svcs"; hist[key]++ }
+      printf "# Migration plan summary (aggregates only)\n\ngenerated %s from %s\n\n", now, FILENAME > h
+      printf "| metric | value |\n|---|---|\n" > h
+      printf "| connections (app↔service, deduped) | %d |\n| services | %d |\n| apps | %d |\n| orgs (≈teams) | %d |\n", rows, nsvc, napp, norg > h
+      printf "| rows skipped (external / no guid) | %d |\n| ghost services excluded (no deployment) | %d (%d rows) |\n", skipped, ng, ghostrows > h
+      printf "| multi-bound apps (2+ services → 1 restart per wave) | %d |\n| services used across spaces/orgs (joint window + sharing) | %d |\n", nmb, nxsvc > h
+      printf "| hazard apps (cf-bind + pinned ref) | %d (%d connections) |\n| idle connections (no live seen) | %d |\n| services with NO live connection at all | %d |\n| windows apps | %d |\n\n", nhzapp, nhz, nidle, nidlesvc, nwin > h
+      printf "## Binding-graph components: %d\n\n| shape | count |\n|---|---|\n", nc > h
+      for (key in hist) printf "| %s | %d |\n", key, hist[key] > h
+      printf "\nlargest components (services/apps): " > h
+      for (i=1;i<=5 && i<=nc;i++) printf "%s%d/%d", (i>1?", ":""), csvc[cl[i]], capp[cl[i]] > h
+      printf "\n\n## Wave proposal (max %d services per wave, largest components first)\n\n| wave | services | apps | components | orgs |\n|---|---|---|---|---|\n", wsize > h
+      for (w=1;w<=nw;w++){ t=0; for (x in wteams){ split(x,xx,SUBSEP); if (xx[1]==w) t++ }
+        printf "| %d | %d | %d | %d | %d |\n", w, wsvc[w], wapp[w], wcomp[w], t > h }
+      printf "\nIP headroom needed: %d Valkeys in total (one per service); per wave as above.\n", nsvc > h
+      printf "\nDetailed files (stay in the environment): waves.tsv, components.tsv\n" > h
+      printf "plan: %d connections, %d services, %d apps -> %d component(s) in %d wave(s)\n", rows, nsvc, napp, nc, nw
+      printf "plan: wrote %s/waves.tsv, %s/components.tsv (detailed) and %s/plan-summary.md (aggregates only -- shareable)\n", run, run, run
+    }' "$rep"
+}
 
 # ---- the ONE rule: an app's (or service's) state = its last ledger event -----------------------
 # Emits TSV: service \t app \t state \t ts \t note      (app "" = service-level events)
@@ -56,10 +149,10 @@ cmd_status(){
       next }
     FNR==1 { next }                                 # ---- pass 2: the plan (waves.tsv header)
     wave!="" && $1!=wave { next }
-    { s=$2; a=$5; if (!(s in seen)) { order[++ns]=s; seen[s]=1; plan[s]=$4 }
+    { s=$4; a=$9; if (!(s in seen)) { order[++ns]=s; seen[s]=1; plan[s]=$7; disp[s]=$3 " (" substr($4,1,8) ")" }
       apps[s]++; k=s SUBSEP a
       state = (k in st) ? st[k] : "PENDING"
-      if (index($7,"hazard")) hz[s]++
+      if (index($12,"hazard")) hz[s]++
       if (rank(state) >= 4) switched[s]++
       if (state=="VERIFIED") verified[s]++
       if (rank(state) < 0) failed[s]++
@@ -68,7 +161,7 @@ cmd_status(){
       total_apps++ }
     END {
       printf "wave %s   services %d   apps %d   started %s   STOP: %s   lock: %s\n\n", (wave==""?"all":wave), ns, total_apps, started, stop, lock
-      printf "%-15s %-12s %-14s %5s %9s %9s %-14s %s\n", "service","plan","phase","apps","switched","verified","standby-until","last event"
+      printf "%-28s %-12s %-14s %5s %9s %9s %-14s %s\n", "service (guid)","plan","phase","apps","switched","verified","standby-until","last event"
       for (i=1;i<=ns;i++) { s=order[i]
         ev=svc_ev[s]
         if      (ev=="retire")            phase="RETIRED"
@@ -83,7 +176,7 @@ cmd_status(){
         else                              phase="PENDING"
         sb=(s in standby) ? standby[s] : "-"
         mark=""; if (phase ~ /FAILED|ATTENTION|ROLLED/) mark="  !!"
-        printf "%-15s %-12s %-14s %5d %9s %9s %-14s %s%s\n", s, plan[s], phase, apps[s], switched[s]+0 "/" apps[s], (verified[s]+0) "/" apps[s], sb, (s in last_ev ? last_ev[s] : "-"), mark
+        printf "%-28s %-12s %-14s %5d %9s %9s %-14s %s%s\n", disp[s], plan[s], phase, apps[s], switched[s]+0 "/" apps[s], (verified[s]+0) "/" apps[s], sb, (s in last_ev ? last_ev[s] : "-"), mark
       }
       hzn=0; for (s in hz) hzn+=hz[s]
       if (hzn>0) printf "\n!! %d hazard app(s) in scope (pinned env) -- preflight will refuse until fixed\n", hzn
@@ -105,7 +198,7 @@ cmd_summary(){
     function pct(a,b) { return b ? sprintf("%3d%%", a*100/b) : "  -" }
     FILENAME==ARGV[1] { if ($2=="") svc_ev[$1]=$3; else { st[$1 SUBSEP $2]=$3; note[$1 SUBSEP $2]=$5 }; next }
     FNR==1 { next }
-    { w=$1; s=$2; a=$5; if (!(w in seenw)) { worder[++nw]=w; seenw[w]=1 }
+    { w=$1; s=$4; a=$9; if (!(w in seenw)) { worder[++nw]=w; seenw[w]=1 }
       if (!(s in seens)) { seens[s]=1; wsvc[w]++; ev=svc_ev[s]
         if (ev=="create-valkey" || ev=="confirm" || ev=="retire") wcreated[w]++
         if (ev ~ /create-valkey:fail/) wcfail[w]++
@@ -114,8 +207,8 @@ cmd_summary(){
       wconn[w]++; k=s SUBSEP a; state=(k in st)?st[k]:"pending"; r=rank(state)
       if (r>=4) wmig[w]++;  if (r==5) wver[w]++;  if (r<0) { wfail[w]++; print w, s, a, state, note[k] >> (sdir "/failed.tsv") }
       if (r==0) wrb[w]++;   if (r==1) wpend[w]++;  if (r==2 || r==3) wprog[w]++
-      if (r>=4) print w, s, a, state >> (sdir "/migrated.tsv")
-      print w, s, a, state, note[k] > (sdir "/wave-" w ".tsv") }
+      if (r>=4) print w, $3, $8, state >> (sdir "/migrated.tsv")
+      print w, $3, $8, state, note[k] > (sdir "/wave-" w ".tsv") }
     END {
       print "generated " now "  (ledger lines skipped as unparsable: " bad ")" > (sdir "/summary.tsv")
       print "wave\tservices\tcreated\tcreate_fail\tstandby\tretired\tconnections\tmigrated\tverified\tfailed\trolled_back\tin_progress\tpending" > (sdir "/summary.tsv")
@@ -135,6 +228,7 @@ cmd_summary(){
 }
 
 case "$SUB" in
+  plan)   cmd_plan "$ARG" ;;
   status) if [ -n "$WAVE" ]; then cmd_status; else cmd_summary; fi ;;
-  *) echo "usage: migrate.sh status [--wave N] [--run <dir>]"; exit 1 ;;
+  *) echo "usage: migrate.sh plan <report.csv> [--run dir] [--wave-size N] | status [--wave N] [--run dir]"; exit 1 ;;
 esac

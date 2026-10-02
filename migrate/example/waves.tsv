@@ -1,10 +1,13 @@
-wave	service	redis_si_guid	valkey_plan	app	app_guid	flags
-2	orders-cache	3f1a...c01	cache-small	orders-api	9a01...01	
-2	orders-cache	3f1a...c01	cache-small	orders-worker	9a01...02	
-2	orders-cache	3f1a...c01	cache-small	orders-report	9a01...03	idle
-2	session-store	3f1a...c02	cache-small	web-portal	9a01...04	session
-2	session-store	3f1a...c02	cache-small	web-admin	9a01...05	
-2	pay-queue	3f1a...c03	cache-small	pay-producer	9a01...06	pipeline:pay
-2	pay-queue	3f1a...c03	cache-small	pay-consumer	9a01...07	pipeline:pay
-2	inv-cache	3f1a...c04	cache-small	inventory	9a01...08	hazard:REDIS_HOST
-3	cart-cache	3f1a...c05	cache-small	cart	9a01...09	
+wave	component	service	service_guid	service_org	service_space	valkey_plan	app	app_guid	app_org	app_space	flags
+1	860c4212	cache-0	2f6fe3d9-1e8a-48cf-ae53-4d6e0f5ca70a	acme	dev	cache-small	app-0	860c4212-e028-4013-ba36-4cab96e5aa45	acme	dev	idle
+2	dbbfa891	cache-3	130952d2-5373-454f-909c-54520fe4d24d	acme	dev	cache-small	app-3	dbbfa891-94ba-408b-9476-12515a6f2bd5	acme	dev	idle
+2	df17eae3	cache-4	2a620cd6-8c54-417f-80b8-e5bb304c0d14	acme	dev	cache-small	app-4	df17eae3-4ffc-4cba-852a-ddf0727d23fb	acme	dev	
+2	d7f82725	cache-8	53219cf1-7f8b-4710-9c8a-7b60afbc1032	acme	dev	cache-small	app-8	d7f82725-3901-4212-b354-f57290e56de8	acme	dev	
+2	061ccf61	cache-11	450f04a9-638c-4343-a7f9-c9c7cd968830	acme	dev	cache-small	app-11	061ccf61-2644-4318-a5dc-e54f09a2094d	acme	dev	
+2	5b454e4c	cache-12	c5db2c37-8a04-4a40-bfb5-7586bcdbb8de	acme	dev	cache-small	app-12	5b454e4c-b62e-40ff-8b7f-05d37346bbde	acme	dev	idle
+2	8c86a97d	cache-13	7813e0a3-b4af-4f15-8bb0-298fcdf1a225	acme	dev	cache-small	app-13	8c86a97d-94f3-4a26-ac60-73ec0b81b3de	acme	dev	
+1	6e49804f	cache-16	372a9867-d67f-41d4-82f8-74d134137944	acme	dev	cache-small	app-16	6e49804f-3e74-4af4-96ec-66293ad0c71e	acme	dev	
+2	249937ac	cache-18	33ad7e7a-e043-4701-b770-ec289a4c2587	acme	dev	cache-small	app-18	249937ac-5b19-4a6f-b4c0-9940c6a1524e	acme	dev	idle
+1	e541007d	cache-22	f4b2043b-d0ba-4014-bbfc-bb7c118ef75a	acme	dev	cache-small	app-22	e541007d-27ff-469c-bee0-1aaec73eb5f1	acme	dev	
+2	3d9287db	cache-23	4327cfcb-c74f-40c3-868f-73a04320bad4	acme	dev	cache-small	app-23	3d9287db-655d-47aa-b842-c5ae71370b06	acme	dev	
+1	8589fdad	cache-24	aec25510-e3df-482b-8f10-d96287c8fbd0	acme	dev	cache-small	app-24	8589fdad-c779-4ef3-8ea6-c0540bae0d9d	acme	dev	idle
