@@ -71,7 +71,12 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 | `sim-win-bound` | cf-bind, Windows | cache | same story on Windows | [x] up in SBX |
 | `sim-tls-bound` | cf-bind, connects on `tls_port` (16379) | cache | TLS consumers: Valkey target must be a TLS plan + cert trusted (found in NP: a real app uses 16379) | [ ] |
 
-## Phase 2 — realistic population (~100+ live connections)
+## Phase 2 — the tool-test population (SBX, 6 Redis; the tool creates the Valkeys)
+
+- [x] `scripts/layout.tsv` + `scripts/reset-population.sh` (2026-10-02): rebinds the existing 14 apps into the shapes the real plan showed — a 5-app shared service incl. the hazard app and Windows, the queue group, a 2-service/2-app chain (multi-bound app → one restart), a SILENT service (bound app stopped), a data-store service (`datastore` flag by hand in waves.tsv); unbinds everything, deletes the Valkey twins (frees IPs), renames standbys back. Re-runnable after every tool test.
+- [ ] run reset → discovery scan of SBX → `plan --wave-size 3` → expect ~5 waves covering every tool path
+
+(The earlier ~100-connection population idea moves to the lab; SBX stays at 6 Redis.)
 
 - [ ] target shape mirrors the real findings: ~all cf-bind · a handful pinned hazards · ~⅓ idle · a couple Windows · zero pure static-ref in the "normal" set
 - [ ] ~10 Redis services (mix of plans), ~25 apps, 2–3 instances each, small pools → 100–150 connections

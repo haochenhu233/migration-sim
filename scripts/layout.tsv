@@ -1,0 +1,13 @@
+app	services	state	note
+sim-cache-bound	sim-redis-cache	started	shared service, plain consumer
+sim-username-aware	sim-redis-cache	started	shared service
+sim-password-only	sim-redis-cache	started	shared service, legacy auth (classic plan only)
+sim-win-bound	sim-redis-cache	started	shared service, Windows stack
+sim-bound-pinned	sim-redis-cache	started	HAZARD: bound + pinned env (SIM_SOURCE=env) -> preflight must refuse until fixed
+sim-producer	sim-redis-queue	started	data-sharing group
+sim-consumer	sim-redis-queue	started	data-sharing group
+sim-lock	sim-redis-queue	started	data-sharing group, 3 instances, lock across rolling restart
+sim-pipeline-a	sim-redis-pipe-a,sim-redis-pipe-b	started	multi-bound app (ONE restart per wave)
+sim-pipeline-b	sim-redis-pipe-a	started	completes the 2-service/2-app component
+sim-store-bound	sim-redis-store	started	data-store service: add 'datastore' to its flags in waves.tsv -> copy-data step
+sim-session-bound	sim-redis-session	stopped	SILENT service: bound but not running -> rebind only, no restart, stays stopped
