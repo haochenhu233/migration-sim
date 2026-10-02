@@ -156,6 +156,9 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 
 ## Log
 
+- 2026-10-01 — **Naming-policy risk reproduced in SBX:** `sim-pipeline-b` (selects its binding BY NAME, `SIM_SERVICE_NAME`) crashed at its migration restart under substituted naming — no binding named `sim-redis-pipe-a` any more. Fix = team-side config change (`cf set-env SIM_SERVICE_NAME <new name>`); under policy A (rename swap before restart) no change would be needed. Evidence for the client's naming decision.
+- 2026-10-01 — Blocks 6a/6b (queue group split → starvation; counter restart invisible to a restarted consumer), 8a/8b (no copy → state reset; rollback → Sept 30 canary intact) done. 8c copy methods written.
+
 - 2026-10-01 — **Theory validated for the core claim + every access pattern on the cache service:** sim-cache-bound migrated (4 commands, server=valkey, auth_user=default); pinned hazard shown live (binding moved, app stayed on Redis) and fixed; username-aware, password-only (classic), Windows, UPS (via update-user-provided-service), static-env (via set-env) all on Valkey. Remaining blocks scripted in `scenarios/SESSION-COMMANDS.md` (queue group, downtime, store loss/copy, session, pipeline order, timed rollback, retire).
 
 - 2026-09-30 — **Full population live in SBX: 14 apps** (core six + pinned/static-env/UPS/password-only/username-aware/pipeline a+b + Windows), `baseline-all` captured. Six core Go probe apps up, baseline captured (`verify/data/*-baseline.jsonl`). Next: access variants + Windows + TLS apps, Valkey twins, first migration (cache).

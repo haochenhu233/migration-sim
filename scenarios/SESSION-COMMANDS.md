@@ -176,9 +176,15 @@ Why: `sim-pipeline-a` produces into `pipe-a`; `sim-pipeline-b` consumes from `pi
 
 ### 10a — wrong order: migrate the consumer's service first... by moving only app b
 
+NOTE: the pipeline apps select their binding BY NAME (`SIM_SERVICE_NAME=sim-redis-pipe-a`) —
+like a real multi-service app. After the rebind that name no longer exists, so the app exits
+at restart ("no credentials found") until the name is updated. This is the naming-policy-B
+cost, live. The `set-env` below is the team-side fix.
+
 ```bash
 APP=sim-pipeline-b
-cf bind-service $APP sim-valkey-pipe-a && cf unbind-service $APP sim-redis-pipe-a && cf restart $APP
+cf bind-service $APP sim-valkey-pipe-a && cf unbind-service $APP sim-redis-pipe-a
+cf set-env $APP SIM_SERVICE_NAME sim-valkey-pipe-a && cf restart $APP
 sleep 30
 bash verify/snapshot.sh pipe-wrong
 f=$(ls -t verify/data/*pipe-wrong.jsonl | head -1)
@@ -191,7 +197,8 @@ the old side. The "break".
 
 ```bash
 APP=sim-pipeline-a
-cf bind-service $APP sim-valkey-pipe-a && cf unbind-service $APP sim-redis-pipe-a && cf restart $APP
+cf bind-service $APP sim-valkey-pipe-a && cf unbind-service $APP sim-redis-pipe-a
+cf set-env $APP SIM_SERVICE_NAME sim-valkey-pipe-a && cf restart $APP
 sleep 30
 bash verify/snapshot.sh pipe-right
 f=$(ls -t verify/data/*pipe-right.jsonl | head -1)
