@@ -220,66 +220,85 @@ date +%T
 Expect: `sim-cache-bound` back on `redis`. The two `date` lines = the rollback time. Then put
 it back on Valkey (the four steps again) so the end state is "migrated".
 
-## S7. The real naming sequence — rename FIRST, create the Valkey under the original name
+## S7. The real naming sequence — rename FIRST, Valkey under the original name (on the cache service)
 
 Decided sequence for the real migration (policy A): the old Redis is renamed to
-`<name>-redis-standby` while its apps are still bound and running; the Valkey is created
-under the ORIGINAL name; then each app is re-bound and restarted. Apps, manifests, pipelines
-and name-selecting code never see a new name. Rehearse it on `sim-redis-pipe-b`, the one
-service whose bindings are still untouched (both pipeline apps are bound to it).
+`<name>-redis-standby` while its apps are still bound and running; the Valkey carries the
+ORIGINAL name; then each app is re-bound and restarted. Apps, manifests, pipelines and
+name-selecting code never see a new name. Rehearsed on the cache service (the most
+consumers, and the name every manifest references), starting from "all on Redis".
 
-### S7a — rename the Redis out of the way (apps keep running on it)
+### S7-1 — put the bound consumers back on Redis (clean start)
 
 ```bash
-cf services | grep '^sim-redis-pipe-b '                           # bound: sim-pipeline-a, sim-pipeline-b
-cf rename-service sim-redis-pipe-b sim-redis-pipe-b-redis-standby
-bash verify/snapshot.sh s7-renamed                                 # pipeline apps unchanged (they use pipe-a; pipe-b binding intact)
+for APP in sim-cache-bound sim-bound-pinned sim-password-only sim-username-aware sim-win-bound; do
+  cf bind-service $APP sim-redis-cache && cf unbind-service $APP sim-valkey-cache && cf restart $APP
+done
+sleep 30; bash verify/snapshot.sh s7-start
+cf services | grep -E '^sim-(redis|valkey)-cache '      # redis: 5 apps; valkey: none
+```
+Expect: the five on `redis` (endpoint `4687a087…`, `AUTH_USER=n/a`). `sim-static-env` and
+`sim-ups` are not bound — leave them.
+
+### S7-2 — rename the Redis out of the way (apps keep running on it)
+
+```bash
+cf rename-service sim-redis-cache sim-redis-cache-redis-standby
+bash verify/snapshot.sh s7-renamed                       # nothing changes: still redis, still connected
 ```
 
-### S7b — the Valkey is born with the original name
+### S7-3 — the Valkey takes the original name
 
-A twin called `sim-valkey-pipe-b` already exists from step 2; in the real migration the
-Valkey is CREATED with the final name. Either is equivalent for the test — pick one:
 ```bash
-cf rename-service sim-valkey-pipe-b sim-redis-pipe-b              # reuse the existing twin
-# -- or, the real thing (takes a few minutes): cf delete-service sim-valkey-pipe-b -f; cf create-service valkey <classic-plan> sim-redis-pipe-b
-cf services | grep '^sim-redis-pipe-b '                            # offering: valkey, no bound apps yet
+cf rename-service sim-valkey-cache sim-redis-cache       # (real migration: cf create-service valkey <plan> sim-redis-cache)
+cf services | grep '^sim-redis-cache'                    # original name -> offering valkey, no apps; standby -> redis, 5 apps
 ```
 
-### S7c — move the apps (the four steps, against the ORIGINAL name)
+### S7-4 — migrate each app against the ORIGINAL name
 
 ```bash
-for APP in sim-pipeline-a sim-pipeline-b; do
-  cf bind-service $APP sim-redis-pipe-b && cf unbind-service $APP sim-redis-pipe-b-redis-standby && cf restart $APP
+for APP in sim-cache-bound sim-bound-pinned sim-password-only sim-username-aware sim-win-bound; do
+  cf bind-service $APP sim-redis-cache && cf unbind-service $APP sim-redis-cache-redis-standby && cf restart $APP
 done
 sleep 30; bash verify/snapshot.sh s7-migrated
-cf services | grep -E '^sim-redis-pipe-b'                          # Valkey has both apps; standby has none
+cf services | grep '^sim-redis-cache'                    # valkey has the 5; standby has none
 ```
-(The pipeline apps still select `pipe-a` by `SIM_SERVICE_NAME`; their pipe-b binding moved
-underneath them — the snapshot proves nothing broke.)
+Expect: the five on `valkey` (`AUTH_USER=default`) with `SOURCE=vcap:sim-redis-cache` — the
+original name, now meaning the Valkey.
 
-### S7d — the stale-manifest push: an UNCHANGED manifest binds the Valkey
+### S7-5 — the stale-manifest push: an UNCHANGED manifest binds the Valkey
 
-`access-variants.yml` still says `services: [sim-redis-pipe-a, sim-redis-pipe-b]` — with pipe-a
-already renamed in S7 of the cache-style swap, or untouched, it resolves either way:
 ```bash
-cf unbind-service sim-pipeline-b sim-redis-pipe-b
-cd apps/sim-go && cf push sim-pipeline-b -f manifests/access-variants.yml && cd ../..
-cf services | grep '^sim-redis-pipe-b '                            # sim-pipeline-b bound again -- to the Valkey
+cf unbind-service sim-cache-bound sim-redis-cache
+cd apps/sim-go && cf push sim-cache-bound -f manifests/core.yml && cd ../..   # manifest still says services: [sim-redis-cache]
 bash verify/snapshot.sh s7-stale-push
+f=$(ls -t verify/data/*s7-stale-push.jsonl | head -1)
+jq -r 'select(._app=="sim-cache-bound") | [._app, .source, .server, .endpoint] | @tsv' "$f"
 ```
-Pass: the push needed no manifest edit; the binding it created is to the Valkey. The
-standby Redis has a name no manifest references.
+Pass: `vcap:sim-redis-cache  valkey  <valkey hostname>` — no manifest edit, binding created
+to the Valkey. The standby Redis has a name no manifest references.
 
-### S7e — rollback under this naming (names end up crossed; swap back only if abandoning)
+### S7-6 — rollback under the new names (one app), then re-migrate
 
 ```bash
-APP=sim-pipeline-a
-cf bind-service $APP sim-redis-pipe-b-redis-standby && cf unbind-service $APP sim-redis-pipe-b && cf restart $APP
-bash verify/snapshot.sh s7-rollback                                 # app back on redis; service names unchanged
-# to ABANDON the migration for this service entirely:  rename valkey away, rename standby back
-#   cf rename-service sim-redis-pipe-b sim-redis-pipe-b-valkey; cf rename-service sim-redis-pipe-b-redis-standby sim-redis-pipe-b
+cf bind-service sim-cache-bound sim-redis-cache-redis-standby && cf unbind-service sim-cache-bound sim-redis-cache && cf restart sim-cache-bound
+bash verify/snapshot.sh s7-rollback                      # back on redis via the standby name
+# re-migrate:  cf bind-service sim-cache-bound sim-redis-cache && cf unbind-service sim-cache-bound sim-redis-cache-redis-standby && cf restart sim-cache-bound
 ```
+Names stay as they are after a rollback (apps on standby, Valkey holding the real name);
+swapping them back is only for abandoning a service's migration.
+
+### S7-7 — Blacksmith's view (uncertain, worth a look)
+
+Renames are Cloud-Controller-only; the broker is not told. Check whether the Blacksmith UI
+still shows the pre-rename name for the instance — if yes, note it for the ops runbook.
+
+### Housekeeping
+
+`sim-pipeline-b` crashed earlier (10a leftover: `SIM_SERVICE_NAME` pointed at a binding it
+no longer had). Revive: `cf set-env sim-pipeline-b SIM_SERVICE_NAME sim-redis-pipe-a && cf restart sim-pipeline-b`.
+Lesson for the tool: an app already broken before a step looks like a migration failure after
+it — `preflight` checks "every app running" first and the ledger records the pre-state.
 
 ## 12. Standby → retire one Redis (IP recycling check)
 
