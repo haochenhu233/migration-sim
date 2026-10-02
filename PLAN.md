@@ -85,6 +85,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 **3a. Design & ledger**
 - [x] `migrate/DESIGN.md`: ledger (append-only `ledger.jsonl`, state = last event), per-app state machine, rollback-per-step table, commands, dashboard, restart semantics, accident matrix
 - [x] ledger schema frozen (`ts, wave, service, app, step, outcome, ms, op, note`; app="" = service-level); `ledger_states` jq = the one state rule; plan file = `waves.tsv`
+- [ ] identity by GUID (DESIGN §1a): `service` field = GUID, names as attributes; `rename-standby` event; name→GUID assertion before every cf action; status shows name (guid-prefix)
 
 **3b. The CLI (`migrate/migrate.sh`) — in this order**
 - [ ] `plan` → `waves.yml` from the merged report (pipeline pairs together, hazards + data-store flagged)

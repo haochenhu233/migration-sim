@@ -55,6 +55,22 @@ the ledger gets a `drift` event and the operator is asked, not overridden.
 
 ---
 
+## 1a. Identity rule — GUIDs, never names
+
+Service names change during the migration by design (Redis → `<name>-redis-standby`, Valkey
+born as `<name>`), so a name is never an identity. The plan and the ledger key every service
+on its **service-instance GUID** (`redis_si_guid`, `valkey_si_guid`; apps on `app_guid`); names
+are recorded attributes. Consequences:
+- `rename-standby` is a ledger event: `{guid, from, to}` — the full name history is on file.
+- `create-valkey` records the new instance's GUID; `plan` writes it back into `waves.tsv`.
+- `cf` commands take names, so **before every action `apply` resolves the name to a GUID**
+  (`cf curl /v3/service_instances?names=<n>&space_guids=<s>`) and asserts it equals the GUID the
+  ledger expects for that role (bind `<name>` ⇒ the Valkey's GUID; unbind
+  `<name>-redis-standby` ⇒ the Redis's GUID). Mismatch ⇒ `drift` event, stop, ask — never bind
+  the wrong instance.
+- `status` prints `name (guid-prefix)` for services, so the dashboard stays unambiguous while
+  names are in motion. BOSH deployment names are GUID-based already and never change.
+
 ## 2. Per-app state machine
 
 ```
