@@ -5,20 +5,23 @@
 set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
-WSIZE=""; ARG=""
-while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --wave-size) WSIZE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
+WSIZE=""; MAXAPPS=""; ORDER=""; ARG=""
+while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --order) ORDER="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
 PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 
 
 # ---- plan: merged/aggregated report -> waves.tsv (detailed, stays in env) + plan-summary.md (aggregates only)
-#   migrate.sh plan <merged_report.csv|aggregated_report.csv> [--run <dir>] [--wave-size N]
+#   migrate.sh plan <merged_report.csv|aggregated_report.csv> [--run <dir>] [--wave-size N] [--max-apps M] [--order easy|hard]
+#   --wave-size N  max services per wave (default 10)      --max-apps M  max app restarts per wave (default 40)
+#   --order easy   (default) silent services first (no live consumer), then islands, then shared, then multi-service
+#   --order hard   largest components first
 # Waves = connected components of the app<->service binding graph (an app and every service it
 # is bound to travel together => one restart per app), packed largest-first, max N services per
 # wave (a component larger than N gets its own wave). Services keyed by GUID (DESIGN 1a).
 cmd_plan(){
   local rep="$1"; [ -s "$rep" ] || { echo "usage: migrate.sh plan <report.csv> [--run dir] [--wave-size N]"; exit 1; }
   mkdir -p "$RUN"
-  awk -F',' -v OFS='\t' -v wsize="${WSIZE:-10}" -v run="$RUN" -v now="$(date -u +%FT%TZ)" '
+  awk -F',' -v OFS='\t' -v wsize="${WSIZE:-10}" -v maxapps="${MAXAPPS:-40}" -v order="${ORDER:-easy}" -v run="$RUN" -v now="$(date -u +%FT%TZ)" '
     function find(x){ while (par[x]!=x) { par[x]=par[par[x]]; x=par[x] } return x }
     function union(a,b,  ra,rb){ ra=find(a); rb=find(b); if (ra!=rb) par[rb]=ra }
     function plan_of(dep,  p){ p=dep; sub(/^(redis|valkey)-/,"",p); sub(/-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,"",p); return p }
@@ -44,14 +47,17 @@ cmd_plan(){
       for (a in app) { r=find("a"a); capp[r]++; cmembers_a[r]=cmembers_a[r] " " a }
       for (sg in svc){ r=find("s"sg); csvc[r]++; cmembers_s[r]=cmembers_s[r] " " sg; comp_of[sg]=r }
       nc=0; for (r in csvc) { cl[++nc]=r }
-      # sort components by services desc (simple insertion sort; nc is small: <= #services)
-      for (i=2;i<=nc;i++){ v=cl[i]; j=i-1; while (j>0 && (csvc[cl[j]]<csvc[v] || (csvc[cl[j]]==csvc[v] && capp[cl[j]]<capp[v]))) { cl[j+1]=cl[j]; j-- } cl[j+1]=v }
-      # pack into waves largest-first
-      w=1; used=0
+      # live apps per component (0 = silent: every connection idle)
+      for (i=1;i<=rows;i++){ k=edge[i]; split(k,kk,SUBSEP); if (k in live) clive[find("s"kk[2])]++ }
+      # sort key: easy = (silent first, then by services asc, apps asc); hard = services desc, apps desc
+      for (i=1;i<=nc;i++){ r=cl[i]; if (order=="hard") skey[r]=sprintf("%05d%05d", 99999-csvc[r], 99999-capp[r]); else skey[r]=sprintf("%d%05d%05d", (clive[r]>0?1:0), csvc[r], capp[r]) }
+      for (i=2;i<=nc;i++){ v=cl[i]; j=i-1; while (j>0 && skey[cl[j]]>skey[v]) { cl[j+1]=cl[j]; j-- } cl[j+1]=v }
+      # pack into waves: both caps -- services per wave AND app restarts per wave
+      w=1; used=0; usedapps=0
       for (i=1;i<=nc;i++) { r=cl[i]
-        if (used>0 && used+csvc[r] > wsize) { w++; used=0 }
-        cw[r]=w; used+=csvc[r]; wsvc[w]+=csvc[r]; wapp[w]+=capp[r]; wcomp[w]++
-        if (csvc[r]>wsize) { w++; used=0 }   # an oversized component owns its wave
+        if ((used>0 && used+csvc[r] > wsize) || (usedapps>0 && usedapps+capp[r] > maxapps)) { w++; used=0; usedapps=0 }
+        cw[r]=w; used+=csvc[r]; usedapps+=capp[r]; wsvc[w]+=csvc[r]; wapp[w]+=capp[r]; wcomp[w]++; if (clive[r]==0) wsilent[w]+=csvc[r]
+        if (csvc[r]>wsize || capp[r]>maxapps) { w++; used=0; usedapps=0 }   # an oversized component owns its wave
       }
       nw=w; if (used==0) nw=w-1
       # ---- waves.tsv (detailed; stays in the env)
@@ -89,11 +95,16 @@ cmd_plan(){
       printf "| hazard apps (cf-bind + pinned ref) | %d (%d connections) |\n| idle connections (no live seen) | %d |\n| services with NO live connection at all | %d |\n| windows apps | %d |\n\n", nhzapp, nhz, nidle, nidlesvc, nwin > h
       printf "## Binding-graph components: %d\n\n| shape | count |\n|---|---|\n", nc > h
       for (key in hist) printf "| %s | %d |\n", key, hist[key] > h
+      # apps-per-service distribution (how heavy are the shared services)
+      for (sg in svc){ n=sapps[sg]; b=(n==1)?"1 app":(n<=5)?"2-5 apps":(n<=20)?"6-20 apps":(n<=50)?"21-50 apps":">50 apps"; aps[b]++; if (n>maxaps) maxaps=n }
+      printf "\n## Apps per service\n\n| apps bound | services |\n|---|---|\n" > h
+      for (b in aps) printf "| %s | %d |\n", b, aps[b] > h
+      printf "\nmost-shared service: %d apps (one restart each when its wave runs)\n", maxaps > h
       printf "\nlargest components (services/apps): " > h
       for (i=1;i<=5 && i<=nc;i++) printf "%s%d/%d", (i>1?", ":""), csvc[cl[i]], capp[cl[i]] > h
-      printf "\n\n## Wave proposal (max %d services per wave, largest components first)\n\n| wave | services | apps | components | orgs |\n|---|---|---|---|---|\n", wsize > h
+      printf "\n\n## Wave proposal (max %d services and %d app restarts per wave, order=%s)\n\n| wave | services | silent svcs | apps (restarts) | components | orgs |\n|---|---|---|---|---|---|\n", wsize, maxapps, order > h
       for (w=1;w<=nw;w++){ t=0; for (x in wteams){ split(x,xx,SUBSEP); if (xx[1]==w) t++ }
-        printf "| %d | %d | %d | %d | %d |\n", w, wsvc[w], wapp[w], wcomp[w], t > h }
+        printf "| %d | %d | %d | %d | %d | %d |\n", w, wsvc[w], wsilent[w]+0, wapp[w], wcomp[w], t > h }
       printf "\nIP headroom needed: %d Valkeys in total (one per service); per wave as above.\n", nsvc > h
       printf "\nDetailed files (stay in the environment): waves.tsv, components.tsv\n" > h
       printf "plan: %d connections, %d services, %d apps -> %d component(s) in %d wave(s)\n", rows, nsvc, napp, nc, nw
