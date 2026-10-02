@@ -85,7 +85,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 **3a. Design & ledger**
 - [x] `migrate/DESIGN.md`: ledger (append-only `ledger.jsonl`, state = last event), per-app state machine, rollback-per-step table, commands, dashboard, restart semantics, accident matrix
 - [x] ledger schema frozen (`ts, wave, service, app, step, outcome, ms, op, note`; app="" = service-level); `ledger_states` jq = the one state rule; plan file = `waves.tsv`
-- [ ] identity by GUID (DESIGN §1a): `service` field = GUID, names as attributes; `rename-standby` event; name→GUID assertion before every cf action; status shows name (guid-prefix)
+- [~] identity by GUID (DESIGN §1a): ledger `service` = GUID, status shows name (guid-prefix), `rename-standby` event in the sample ledger — DONE; name→GUID assertion before every cf action — with `apply`
 
 **3b. The CLI (`migrate/migrate.sh`) — in this order**
 - [ ] `plan` → `waves.yml` from the merged report (pipeline pairs together, hazards + data-store flagged)
@@ -119,6 +119,7 @@ Input: the merged (aggregated) report of the client's most complex env — avail
 Pure file processing (runs in the VDI; only aggregates leave). Output = the real `waves.tsv`
 plus a review document for the client, built from the binding graph:
 
+- [ ] **run:** `git pull && bash migrate/migrate.sh plan <aggregated_or_merged_report.csv> --run runs/<env> --wave-size 10` in the VDI; paste `runs/<env>/plan-summary.md` (no names) for joint review
 - [ ] connected components of the app↔service graph: size distribution (how many 1-app/1-service islands vs large components), the largest components named by service count
 - [ ] multi-bound apps (bound to 2+ Redis): count; each must migrate in ONE wave (restart once)
 - [ ] shared services across spaces/orgs: list → joint windows / sharing to replicate on the Valkey
@@ -177,6 +178,8 @@ plus a review document for the client, built from the binding graph:
 - [ ] how many real consumers use the TLS port (16379)? (census has the port -- `awk -F'\t' '$4==16379' backward/02_conns.tsv`) -> sizes the TLS-plan requirement for Valkey
 
 ## Log
+
+- 2026-10-02 — `migrate.sh plan` built and verified on a synthetic report; two-artifact output (detailed in env / aggregate summary shareable). Ready to run on the real most-complex-env report (Phase 3.5).
 
 - 2026-10-02 — S7-7 result: **Blacksmith keeps showing the pre-rename service name** (rename is CF-only; the broker is never told). Backlog item for blacksmith: refresh instance names from the CF API (it already has a CF client) or accept CF context updates (`allow_context_updates`). Until then the ops runbook says: Blacksmith names are the ORIGINAL names; after a migration the standby Redis shows under the name the Valkey now owns.
 - 2026-10-02 — Rollback confirmed quick in practice (done several times during the session: bind/unbind/restart, minutes) — the formal timed measurement (block 11) is optional. Retirement explicitly out of scope for now.
