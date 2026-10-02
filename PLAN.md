@@ -108,7 +108,8 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] S3 **accident drill**: every row of the accident matrix, with client devops on the call
 - [x] S4 secure-plan variant: `sim-password-only` on a `-secure` twin → WRONGPASS evidence captured (2026-10-01)
 - [ ] S5 pipeline ordering: wrong order once (prove the break), then correct
-- [ ] S6 TLS consumer onto a TLS-enabled Valkey plan
+- [ ] S6 TLS consumer onto a TLS-enabled Valkey plan (optional)
+- [x] S7-7 Blacksmith view after rename: stale (shows original name) → blacksmith backlog item
 - [x] S7 rename-first sequence validated on the cache service (2026-10-02): rename Redis → standby with apps bound, Valkey under the original name, apps migrated against it, UNCHANGED manifest push binds the Valkey, rollback under the new names. (was:) S7 name swap (policy A, decided): rename Redis → `-redis-standby`, Valkey → original name; then `cf push` an app with its ORIGINAL manifest (`services: [<name>]`) and prove it binds the Valkey, not the Redis
 
 ## Phase 3.5 — the migration-specific plan from the REAL report (before any real wave)
@@ -175,6 +176,9 @@ plus a review document for the client, built from the binding graph:
 - [ ] how many real consumers use the TLS port (16379)? (census has the port -- `awk -F'\t' '$4==16379' backward/02_conns.tsv`) -> sizes the TLS-plan requirement for Valkey
 
 ## Log
+
+- 2026-10-02 — S7-7 result: **Blacksmith keeps showing the pre-rename service name** (rename is CF-only; the broker is never told). Backlog item for blacksmith: refresh instance names from the CF API (it already has a CF client) or accept CF context updates (`allow_context_updates`). Until then the ops runbook says: Blacksmith names are the ORIGINAL names; after a migration the standby Redis shows under the name the Valkey now owns.
+- 2026-10-02 — Rollback confirmed quick in practice (done several times during the session: bind/unbind/restart, minutes) — the formal timed measurement (block 11) is optional. Retirement explicitly out of scope for now.
 
 - 2026-10-02 — **S7 passed**: rename-first naming sequence works end to end; stale-manifest push lands on the Valkey. Theory validation now complete for every scenario except ordering (deferred by policy). Remaining optional evidence: timed rollback + downtime (11 with the poller), retire/IP recycling (12), TLS consumer (S6), Blacksmith UI name after rename (S7-7).
 
