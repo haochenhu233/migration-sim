@@ -100,8 +100,11 @@ cmd_plan(){
       printf "\n## Apps per service\n\n| apps bound | services |\n|---|---|\n" > h
       for (b in aps) printf "| %s | %d |\n", b, aps[b] > h
       printf "\nmost-shared service: %d apps (one restart each when its wave runs)\n", maxaps > h
+      # largest components by size, independent of wave ordering
+      for (i=1;i<=nc;i++) big[i]=cl[i]
+      for (i=2;i<=nc;i++){ v=big[i]; j=i-1; while (j>0 && (csvc[big[j]]<csvc[v] || (csvc[big[j]]==csvc[v] && capp[big[j]]<capp[v]))) { big[j+1]=big[j]; j-- } big[j+1]=v }
       printf "\nlargest components (services/apps): " > h
-      for (i=1;i<=5 && i<=nc;i++) printf "%s%d/%d", (i>1?", ":""), csvc[cl[i]], capp[cl[i]] > h
+      for (i=1;i<=5 && i<=nc;i++) printf "%s%d/%d", (i>1?", ":""), csvc[big[i]], capp[big[i]] > h
       printf "\n\n## Wave proposal (max %d services and %d app restarts per wave, order=%s)\n\n| wave | services | silent svcs | apps (restarts) | components | orgs |\n|---|---|---|---|---|---|\n", wsize, maxapps, order > h
       for (w=1;w<=nw;w++){ t=0; for (x in wteams){ split(x,xx,SUBSEP); if (xx[1]==w) t++ }
         printf "| %d | %d | %d | %d | %d | %d |\n", w, wsvc[w], wsilent[w]+0, wapp[w], wcomp[w], t > h }
