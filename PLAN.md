@@ -120,6 +120,10 @@ Pure file processing (runs in the VDI; only aggregates leave). Output = the real
 plus a review document for the client, built from the binding graph:
 
 - [ ] **run:** `git pull && bash migrate/migrate.sh plan <aggregated_or_merged_report.csv> --run runs/<env> --wave-size 10` in the VDI; paste `runs/<env>/plan-summary.md` (no names) for joint review
+- [x] **first real run (int-np, single-day merged report, 2026-10-02):** 826 connections / 274 services / 750 apps / 41 orgs; 239 components — 136 islands, 82 single-service shared, 14 of 2–3 services, 7 of 4–10 (largest 4 svcs/3 apps); 62 multi-bound apps; 0 cross-space; 15 hazards; 17 windows; 119 services with no live consumer (one scan); apps-per-service: 136×1, 101×2–5, 33×6–20, 4×21–50. Plan (10 svcs / 40 restarts, easy-first): 36 waves — 1–12 silent (119 svcs), 13–23 live islands + small shared, 24–32 the big shared services one per wave (21–38 restarts, 1–2 orgs), 33–36 multi-service chains.
+- [ ] re-run on the AGGREGATED report (ever_live) — silent/idle verdicts across days
+- [ ] `--silent-max-apps` (bigger cap for silent waves → 2–3 waves instead of 12)
+- [ ] weekend mapping: Fri evening = silent block (tooling at scale, no audience); Sat = live islands/small shared; Sun = big shared services + chains, one at a time, dashboard watched
 - [ ] connected components of the app↔service graph: size distribution (how many 1-app/1-service islands vs large components), the largest components named by service count
 - [ ] multi-bound apps (bound to 2+ Redis): count; each must migrate in ONE wave (restart once)
 - [ ] shared services across spaces/orgs: list → joint windows / sharing to replicate on the Valkey
