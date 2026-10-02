@@ -171,22 +171,16 @@ Suggested tmux layout: status (top) · `tail -f commands.log` (bottom-left) · s
 - **Replicate sharing.** If the Redis was shared into other spaces (`cf curl
   /v3/service_instances/<guid>/relationships/shared_spaces` — the cross-space consumers in the
   report), share the Valkey into the same spaces before binding those apps.
-- **Naming — DECIDED (client, 2026-10-01): policy (A).** For the record, the two policies were:
-  - **(A) keep the original name on the Valkey** — create as `<name>-valkey`, and at cutover
-    rename Redis → `<name>-redis-standby`, Valkey → `<name>`. Zero team-side change: every
-    manifest/pipeline `services: [<name>]` resolves to the Valkey from then on. Cosmetic cost:
-    a service called `pi-redis-strates` is a Valkey (the offering column in `cf services`
-    says so).
-  - **(B) substituted name** — `redis`→`valkey` case-preserving in the name
-    (`pi-redis-strates` → `pi-valkey-strates`, `AIPPRedisSvc` → `AIPPValkeySvc`; names without
-    "redis" get `-valkey`). Clean naming, but **every team must change the service name in
-    their manifests/pipelines** — the one team-side change this migration would otherwise
-    avoid — and until they do, a `cf push` either silently re-binds the old Redis (if it still
-    has its name) or fails loudly ("service instance not found") after it is renamed/retired.
-  - Either way: **rename the old Redis to `<name>-redis-standby` at cutover.** Its bindings are
-    unaffected, and a stale manifest then fails loudly instead of silently re-binding the old
-    Redis (the drift accident). With (B) the academy's ask list gains a 6th item ("update the
-    service name in your manifest during the standby weeks").
+- **Naming — DECIDED (client, 2026-10-01): rename-first.** Per service: `cf rename-service
+  <name> <name>-redis-standby` (apps still bound and running) → `cf create-service valkey
+  <plan> <name>` (the Valkey is born with the original name) → copy data if flagged → per app
+  bind `<name>` / unbind `<name>-redis-standby` / restart → verify → standby → retire. Apps,
+  manifests, pipelines and name-selecting code never see a different name; a stale `cf push`
+  during the window lands on the Valkey (early, harmless for cache apps; data-store services
+  are copied before any binding). Full-service rollback leaves names crossed (apps on the
+  standby, Valkey holding the real name) — the tool records it; swapping back is only for
+  abandoning the service's migration. The earlier alternatives (create as `-valkey` + swap at
+  the end; substituted names) are superseded.
 
 ## 6a. Ordering policy
 
