@@ -103,7 +103,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] handles pinned-env apps (refuse in preflight), UPS, service keys (new key), multi-instance, Windows, TLS consumers (TLS plan + cert trust)
 
 **3c. Scenarios (SBX, 6 Redis + 6 Valkey, waves of two)**
-- [~] S1 happy migration: cache service fully migrated incl. all access variants (2026-10-01); queue/store/session/pipeline next
+- [x] S1 core theory validated in SBX (2026-09-30 → 10-01): cache service + all access variants; queue group (split → starvation, group move OK); store no-copy reset vs rollback intact; name-selected binding crash under policy B. Remaining blocks are evidence-gathering, not theory.
 - [ ] S2 rollback: one wave back to Redis — prove "minutes", data intact on standby
 - [ ] S3 **accident drill**: every row of the accident matrix, with client devops on the call
 - [ ] S4 secure-plan variant: `sim-password-only` + `sim-username-aware` → WRONGPASS vs OK captured
@@ -155,6 +155,8 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] how many real consumers use the TLS port (16379)? (census has the port -- `awk -F'\t' '$4==16379' backward/02_conns.tsv`) -> sizes the TLS-plan requirement for Valkey
 
 ## Log
+
+- 2026-10-01 — **Theory validation considered complete** except ordering (deferred by policy). Still worth collecting if time: timed rollback + plain-vs-rolling downtime (11, poller), retire/IP recycling (12), secure-plan WRONGPASS evidence (S4), TLS consumer (S6), rename swap + stale-manifest push (S7).
 
 - 2026-10-01 — **Naming-policy risk reproduced in SBX:** `sim-pipeline-b` (selects its binding BY NAME, `SIM_SERVICE_NAME`) crashed at its migration restart under substituted naming — no binding named `sim-redis-pipe-a` any more. Fix = team-side config change (`cf set-env SIM_SERVICE_NAME <new name>`); under policy A (rename swap before restart) no change would be needed. Evidence for the client's naming decision.
 - 2026-10-01 — Blocks 6a/6b (queue group split → starvation; counter restart invisible to a restarted consumer), 8a/8b (no copy → state reset; rollback → Sept 30 canary intact) done. 8c copy methods written.
