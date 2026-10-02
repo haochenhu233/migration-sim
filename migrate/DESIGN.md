@@ -171,7 +171,7 @@ Suggested tmux layout: status (top) · `tail -f commands.log` (bottom-left) · s
 - **Replicate sharing.** If the Redis was shared into other spaces (`cf curl
   /v3/service_instances/<guid>/relationships/shared_spaces` — the cross-space consumers in the
   report), share the Valkey into the same spaces before binding those apps.
-- **Naming (decision pending — see the trade-off).** Two workable policies:
+- **Naming — DECIDED (client, 2026-10-01): policy (A).** For the record, the two policies were:
   - **(A) keep the original name on the Valkey** — create as `<name>-valkey`, and at cutover
     rename Redis → `<name>-redis-standby`, Valkey → `<name>`. Zero team-side change: every
     manifest/pipeline `services: [<name>]` resolves to the Valkey from then on. Cosmetic cost:

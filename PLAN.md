@@ -106,10 +106,10 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [x] S1 core theory validated in SBX (2026-09-30 → 10-01): cache service + all access variants; queue group (split → starvation, group move OK); store no-copy reset vs rollback intact; name-selected binding crash under policy B. Remaining blocks are evidence-gathering, not theory.
 - [ ] S2 rollback: one wave back to Redis — prove "minutes", data intact on standby
 - [ ] S3 **accident drill**: every row of the accident matrix, with client devops on the call
-- [ ] S4 secure-plan variant: `sim-password-only` + `sim-username-aware` → WRONGPASS vs OK captured
+- [x] S4 secure-plan variant: `sim-password-only` on a `-secure` twin → WRONGPASS evidence captured (2026-10-01)
 - [ ] S5 pipeline ordering: wrong order once (prove the break), then correct
 - [ ] S6 TLS consumer onto a TLS-enabled Valkey plan
-- [ ] S7 name swap: rename Redis → `-redis-standby`, Valkey → original name; then `cf push` an app with its ORIGINAL manifest (`services: [<name>]`) and prove it binds the Valkey, not the Redis
+- [~] S7 name swap (policy A, decided): rename Redis → `-redis-standby`, Valkey → original name; then `cf push` an app with its ORIGINAL manifest (`services: [<name>]`) and prove it binds the Valkey, not the Redis
 
 ## Phase 4 — verification & report
 
@@ -125,7 +125,8 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - 2026-10-01 — **State reset is a known experience for the app teams**: three years of Redis stemcell/release upgrades recreated the service VMs and teams were fine. Pending one check (are the plans `persistent`? → AOF on persistent disk survives recreation), this either (a) proves tolerance of full state reset → data copy becomes opt-in only, academy line "same event as the upgrades you've been through", or (b) proves restart tolerance only → keep the "flag real data" ask. **Parity rule either way:** the Valkey plan's `persistent` must match the Redis plan it replaces (preflight check).
 
 - 2026-10-03 — **Retirement happens** ~1–2 weeks after full confirmation (grace default 14 d), never automatically. **IP headroom is a preflight check**, not an assumption. **Rollback unit = the service** (all its apps; pipeline groups together); per-app only as explicit override.
-- 2026-10-03 — Valkey naming: **preference = (B) substituted names** (`redis`→`valkey`, case-preserving; `-valkey` suffix when the name has no "redis"), pending the client's decision. Teams update manifests/pipelines at their own pace during the standby weeks; the old Redis is renamed `<name>-redis-standby` at cutover so a stale manifest fails loudly ("service instance not found") instead of silently re-binding it. Consequences owned: 6th academy ask ("update the service name in your manifest"), and a periodic drift scan during standby (apps bound back to a `-redis-standby` service).
+- 2026-10-01 — **Naming DECIDED by the client: policy A — rename swap.** Valkey created as `<name>-valkey`, then Redis → `<name>-redis-standby`, Valkey → `<name>` (before the app restart, so name-selecting apps work unchanged). Teams with hard-coded names in pipelines fix them manually. S7 tests it. (Superseded: 2026-10-03 preference B)
+- 2026-10-03 — Valkey naming (superseded): **preference = (B) substituted names** (`redis`→`valkey`, case-preserving; `-valkey` suffix when the name has no "redis"), pending the client's decision. Teams update manifests/pipelines at their own pace during the standby weeks; the old Redis is renamed `<name>-redis-standby` at cutover so a stale manifest fails loudly ("service instance not found") instead of silently re-binding it. Consequences owned: 6th academy ask ("update the service name in your manifest"), and a periodic drift scan during standby (apps bound back to a `-redis-standby` service).
 
 - 2026-10-02 — **Weekend maintenance window, not per-team windows.** Teams are informed; they deal with their apps' restart inside it. Waves are grouped technically (connected components, size), not by team scheduling.
 - 2026-10-02 — **Replacement Valkey in the same org+space as the Redis**, sharing replicated, created as `<name>-valkey`, then **name-swapped** after verification (Redis → `<name>-redis-standby`, Valkey → `<name>`) so team manifests/pipelines resolve to the Valkey. Validate the swap in SBX.

@@ -220,6 +220,59 @@ date +%T
 Expect: `sim-cache-bound` back on `redis`. The two `date` lines = the rollback time. Then put
 it back on Valkey (the four steps again) so the end state is "migrated".
 
+## S7. The rename swap — the Valkey takes the original name (naming policy A, decided)
+
+Why: every team manifest/pipeline says `services: [sim-redis-cache]`. After the swap that
+name IS the Valkey, so an unchanged manifest or a name-selecting app lands on Valkey with zero
+team change; the old Redis keeps running under `-redis-standby` and can't be hit by accident.
+Pre-condition: all apps of the service already migrated (the cache service is).
+
+### S7a — swap the names (bindings untouched, nothing restarts)
+
+```bash
+cf services | grep -E 'sim-redis-cache|sim-valkey-cache'            # before: who is bound to what
+cf rename-service sim-redis-cache  sim-redis-cache-redis-standby
+cf rename-service sim-valkey-cache sim-redis-cache
+cf services | grep -E 'sim-redis-cache'                               # after: the Valkey now carries the original name
+bash verify/snapshot.sh after-rename                                   # every app unchanged: still valkey, still connected
+```
+Expect: identical to the previous snapshot — renaming touches no binding and no running app.
+
+### S7b — the stale-manifest push: an UNCHANGED manifest must bind the Valkey
+
+```bash
+cf unbind-service sim-cache-bound sim-redis-cache                     # drop the binding so the push has to re-create it
+cd apps/sim-go && cf push sim-cache-bound -f manifests/core.yml && cd ../..   # manifest still says services: [sim-redis-cache]
+cf services | grep '^sim-redis-cache '                                # bound apps include sim-cache-bound again
+bash verify/snapshot.sh after-stale-push
+f=$(ls -t verify/data/*after-stale-push.jsonl | head -1)
+jq -r 'select(._app=="sim-cache-bound") | [._app, .source, .server, .endpoint] | @tsv' "$f"
+```
+Pass: `vcap:sim-redis-cache  valkey  <the VALKEY hostname>` — the original service name in the
+manifest now resolves to the Valkey. (Under substituted naming this push would have failed
+or re-bound the old Redis.)
+
+### S7c — the name-selecting app, the other way round (the counter-demo to 10a's crash)
+
+```bash
+cf rename-service sim-redis-pipe-a  sim-redis-pipe-a-redis-standby
+cf rename-service sim-valkey-pipe-a sim-redis-pipe-a
+for APP in sim-pipeline-a sim-pipeline-b; do cf set-env $APP SIM_SERVICE_NAME sim-redis-pipe-a; cf restart $APP; done
+sleep 30; bash verify/snapshot.sh after-rename-pipe
+f=$(ls -t verify/data/*after-rename-pipe.jsonl | head -1)
+jq -r 'select(._app|startswith("sim-pipeline")) | [._app, .source, .server] | @tsv' "$f"
+```
+Pass: both `vcap:sim-redis-pipe-a  valkey` with their ORIGINAL `SIM_SERVICE_NAME` — the app
+that crashed in 10a needs no change at all once the Valkey carries the old name.
+
+### S7d — the stale name is dead
+
+```bash
+cf bind-service sim-cache-bound sim-redis-cache-redis-standby 2>&1 | tail -1   # works (it exists) -- so DON'T; just show it is a different name
+cf service sim-redis-cache-redis-standby | grep -E 'offering|plan'            # offering: redis -- the standby
+```
+(A manifest that said `sim-redis-cache-redis-standby` would bind the old Redis — nobody's does.)
+
 ## 12. Standby → retire one Redis (IP recycling check)
 
 ```bash
