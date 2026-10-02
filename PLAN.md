@@ -109,7 +109,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [x] S4 secure-plan variant: `sim-password-only` on a `-secure` twin → WRONGPASS evidence captured (2026-10-01)
 - [ ] S5 pipeline ordering: wrong order once (prove the break), then correct
 - [ ] S6 TLS consumer onto a TLS-enabled Valkey plan
-- [~] S7 name swap (policy A, decided): rename Redis → `-redis-standby`, Valkey → original name; then `cf push` an app with its ORIGINAL manifest (`services: [<name>]`) and prove it binds the Valkey, not the Redis
+- [x] S7 rename-first sequence validated on the cache service (2026-10-02): rename Redis → standby with apps bound, Valkey under the original name, apps migrated against it, UNCHANGED manifest push binds the Valkey, rollback under the new names. (was:) S7 name swap (policy A, decided): rename Redis → `-redis-standby`, Valkey → original name; then `cf push` an app with its ORIGINAL manifest (`services: [<name>]`) and prove it binds the Valkey, not the Redis
 
 ## Phase 3.5 — the migration-specific plan from the REAL report (before any real wave)
 
@@ -175,6 +175,8 @@ plus a review document for the client, built from the binding graph:
 - [ ] how many real consumers use the TLS port (16379)? (census has the port -- `awk -F'\t' '$4==16379' backward/02_conns.tsv`) -> sizes the TLS-plan requirement for Valkey
 
 ## Log
+
+- 2026-10-02 — **S7 passed**: rename-first naming sequence works end to end; stale-manifest push lands on the Valkey. Theory validation now complete for every scenario except ordering (deferred by policy). Remaining optional evidence: timed rollback + downtime (11 with the poller), retire/IP recycling (12), TLS consumer (S6), Blacksmith UI name after rename (S7-7).
 
 - 2026-10-01 — Phase 3.5 added: build the real migration plan from the most complex env's merged report (graph analysis → waves.tsv + client review) before the first real wave. The report is accessible now.
 - 2026-10-01 — **Theory validation considered complete** except ordering (deferred by policy). Still worth collecting if time: timed rollback + plain-vs-rolling downtime (11, poller), retire/IP recycling (12), secure-plan WRONGPASS evidence (S4), TLS consumer (S6), rename swap + stale-manifest push (S7).
