@@ -139,6 +139,8 @@ plus a review document for the client, built from the binding graph:
 
 ## Decisions
 
+- 2026-10-02 — **Team-side changes under policy A are exactly three, all optional-until-needed or already named:** (1) pipelines that CREATE the service: `cf create-service redis …` → `valkey` (create-if-missing pipelines are unaffected; unconditional ones fail loudly with "name already in use"; `disable-service-access redis` flushes out the rest); (2) code selecting the binding by VCAP label `redis` — a code change unless the Valkey offering carries a `redis` tag (platform lever: settle before the academy); (3) the ~20 pinned addresses. Bind commands, manifests, service names, restarts: untouched.
+
 - 2026-10-01 — **State reset is a known experience for the app teams**: three years of Redis stemcell/release upgrades recreated the service VMs and teams were fine. Pending one check (are the plans `persistent`? → AOF on persistent disk survives recreation), this either (a) proves tolerance of full state reset → data copy becomes opt-in only, academy line "same event as the upgrades you've been through", or (b) proves restart tolerance only → keep the "flag real data" ask. **Parity rule either way:** the Valkey plan's `persistent` must match the Redis plan it replaces (preflight check).
 
 - 2026-10-03 — **Retirement happens** ~1–2 weeks after full confirmation (grace default 14 d), never automatically. **IP headroom is a preflight check**, not an assumption. **Rollback unit = the service** (all its apps; pipeline groups together); per-app only as explicit override.
