@@ -91,8 +91,8 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] `plan` → `waves.yml` from the merged report (pipeline pairs together, hazards + data-store flagged)
 - [x] `status` = project summary (per wave + TOTAL, %, progress bar) + snapshot files; `status --wave N` = wave detail; corruption-tolerant parser; 50k-line ledger renders in 0.7 s (measured)
 - [x] (was:) `status` dashboard working on `migrate/example/` (phases, switched/verified, standby clock, last event, attention list, hazard warning); `watch -n 3 -c migrate.sh status --wave N`
-- [ ] `preflight --wave N` incl. blast-radius line; lock file
-- [ ] `dry-run --wave N` with rollback row per step
+- [x] `preflight --wave N`: lock/STOP/ledger · cf session · per service: guid↔name reconciliation with the ledger (drift), last_operation, standby/valkey name collisions, valkey plan visible in the space, secure-plan warning · per app: exists, STARTED, all instances running, hazard env var still present → FAIL · blast radius · `--free-ips N` headroom; exit 1 on any FAIL. Offline-tested with `migrate/test/cf-stub`
+- [x] `dry-run --wave N`: exact command sequence in the rehearsed order (per service: rename, create under original name, copy if flagged; per app: bind all, unbind all standby, ONE restart, verify), DONE marks from the ledger, rollback row per step
 - [ ] `apply` — idempotent, ledger-driven, STOP file, Ctrl-C safe, rolling restart for ≥2 instances, soak timer
 - [ ] `verify` — L1 platform (bindings, running, crashes) · L2 network (census on Valkey: conns to Valkey, none to Redis) · L3 server-side (CLIENT LIST / ACL LOG on Valkey) · L4 logs + optional team health URL · L5 data counts; `/check` only for sim apps (DESIGN §6b)
 - [ ] `rollback --app/--service/--wave` per the table
@@ -182,6 +182,8 @@ plus a review document for the client, built from the binding graph:
 - [ ] how many real consumers use the TLS port (16379)? (census has the port -- `awk -F'\t' '$4==16379' backward/02_conns.tsv`) -> sizes the TLS-plan requirement for Valkey
 
 ## Log
+
+- 2026-10-02 — `preflight` + `dry-run` built, offline-tested against a stub cf (ledger/CF reconciliation, collisions, plan visibility, half-down app and hazard env → FAIL). Next: run both against the SBX population, then `apply`.
 
 - 2026-10-02 — `migrate.sh plan` built and verified on a synthetic report; two-artifact output (detailed in env / aggregate summary shareable). Ready to run on the real most-complex-env report (Phase 3.5).
 

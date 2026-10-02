@@ -1,7 +1,7 @@
 wave	component	service	service_guid	service_org	service_space	valkey_plan	app	app_guid	app_org	app_space	flags
 1	860c4212	cache-0	2f6fe3d9-1e8a-48cf-ae53-4d6e0f5ca70a	acme	dev	cache-small	app-0	860c4212-e028-4013-ba36-4cab96e5aa45	acme	dev	idle
 2	dbbfa891	cache-3	130952d2-5373-454f-909c-54520fe4d24d	acme	dev	cache-small	app-3	dbbfa891-94ba-408b-9476-12515a6f2bd5	acme	dev	idle
-2	df17eae3	cache-4	2a620cd6-8c54-417f-80b8-e5bb304c0d14	acme	dev	cache-small	app-4	df17eae3-4ffc-4cba-852a-ddf0727d23fb	acme	dev	
+2	df17eae3	cache-4	2a620cd6-8c54-417f-80b8-e5bb304c0d14	acme	dev	cache-small	app-4	df17eae3-4ffc-4cba-852a-ddf0727d23fb	acme	dev	hazard
 2	d7f82725	cache-8	53219cf1-7f8b-4710-9c8a-7b60afbc1032	acme	dev	cache-small	app-8	d7f82725-3901-4212-b354-f57290e56de8	acme	dev	
 2	061ccf61	cache-11	450f04a9-638c-4343-a7f9-c9c7cd968830	acme	dev	cache-small	app-11	061ccf61-2644-4318-a5dc-e54f09a2094d	acme	dev	
 2	5b454e4c	cache-12	c5db2c37-8a04-4a40-bfb5-7586bcdbb8de	acme	dev	cache-small	app-12	5b454e4c-b62e-40ff-8b7f-05d37346bbde	acme	dev	idle

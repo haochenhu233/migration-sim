@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# stub `cf` for offline tests: `cf curl <path>` answered from the example plan/ledger.
+# CFSTUB_DOWN=<app_guid>  -> that app reports 1/2 instances running
+# CFSTUB_HAZARD=<app_guid> -> that app's env still has REDIS_HOST
+[ "$1" = curl ] || { echo "stub: only 'cf curl' supported" >&2; exit 1; }
+p="$2"; HERE="$(cd "$(dirname "$0")" && pwd)"; RUN="${CFSTUB_RUN:-$HERE/../example}"
+python3 - "$p" "$RUN" <<'PY'
+import sys, csv, json, os, re
+p, run = sys.argv[1], sys.argv[2]
+rows=list(csv.DictReader(open(run+'/waves.tsv'), delimiter='\t'))
+renamed=set(); created=set()
+if os.path.exists(run+'/ledger.jsonl'):
+    for l in open(run+'/ledger.jsonl'):
+        try: e=json.loads(l)
+        except: continue
+        if e['outcome']=='ok' and e['app']=='':
+            if e['step']=='rename-standby': renamed.add(e['service'])
+            if e['step']=='create-valkey': created.add(e['service'])
+svc={r['service_guid']:r for r in rows}; app={r['app_guid']:r for r in rows}
+down=os.environ.get('CFSTUB_DOWN',''); haz=os.environ.get('CFSTUB_HAZARD','')
+def out(o): print(json.dumps(o))
+if p.startswith('/v3/info'): out({"name":"cf-stub","version":3}); sys.exit()
+m=re.match(r'/v3/service_instances/([^?/]+)$', p)
+if m:
+    g=m.group(1); r=svc.get(g)
+    if not r: out({"errors":[{"title":"CF-ResourceNotFound"}]}); sys.exit()
+    name=r['service']+'-redis-standby' if g in renamed else r['service']
+    out({"guid":g,"name":name,"last_operation":{"state":"succeeded"},"relationships":{"space":{"data":{"guid":"SP1"}}}}); sys.exit()
+m=re.match(r'/v3/service_instances\?names=([^&]+)&space_guids=', p)
+if m:
+    n=m.group(1); res=[]
+    for g,r in svc.items():
+        cur=r['service']+'-redis-standby' if g in renamed else r['service']
+        if cur==n: res.append({"guid":g,"name":cur})
+        if g in created and r['service']==n: res.append({"guid":"valkey-"+g[:8],"name":n})
+    out({"resources":res}); sys.exit()
+if p.startswith('/v3/service_plans'): out({"resources":[{"name":"cache-small"}]}); sys.exit()
+m=re.match(r'/v3/apps/([^/?]+)/processes/web/stats', p)
+if m:
+    g=m.group(1); n=2 if g!=down else 2; r=[{"state":"RUNNING"},{"state":"RUNNING" if g!=down else "CRASHED"}]
+    out({"resources":r}); sys.exit()
+m=re.match(r'/v3/apps/([^/?]+)/environment_variables', p)
+if m:
+    out({"var":{"REDIS_HOST":"10.1.1.1"} if m.group(1)==haz else {}}); sys.exit()
+m=re.match(r'/v3/apps/([^/?]+)$', p)
+if m:
+    g=m.group(1)
+    if g not in app: out({"errors":[{"title":"CF-ResourceNotFound"}]}); sys.exit()
+    out({"guid":g,"name":app[g]['app'],"state":"STARTED"}); sys.exit()
+out({"errors":[{"title":"stub: unhandled "+p}]})
+PY

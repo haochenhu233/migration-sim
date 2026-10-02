@@ -5,8 +5,8 @@
 set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
-WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; ARG=""
-while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
+WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; ARG=""
+while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
 PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 
 
@@ -205,6 +205,130 @@ cmd_status(){
   rm -f "$RUN/.states.tsv"
 }
 
+
+# ============================================================================ cf helpers
+CF="${CF_CMD:-cf}"
+if command -v timeout >/dev/null 2>&1; then TMO="timeout 30"; else TMO=""; fi   # macOS has no timeout(1)
+cfcurl(){ $TMO "$CF" curl "$1" 2>/dev/null; }                      # read-only CF API
+cf_json_ok(){ printf '%s' "$1" | jq -e 'type=="object" and (has("errors")|not)' >/dev/null 2>&1; }
+
+# wave_rows <N>: the wave's plan rows (TSV, no header). Columns: see cmd_plan header.
+wave_rows(){ awk -F'\t' -v w="$1" 'NR>1 && $1==w' "$PLAN"; }
+# ledger_done <service_guid> <app_guid|""> <step>: "ts" if the ledger has that step ok, else ""
+ledger_done(){ [ -s "$LEDGER" ] || return 0
+  ledger_lines | jq -r --arg s "$1" --arg a "$2" --arg st "$3" 'select(.service==$s and .app==$a and .step==$st and .outcome=="ok") | .ts' | tail -1; }
+
+# ============================================================================ dry-run
+# dry-run --wave N: the exact command sequence apply would run, in the rehearsed order:
+#   per service: rename-standby, create-valkey (under the ORIGINAL name), copy-data if flagged
+#   per app:     bind every wave service, unbind every standby, ONE restart, verify
+# Steps already recorded ok in the ledger are marked DONE and skipped by apply (idempotent).
+cmd_dryrun(){
+  [ -n "$WAVE" ] || { echo "usage: migrate.sh dry-run --wave N [--run dir]"; exit 1; }
+  [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
+  local rows; rows=$(wave_rows "$WAVE"); [ -n "$rows" ] || { echo "wave $WAVE: no rows in $PLAN"; exit 1; }
+  local nsvc napp norg; nsvc=$(printf '%s\n' "$rows" | cut -f4 | sort -u | wc -l | tr -d ' ')
+  napp=$(printf '%s\n' "$rows" | cut -f9 | sort -u | wc -l | tr -d ' '); norg=$(printf '%s\n' "$rows" | cut -f10 | sort -u | wc -l | tr -d ' ')
+  echo "DRY-RUN wave $WAVE: $nsvc service(s), $napp app(s) ($napp restarts), $norg org(s). Nothing is executed."
+  echo "rollback row per step -- see DESIGN §3; rollback scope = the whole service."
+  echo
+  # ---- phase A: per service
+  printf '%s\n' "$rows" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}' | while IFS=$'\t' read -r sg name sorg ssp plan flags; do
+    local std="${name}-redis-standby"
+    echo "== service $name ($(printf '%s' "$sg" | cut -c1-8))  plan=$plan  org/space=$sorg/$ssp  flags=[$flags]"
+    echo "   cf target -o $sorg -s $ssp"
+    d=$(ledger_done "$sg" "" rename-standby); echo "   ${d:+DONE $d  }cf rename-service $name $std                 # rollback: rename back (only if abandoning)"
+    d=$(ledger_done "$sg" "" create-valkey);  echo "   ${d:+DONE $d  }cf create-service valkey $plan $name           # rollback: cf delete-service $name"
+    echo "   ${d:+DONE          }assert: '$name' resolves to a VALKEY instance (new guid), '$std' resolves to guid $(printf '%s' "$sg" | cut -c1-8)"
+    case ",$flags," in *,datastore,*) d=$(ledger_done "$sg" "" copy-data); echo "   ${d:+DONE $d  }copy-data $std -> $name  (replication / MIGRATE / DUMP-RESTORE per SESSION-COMMANDS 8c)   # rollback: none needed";; esac
+  done
+  echo
+  # ---- phase B: per app (one restart per app per wave)
+  printf '%s\n' "$rows" | awk -F'\t' '!seen[$9]++ {print $9"\t"$8"\t"$10"\t"$11"\t"$12}' | while IFS=$'\t' read -r ag app aorg asp aflags; do
+    echo "== app $app ($(printf '%s' "$ag" | cut -c1-8))  org/space=$aorg/$asp  flags=[$aflags]"
+    echo "   cf target -o $aorg -s $asp"
+    case ",$aflags," in *,hazard,*) echo "   !! HAZARD: pinned env present -- preflight refuses until the app team removed it";; esac
+    # every wave service this app is bound to
+    printf '%s\n' "$rows" | awk -F'\t' -v a="$ag" '$9==a {print $4"\t"$3}' | while IFS=$'\t' read -r sg name; do
+      d=$(ledger_done "$sg" "$ag" bind-valkey);  echo "   ${d:+DONE $d  }cf bind-service $app $name                      # rollback: cf unbind-service $app $name"
+    done
+    printf '%s\n' "$rows" | awk -F'\t' -v a="$ag" '$9==a {print $4"\t"$3}' | while IFS=$'\t' read -r sg name; do
+      d=$(ledger_done "$sg" "$ag" unbind-redis); echo "   ${d:+DONE $d  }cf unbind-service $app ${name}-redis-standby   # rollback: cf bind-service $app ${name}-redis-standby"
+    done
+    sg1=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$ag" '$9==a {print $4; exit}')
+    d=$(ledger_done "$sg1" "$ag" restart);  echo "   ${d:+DONE $d  }cf restart $app [--strategy rolling if >=2 instances]  # rollback: rebind standby + restart"
+    d=$(ledger_done "$sg1" "$ag" verify);   echo "   ${d:+DONE $d  }verify $app: L1 bindings+running+no crashes · L2 census on valkey, none on standby · L3 CLIENT LIST/ACL LOG   # fail: auto-rollback the SERVICE"
+  done
+  echo
+  echo "end of wave: services -> STANDBY (grace $(( ${GRACE_DAYS:-14} )) d); no retire."
+}
+
+# ============================================================================ preflight
+# preflight --wave N: read-only checks; FAIL = apply must not run. Prints the blast radius.
+cmd_preflight(){
+  [ -n "$WAVE" ] || { echo "usage: migrate.sh preflight --wave N [--run dir]"; exit 1; }
+  [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
+  local rows; rows=$(wave_rows "$WAVE"); [ -n "$rows" ] || { echo "wave $WAVE: no rows in $PLAN"; exit 1; }
+  local fails=0 warns=0
+  ok(){ printf 'PASS  %s\n' "$1"; }; fail(){ printf 'FAIL  %s\n' "$1"; fails=$((fails+1)); }; warn(){ printf 'WARN  %s\n' "$1"; warns=$((warns+1)); }
+  echo "PREFLIGHT wave $WAVE (run dir: $RUN)"
+  # 1 run-dir state
+  if [ -s "$RUN/lock" ]; then fail "lock held: $(cat "$RUN/lock")"; else ok "no lock"; fi
+  [ -e "$RUN/STOP" ] && fail "STOP file present ($RUN/STOP)" || ok "no STOP file"
+  local bad; bad=$(ledger_bad); [ "$bad" = 0 ] && ok "ledger parses ($(grep -c . "$LEDGER" 2>/dev/null || echo 0) lines)" || warn "$bad unparsable ledger line(s)"
+  # 2 cf session
+  local info; info=$(cfcurl "/v3/info"); if cf_json_ok "$info"; then ok "cf API reachable ($(printf '%s' "$info" | jq -r '.name // "cf"'))"; else fail "cf curl /v3/info failed -- not logged in?"; fi
+  # 3 per service
+  while IFS=$'\t' read -r sg name sorg ssp plan flags; do
+    local j; j=$(cfcurl "/v3/service_instances/$sg")
+    if ! cf_json_ok "$j"; then fail "service $name: guid $sg not found"; continue; fi
+    local cur st; cur=$(printf '%s' "$j" | jq -r .name); st=$(printf '%s' "$j" | jq -r '.last_operation.state')
+    local ren; ren=$(ledger_done "$sg" "" rename-standby)
+    if [ -n "$ren" ]; then [ "$cur" = "${name}-redis-standby" ] && ok "service $name: already renamed to standby (ledger agrees)" || fail "service $name: ledger says renamed but CF name is '$cur' (drift)"
+    else [ "$cur" = "$name" ] && ok "service $name: name matches guid $(printf '%s' "$sg" | cut -c1-8)" || fail "service $name: guid now named '$cur' (drift -- renamed by hand?)"; fi
+    [ "$st" = succeeded ] && ok "service $name: last operation succeeded" || fail "service $name: last_operation=$st"
+    # name collisions in the service's space
+    local sp; sp=$(printf '%s' "$j" | jq -r '.relationships.space.data.guid')
+    local cre; cre=$(ledger_done "$sg" "" create-valkey)
+    local existing; existing=$(cfcurl "/v3/service_instances?names=${name}-redis-standby&space_guids=$sp" | jq -r '.resources|length')
+    if [ -z "$ren" ] && [ "${existing:-0}" != 0 ]; then fail "service $name: '${name}-redis-standby' already exists in the space"; fi
+    if [ -z "$cre" ]; then
+      local vk; vk=$(cfcurl "/v3/service_instances?names=$name&space_guids=$sp" | jq -r '.resources[] | select(.guid!="'"$sg"'") | .guid' | head -1)
+      [ -n "$vk" ] && fail "service $name: another instance already carries the name (guid $vk) -- create would collide"
+    fi
+    # plan visible in that space (classic plan expected)
+    local pl; pl=$(cfcurl "/v3/service_plans?names=$plan&service_offering_names=valkey&space_guids=$sp&available=true" | jq -r '.resources|length')
+    [ "${pl:-0}" != 0 ] && ok "service $name: valkey plan '$plan' available in space" || fail "service $name: valkey plan '$plan' not available in space (marketplace/visibility)"
+    case "$plan" in *secure*) warn "service $name: plan '$plan' looks like a SECURE (dynamic-credential) plan -- intended?";; esac
+  done < <(printf '%s\n' "$rows" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
+  # 4 per app
+  while IFS=$'\t' read -r ag app aflags; do
+    local a; a=$(cfcurl "/v3/apps/$ag")
+    if ! cf_json_ok "$a"; then fail "app $app: guid $ag not found"; continue; fi
+    local state; state=$(printf '%s' "$a" | jq -r .state)
+    [ "$state" = STARTED ] && ok "app $app: STARTED" || warn "app $app: state $state (idle app? it will be restarted anyway)"
+    local stats; stats=$(cfcurl "/v3/apps/$ag/processes/web/stats")
+    if cf_json_ok "$stats"; then
+      local n r; n=$(printf '%s' "$stats" | jq -r '.resources|length'); r=$(printf '%s' "$stats" | jq -r '[.resources[]|select(.state=="RUNNING")]|length')
+      [ "$n" = "$r" ] && ok "app $app: $r/$n instance(s) running" || fail "app $app: only $r/$n instances running -- fix BEFORE migrating (a broken app looks like a migration failure after)"
+    else warn "app $app: no web process stats"; fi
+    case ",$aflags," in *,hazard,*)
+      local envj; envj=$(cfcurl "/v3/apps/$ag/environment_variables")
+      if printf '%s' "$envj" | jq -r '.var|to_entries[]|"\(.key)=\(.value)"' 2>/dev/null | grep -qiE '(REDIS|VALKEY)[_A-Z0-9]*(HOST|URL|URI|ADDR|ENDPOINT)|redis://'; then
+        fail "app $app: HAZARD -- pinned redis env var still present; the team must remove it first"
+      else ok "app $app: hazard flag but no pinned env var found now (fixed)"; fi;;
+    esac
+  done < <(printf '%s\n' "$rows" | awk -F'\t' '!seen[$9]++ {print $9"\t"$8"\t"$12}')
+  # 5 blast radius
+  local nsvc napp norg nsil nhz; nsvc=$(printf '%s\n' "$rows" | cut -f4 | sort -u | wc -l | tr -d ' '); napp=$(printf '%s\n' "$rows" | cut -f9 | sort -u | wc -l | tr -d ' ')
+  norg=$(printf '%s\n' "$rows" | cut -f10 | sort -u | wc -l | tr -d ' '); nhz=$(printf '%s\n' "$rows" | awk -F'\t' '$12 ~ /hazard/' | wc -l | tr -d ' ')
+  echo
+  echo "BLAST RADIUS wave $WAVE: $nsvc service(s) -> $nsvc Valkey(s) to create (IPs needed: $nsvc), $napp app restart(s), $norg org(s); hazards in wave: $nhz"
+  [ -n "${FREE_IPS:-}" ] && { [ "$FREE_IPS" -ge "$nsvc" ] && ok "IP headroom: $FREE_IPS free >= $nsvc needed" || fail "IP headroom: $FREE_IPS free < $nsvc needed"; } || warn "IP headroom not checked (pass --free-ips N from the blacksmith pool / cloud-config)"
+  echo
+  if [ "$fails" -gt 0 ]; then echo "PREFLIGHT: $fails FAIL, $warns WARN -- do not apply"; exit 1; else echo "PREFLIGHT: OK ($warns WARN)"; fi
+}
+
 # ---- project summary: per wave + totals, percentages; also writes derived snapshots ------------
 cmd_summary(){
   [ -s "$PLAN" ] || { echo "no $PLAN -- run: migrate.sh plan <merged_report.csv>"; exit 1; }
@@ -247,7 +371,9 @@ cmd_summary(){
 }
 
 case "$SUB" in
-  plan)   cmd_plan "$ARG" ;;
+  plan)      cmd_plan "$ARG" ;;
+  dry-run)   cmd_dryrun ;;
+  preflight) cmd_preflight ;;
   status) if [ -n "$WAVE" ]; then cmd_status; else cmd_summary; fi ;;
-  *) echo "usage: migrate.sh plan <report.csv> [--run dir] [--wave-size N] | status [--wave N] [--run dir]"; exit 1 ;;
+  *) echo "usage: migrate.sh plan <report.csv> | preflight --wave N [--free-ips N] | dry-run --wave N | status [--wave N]   (all: --run <dir>)"; exit 1 ;;
 esac
