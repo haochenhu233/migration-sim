@@ -5,14 +5,16 @@
 set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
-WSIZE=""; MAXAPPS=""; ORDER=""; ARG=""
-while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --order) ORDER="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
+WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; ARG=""
+while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
 PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 
 
 # ---- plan: merged/aggregated report -> waves.tsv (detailed, stays in env) + plan-summary.md (aggregates only)
 #   migrate.sh plan <merged_report.csv|aggregated_report.csv> [--run <dir>] [--wave-size N] [--max-apps M] [--order easy|hard]
 #   --wave-size N  max services per wave (default 10)      --max-apps M  max app restarts per wave (default 40)
+#   --silent-max-apps S  restart cap for waves made only of SILENT services (no live consumer; default 120)
+#                        -- nobody observes them, so they can be batched large
 #   --order easy   (default) silent services first (no live consumer), then islands, then shared, then multi-service
 #   --order hard   largest components first
 # Waves = connected components of the app<->service binding graph (an app and every service it
@@ -21,7 +23,7 @@ PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 cmd_plan(){
   local rep="$1"; [ -s "$rep" ] || { echo "usage: migrate.sh plan <report.csv> [--run dir] [--wave-size N]"; exit 1; }
   mkdir -p "$RUN"
-  awk -F',' -v OFS='\t' -v wsize="${WSIZE:-10}" -v maxapps="${MAXAPPS:-40}" -v order="${ORDER:-easy}" -v run="$RUN" -v now="$(date -u +%FT%TZ)" '
+  awk -F',' -v OFS='\t' -v wsize="${WSIZE:-10}" -v maxapps="${MAXAPPS:-40}" -v silentmax="${SILENTMAX:-120}" -v order="${ORDER:-easy}" -v run="$RUN" -v now="$(date -u +%FT%TZ)" '
     function find(x){ while (par[x]!=x) { par[x]=par[par[x]]; x=par[x] } return x }
     function union(a,b,  ra,rb){ ra=find(a); rb=find(b); if (ra!=rb) par[rb]=ra }
     function plan_of(dep,  p){ p=dep; sub(/^(redis|valkey)-/,"",p); sub(/-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,"",p); return p }
@@ -53,11 +55,14 @@ cmd_plan(){
       for (i=1;i<=nc;i++){ r=cl[i]; if (order=="hard") skey[r]=sprintf("%05d%05d", 99999-csvc[r], 99999-capp[r]); else skey[r]=sprintf("%d%05d%05d", (clive[r]>0?1:0), csvc[r], capp[r]) }
       for (i=2;i<=nc;i++){ v=cl[i]; j=i-1; while (j>0 && skey[cl[j]]>skey[v]) { cl[j+1]=cl[j]; j-- } cl[j+1]=v }
       # pack into waves: both caps -- services per wave AND app restarts per wave
-      w=1; used=0; usedapps=0
-      for (i=1;i<=nc;i++) { r=cl[i]
-        if ((used>0 && used+csvc[r] > wsize) || (usedapps>0 && usedapps+capp[r] > maxapps)) { w++; used=0; usedapps=0 }
-        cw[r]=w; used+=csvc[r]; usedapps+=capp[r]; wsvc[w]+=csvc[r]; wapp[w]+=capp[r]; wcomp[w]++; if (clive[r]==0) wsilent[w]+=csvc[r]
-        if (csvc[r]>wsize || capp[r]>maxapps) { w++; used=0; usedapps=0 }   # an oversized component owns its wave
+      # silent components (no live consumer anywhere) get their own, larger caps: nobody observes them
+      w=1; used=0; usedapps=0; wsil=-1
+      for (i=1;i<=nc;i++) { r=cl[i]; sil=(clive[r]==0)?1:0
+        capA=sil?silentmax:maxapps; capS=sil?wsize*3:wsize
+        if ((used>0 && used+csvc[r] > capS) || (usedapps>0 && usedapps+capp[r] > capA) || (wsil>=0 && wsil!=sil)) { w++; used=0; usedapps=0 }
+        wsil=sil
+        cw[r]=w; used+=csvc[r]; usedapps+=capp[r]; wsvc[w]+=csvc[r]; wapp[w]+=capp[r]; wcomp[w]++; if (sil) wsilent[w]+=csvc[r]
+        if (csvc[r]>capS || capp[r]>capA) { w++; used=0; usedapps=0; wsil=-1 }   # an oversized component owns its wave
       }
       nw=w; if (used==0) nw=w-1
       # ---- waves.tsv (detailed; stays in the env)
@@ -105,7 +110,7 @@ cmd_plan(){
       for (i=2;i<=nc;i++){ v=big[i]; j=i-1; while (j>0 && (csvc[big[j]]<csvc[v] || (csvc[big[j]]==csvc[v] && capp[big[j]]<capp[v]))) { big[j+1]=big[j]; j-- } big[j+1]=v }
       printf "\nlargest components (services/apps): " > h
       for (i=1;i<=5 && i<=nc;i++) printf "%s%d/%d", (i>1?", ":""), csvc[big[i]], capp[big[i]] > h
-      printf "\n\n## Wave proposal (max %d services and %d app restarts per wave, order=%s)\n\n| wave | services | silent svcs | apps (restarts) | components | orgs |\n|---|---|---|---|---|---|\n", wsize, maxapps, order > h
+      printf "\n\n## Wave proposal (live waves: max %d services / %d restarts; silent waves: max %d services / %d restarts; order=%s)\n\n| wave | services | silent svcs | apps (restarts) | components | orgs |\n|---|---|---|---|---|---|\n", wsize, maxapps, wsize*3, silentmax, order > h
       for (w=1;w<=nw;w++){ t=0; for (x in wteams){ split(x,xx,SUBSEP); if (xx[1]==w) t++ }
         printf "| %d | %d | %d | %d | %d | %d |\n", w, wsvc[w], wsilent[w]+0, wapp[w], wcomp[w], t > h }
       printf "\nIP headroom needed: %d Valkeys in total (one per service); per wave as above.\n", nsvc > h
