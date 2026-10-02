@@ -111,6 +111,23 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [ ] S6 TLS consumer onto a TLS-enabled Valkey plan
 - [~] S7 name swap (policy A, decided): rename Redis → `-redis-standby`, Valkey → original name; then `cf push` an app with its ORIGINAL manifest (`services: [<name>]`) and prove it binds the Valkey, not the Redis
 
+## Phase 3.5 — the migration-specific plan from the REAL report (before any real wave)
+
+Input: the merged (aggregated) report of the client's most complex env — available now.
+Pure file processing (runs in the VDI; only aggregates leave). Output = the real `waves.tsv`
+plus a review document for the client, built from the binding graph:
+
+- [ ] connected components of the app↔service graph: size distribution (how many 1-app/1-service islands vs large components), the largest components named by service count
+- [ ] multi-bound apps (bound to 2+ Redis): count; each must migrate in ONE wave (restart once)
+- [ ] shared services across spaces/orgs: list → joint windows / sharing to replicate on the Valkey
+- [ ] hazard apps (cf-bind + static_ref) per component → preflight blockers, contact list
+- [ ] TLS consumers (port 16379 in census) → TLS-enabled Valkey plan per affected service
+- [ ] data-store candidates: services whose apps declared "data store" on the form (else default: no copy) + persistence parity (Redis plan `persistent` ↔ Valkey plan)
+- [ ] idle-only services (never live across scans) and unused services (no consumers) → migrate-by-rebind-only vs decommission list
+- [ ] wave proposal: components grouped by size/team, ~N services per wave; pipeline groups (if any declared) kept together
+- [ ] IP headroom per wave vs free IPs on the services network
+- [ ] review session with client devops: adjust `waves.tsv` by hand (the tool reads the edited file)
+
 ## Phase 4 — verification & report
 
 - [ ] run verifier after each scenario; produce `report/<scenario>.md`
@@ -157,6 +174,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 
 ## Log
 
+- 2026-10-01 — Phase 3.5 added: build the real migration plan from the most complex env's merged report (graph analysis → waves.tsv + client review) before the first real wave. The report is accessible now.
 - 2026-10-01 — **Theory validation considered complete** except ordering (deferred by policy). Still worth collecting if time: timed rollback + plain-vs-rolling downtime (11, poller), retire/IP recycling (12), secure-plan WRONGPASS evidence (S4), TLS consumer (S6), rename swap + stale-manifest push (S7).
 
 - 2026-10-01 — **Naming-policy risk reproduced in SBX:** `sim-pipeline-b` (selects its binding BY NAME, `SIM_SERVICE_NAME`) crashed at its migration restart under substituted naming — no binding named `sim-redis-pipe-a` any more. Fix = team-side config change (`cf set-env SIM_SERVICE_NAME <new name>`); under policy A (rename swap before restart) no change would be needed. Evidence for the client's naming decision.
