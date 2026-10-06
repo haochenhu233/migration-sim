@@ -322,7 +322,9 @@ cmd_preflight(){
     else warn "app $app: no web process stats"; fi
     case ",$aflags," in *,hazard,*)
       local envj; envj=$(cfcurl "/v3/apps/$ag/environment_variables")
-      if printf '%s' "$envj" | jq -r '.var|to_entries[]|"\(.key)=\(.value)"' 2>/dev/null | grep -qiE '(REDIS|VALKEY)[_A-Z0-9]*(HOST|URL|URI|ADDR|ENDPOINT)|redis://'; then
+      if ! { cf_json_ok "$envj" && printf '%s' "$envj" | jq -e 'has("var")' >/dev/null 2>&1; }; then
+        fail "app $app: cannot read environment variables (API error / role lacks access) -- hazard cannot be ruled out"
+      elif printf '%s' "$envj" | jq -r '.var|to_entries[]|"\(.key)=\(.value)"' 2>/dev/null | grep -qiE '(REDIS|VALKEY)[_A-Z0-9]*(HOST|URL|URI|ADDR|ENDPOINT)|redis://'; then
         fail "app $app: HAZARD -- pinned redis env var still present; the team must remove it first"
       else ok "app $app: hazard flag but no pinned env var found now (fixed)"; fi;;
     esac

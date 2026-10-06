@@ -9,8 +9,11 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; LAYOUT="$HERE/layout.tsv"
 REDIS="sim-redis-cache sim-redis-session sim-redis-store sim-redis-queue sim-redis-pipe-a sim-redis-pipe-b"
 echo "== 1. unbind everything"
-for app in $(cf apps | awk 'NR>3 && $1 ~ /^sim-/ {print $1}'); do
-  for svc in $(cf curl "/v3/apps/$(cf app "$app" --guid)/env" 2>/dev/null | jq -r '.system_env_json.VCAP_SERVICES[]?[]?.name' 2>/dev/null); do
+APPS=$(cf apps | awk 'NR>3 && $1 ~ /^sim-/ {print $1}'); [ -n "$APPS" ] || { echo "!! no sim-* apps found (cf apps failed / wrong target?)"; exit 1; }
+for app in $APPS; do
+  envj=$(cf curl "/v3/apps/$(cf app "$app" --guid)/env" 2>/dev/null)
+  printf '%s' "$envj" | jq -e 'type=="object" and has("system_env_json")' >/dev/null 2>&1 || { echo "!! cannot read bindings of $app (API error): $(printf '%s' "$envj" | jq -r '.errors[0].title // "no/invalid response"' 2>/dev/null)"; exit 1; }
+  for svc in $(printf '%s' "$envj" | jq -r '.system_env_json.VCAP_SERVICES // {} | .[]?[]?.name'); do
     case "$svc" in sim-ups-redis) continue;; esac
     echo "   unbind $app <- $svc"; cf unbind-service "$app" "$svc" >/dev/null 2>&1 || true
   done
