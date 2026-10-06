@@ -32,4 +32,14 @@ while IFS=$'\t' read -r app services state note; do
   for svc in ${services//,/ }; do echo "   bind $app -> $svc"; cf bind-service "$app" "$svc" >/dev/null 2>&1 || true; done
   if [ "$state" = stopped ]; then cf stop "$app" >/dev/null; echo "   $app stopped (silent)"; else cf restart "$app" >/dev/null 2>&1 || cf start "$app" >/dev/null; fi
 done < "$LAYOUT"
+echo "== 5. re-point the unbound credential-copy apps at sim-redis-cache (static-env via env, sim-ups via the UPS)"
+cf create-service-key sim-redis-cache reset-key >/dev/null 2>&1 || true
+CRED=$(cf service-key sim-redis-cache reset-key | sed -n '/{/,$p' | jq -c '.credentials // .')
+HOST=$(printf '%s' "$CRED" | jq -r .host); PW=$(printf '%s' "$CRED" | jq -r .password)
+if [ -n "$HOST" ] && [ "$HOST" != null ]; then
+  cf set-env sim-static-env REDIS_HOST "$HOST" >/dev/null; cf set-env sim-static-env REDIS_PASSWORD "$PW" >/dev/null; cf restart sim-static-env >/dev/null 2>&1 || true
+  cf set-env sim-bound-pinned REDIS_HOST "$HOST" >/dev/null; cf set-env sim-bound-pinned REDIS_PASSWORD "$PW" >/dev/null; cf restart sim-bound-pinned >/dev/null 2>&1 || true
+  cf update-user-provided-service sim-ups-redis -p "{\"host\":\"$HOST\",\"port\":6379,\"password\":\"$PW\"}" >/dev/null; cf restart sim-ups >/dev/null 2>&1 || true
+  echo "   static-env, bound-pinned, ups -> $HOST"
+else echo "   !! could not read sim-redis-cache credentials; set static-env/ups by hand"; fi
 echo "== done. verify:"; cf services | grep -E '^sim-redis'; echo "then: bash verify/apps-list.sh && bash verify/snapshot.sh tool-baseline"

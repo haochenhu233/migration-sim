@@ -18,8 +18,16 @@ that state from whatever a previous test left behind. Run it before every tool t
    their bindings; `sim-session-bound` is **stopped** (a bound, non-running app = a silent
    service); `sim-bound-pinned` gets `SIM_SOURCE=env` back (the hazard).
 
-Not touched: the apps (no push), Redis data, the UPS, `sim-static-env`/`sim-ups` (unbound by
-design). Idempotent — safe to re-run.
+5. **Re-point the credential-copy apps** — `sim-static-env` (env), `sim-bound-pinned` (env) and
+   `sim-ups` (UPS) get `sim-redis-cache`'s current host/password from a service key, so the
+   whole population starts on Redis.
+
+Not touched: the apps (no push), Redis data. Idempotent — safe to re-run.
+
+**After the reset, check the deleted Valkeys are really gone:** `genesis @<sbx-env> b deployments
+| grep -i valkey` should print nothing. Blacksmith deprovisions asynchronously — CF can drop
+the instance before the VM is deleted; a deployment still there after ~10 min is an orphan
+(finding for the retirement path).
 
 ## The layout (`scripts/layout.tsv`)
 
