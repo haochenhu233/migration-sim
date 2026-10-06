@@ -188,6 +188,8 @@ plus a review document for the client, built from the binding graph:
 
 ## Log
 
+- 2026-10-06 — Finding: Blacksmith deprovision is async — CF drops a deleted service immediately, the VM keeps serving for minutes (sim-static-env/sim-ups still connected to a "deleted" Valkey). `retire` must census the standby first and refuse if anyone is still connected. Reset script now re-points the credential-copy apps at Redis.
+
 - 2026-10-02 — `preflight` + `dry-run` built, offline-tested against a stub cf (ledger/CF reconciliation, collisions, plan visibility, half-down app and hazard env → FAIL). Next: run both against the SBX population, then `apply`.
 
 - 2026-10-02 — `migrate.sh plan` built and verified on a synthetic report; two-artifact output (detailed in env / aggregate summary shareable). Ready to run on the real most-complex-env report (Phase 3.5).
