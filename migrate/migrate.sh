@@ -211,6 +211,9 @@ CF="${CF_CMD:-cf}"
 if command -v timeout >/dev/null 2>&1; then TMO="timeout 30"; else TMO=""; fi   # macOS has no timeout(1)
 cfcurl(){ $TMO "$CF" curl "$1" 2>/dev/null; }                      # read-only CF API
 cf_json_ok(){ printf '%s' "$1" | jq -e 'type=="object" and (has("errors")|not)' >/dev/null 2>&1; }
+# cflist <path>: a LIST endpoint; prints the JSON only if it really has .resources -- an error
+# document (bad filter, auth) must never be read as "empty list". Returns 1 on API error.
+cflist(){ local j; j=$(cfcurl "$1"); printf '%s' "$j" | jq -e 'type=="object" and has("resources")' >/dev/null 2>&1 || return 1; printf '%s' "$j"; }
 
 # wave_rows <N>: the wave's plan rows (TSV, no header). Columns: see cmd_plan header.
 wave_rows(){ awk -F'\t' -v w="$1" 'NR>1 && $1==w' "$PLAN"; }
@@ -290,15 +293,20 @@ cmd_preflight(){
     # name collisions in the service's space
     local sp; sp=$(printf '%s' "$j" | jq -r '.relationships.space.data.guid')
     local cre; cre=$(ledger_done "$sg" "" create-valkey)
-    local existing; existing=$(cfcurl "/v3/service_instances?names=${name}-redis-standby&space_guids=$sp" | jq -r '.resources|length')
-    if [ -z "$ren" ] && [ "${existing:-0}" != 0 ]; then fail "service $name: '${name}-redis-standby' already exists in the space"; fi
+    local lj
+    if lj=$(cflist "/v3/service_instances?names=${name}-redis-standby&space_guids=$sp"); then
+      if [ -z "$ren" ] && [ "$(printf '%s' "$lj" | jq -r '.resources|length')" != 0 ]; then fail "service $name: '${name}-redis-standby' already exists in the space"; fi
+    else fail "service $name: API error checking the standby name (cannot rule out a collision)"; fi
     if [ -z "$cre" ]; then
-      local vk; vk=$(cfcurl "/v3/service_instances?names=$name&space_guids=$sp" | jq -r '.resources[] | select(.guid!="'"$sg"'") | .guid' | head -1)
-      [ -n "$vk" ] && fail "service $name: another instance already carries the name (guid $vk) -- create would collide"
+      if lj=$(cflist "/v3/service_instances?names=$name&space_guids=$sp"); then
+        local vk; vk=$(printf '%s' "$lj" | jq -r '.resources[] | select(.guid!="'"$sg"'") | .guid' | head -1)
+        [ -n "$vk" ] && fail "service $name: another instance already carries the name (guid $vk) -- create would collide"
+      else fail "service $name: API error checking the service name (cannot rule out a collision)"; fi
     fi
     # plan visible in that space (classic plan expected)
-    local pl; pl=$(cfcurl "/v3/service_plans?names=$plan&service_offering_names=valkey&space_guids=$sp&available=true" | jq -r '.resources|length')
-    [ "${pl:-0}" != 0 ] && ok "service $name: valkey plan '$plan' available in space" || fail "service $name: valkey plan '$plan' not available in space (marketplace/visibility)"
+    if lj=$(cflist "/v3/service_plans?names=$plan&service_offering_names=valkey&space_guids=$sp&available=true"); then
+      [ "$(printf '%s' "$lj" | jq -r '.resources|length')" != 0 ] && ok "service $name: valkey plan '$plan' available in space" || fail "service $name: valkey plan '$plan' not available in space (marketplace/visibility)"
+    else fail "service $name: API error checking plan '$plan'"; fi
     case "$plan" in *secure*) warn "service $name: plan '$plan' looks like a SECURE (dynamic-credential) plan -- intended?";; esac
   done < <(printf '%s\n' "$rows" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
   # 4 per app
