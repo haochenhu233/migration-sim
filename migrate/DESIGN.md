@@ -123,7 +123,7 @@ has a factual answer.
 | `verify --wave N` | app health · connection census on the Valkey side (discovery worker) · `/check` for sim apps · key counts where data was copied · **"bound to Redis again?"** drift check |
 | `rollback --app X` / `--service Y` / `--wave N` | per §3, reason recorded |
 | `confirm --service Y --by <team>` | app-team sign-off; starts the standby clock |
-| `retire --service Y` | **before deleting: re-run the connection census on the standby Redis — refuse if anyone is still connected** (copied-credential apps keep working until the VM dies, minutes after `cf delete-service`; Blacksmith deprovisions asynchronously) · then: after the client's full confirmation, ~1–2 weeks post-cutover (standby grace default **14 days**); refuses before `confirm` + grace; asks twice; the only irreversible step |
+| `retire --service Y` | **before deleting: re-run the connection census on the standby Redis — refuse if anyone is still connected** (catches copied-credential apps that were never updated) · then: after the client's full confirmation, ~1–2 weeks post-cutover (standby grace default **14 days**); refuses before `confirm` + grace; asks twice; the only irreversible step |
 | `report --wave N` | evidence pack from the ledger (markdown): per app switched/verified/downtime, timeline, incidents, rollbacks, operators |
 
 ## 5. Dashboard — two levels

@@ -16,15 +16,20 @@ for app in $(cf apps | awk 'NR>3 && $1 ~ /^sim-/ {print $1}'); do
   done
 done
 echo "== 2. delete Valkey instances (frees their IPs)"
-for inst in $(cf curl "/v3/service_instances?service_offering_names=valkey&per_page=200" | jq -r '.resources[].name' | grep '^sim-'); do
-  echo "   delete $inst"; cf delete-service "$inst" -f >/dev/null 2>&1 || true
+# offering comes from `cf services` column 2 -- /v3/service_instances has NO service_offering_names filter
+# (an invalid filter returns an error document, which an earlier version silently read as "none").
+valkeys(){ cf services | awk 'NR>3 && $2=="valkey" && $1 ~ /^sim-/ {print $1}'; }
+cf services >/dev/null 2>&1 || { echo "!! cf services failed -- not logged in / not targeted"; exit 1; }
+for inst in $(valkeys); do
+  echo "   delete $inst"; cf delete-service "$inst" -f >/dev/null 2>&1 || echo "   !! delete $inst failed"
 done
+echo "   waiting for valkey deletions to finish ..."
+for i in $(seq 1 90); do n=$(valkeys | grep -c .); [ "$n" = 0 ] && break; sleep 10; done
+[ "$(valkeys | grep -c .)" = 0 ] || { echo "!! Valkey instances still present after waiting:"; valkeys; echo "   fix before continuing (standby renames would collide)"; exit 1; }
 echo "== 3. rename standbys back"
 for r in $REDIS; do
   if cf service "$r-redis-standby" >/dev/null 2>&1; then echo "   $r-redis-standby -> $r"; cf rename-service "$r-redis-standby" "$r"; fi
 done
-echo "   waiting for valkey deletions to finish ..."
-for i in $(seq 1 60); do n=$(cf curl "/v3/service_instances?service_offering_names=valkey&per_page=200" | jq -r '.resources[].name' | grep -c '^sim-'); [ "$n" = 0 ] && break; sleep 10; done
 echo "== 4. bind per layout, fix env, restart/stop"
 cf set-env sim-bound-pinned SIM_SOURCE env >/dev/null       # the hazard: back to the pinned path
 while IFS=$'\t' read -r app services state note; do

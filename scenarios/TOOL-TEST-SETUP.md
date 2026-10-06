@@ -24,10 +24,7 @@ that state from whatever a previous test left behind. Run it before every tool t
 
 Not touched: the apps (no push), Redis data. Idempotent — safe to re-run.
 
-**After the reset, check the deleted Valkeys are really gone:** `genesis @<sbx-env> b deployments
-| grep -i valkey` should print nothing. Blacksmith deprovisions asynchronously — CF can drop
-the instance before the VM is deleted; a deployment still there after ~10 min is an orphan
-(finding for the retirement path).
+**After the reset:** `cf services | grep valkey` must print nothing — the script stops with an error if any `sim-*` Valkey survives the deletion wait.
 
 ## The layout (`scripts/layout.tsv`)
 
