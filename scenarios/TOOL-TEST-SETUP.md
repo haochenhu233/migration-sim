@@ -60,12 +60,17 @@ bash redis-consumer-discovery.sh list-redis <sbx-env> --path ./sbx-tool
 bash redis-consumer-discovery.sh merge      <sbx-env> --path ./sbx-tool
 
 cd ~/ocfp/migration-sim
-bash migrate/migrate.sh plan ~/ocfp/redis-consumer-discovery/sbx-tool/merged_report.csv --run runs/sbx --wave-size 3
+# --services: the scan covers the WHOLE foundation -- other teams' SBX Redis (healthcheck, old tests)
+# would otherwise land in wave 1; scope the plan to ours
+bash migrate/migrate.sh plan ~/ocfp/redis-consumer-discovery/sbx-tool/merged_report.csv --run runs/sbx --wave-size 3 --services '^sim-redis-'
 # mark the data-store service: append  datastore  to the flags column of the sim-redis-store row in runs/sbx/waves.tsv
 cat runs/sbx/plan-summary.md
 ```
 Expect: 6 services, 12 connections, 1 silent service (session), one 2-service component,
 one 5-app shared service, 1 hazard, 1 Windows app, ~5 waves with the silent one first.
+`sim-static-env` and `sim-ups` show under `sim-redis-cache` with flag `no-binding:static-ref-…`:
+the census found them (correct), but they have no binding, so dry-run/apply print `SKIP … TEAM
+ACTION` for them -- exactly what the real migration does for static-ref / UPS consumers.
 
 ## Then the tool
 

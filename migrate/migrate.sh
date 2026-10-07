@@ -5,8 +5,8 @@
 set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
-WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; ARG=""
-while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
+WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; SVCRE=""; ARG=""
+while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
 PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 
 
@@ -17,13 +17,18 @@ PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 #                        -- nobody observes them, so they can be batched large
 #   --order easy   (default) silent services first (no live consumer), then islands, then shared, then multi-service
 #   --order hard   largest components first
+#   --services <ERE>  only services whose NAME matches (e.g. '^sim-redis-' in SBX); others are
+#                     excluded and counted -- the scan covers the whole foundation
+# Rows whose method is not cf-bind (static-ref / unknown / api-error) get flag no-binding:<method>:
+# the app consumes the Redis without a binding, so the tool cannot rebind it -- dry-run/apply list
+# it as a TEAM action (update env / UPS / config) and skip it.
 # Waves = connected components of the app<->service binding graph (an app and every service it
 # is bound to travel together => one restart per app), packed largest-first, max N services per
 # wave (a component larger than N gets its own wave). Services keyed by GUID (DESIGN 1a).
 cmd_plan(){
   local rep="$1"; [ -s "$rep" ] || { echo "usage: migrate.sh plan <report.csv> [--run dir] [--wave-size N]"; exit 1; }
   mkdir -p "$RUN"
-  awk -F',' -v OFS='\t' -v wsize="${WSIZE:-10}" -v maxapps="${MAXAPPS:-40}" -v silentmax="${SILENTMAX:-120}" -v order="${ORDER:-easy}" -v run="$RUN" -v now="$(date -u +%FT%TZ)" '
+  awk -F',' -v OFS='\t' -v wsize="${WSIZE:-10}" -v maxapps="${MAXAPPS:-40}" -v silentmax="${SILENTMAX:-120}" -v order="${ORDER:-easy}" -v svcre="$SVCRE" -v run="$RUN" -v now="$(date -u +%FT%TZ)" '
     function find(x){ while (par[x]!=x) { par[x]=par[par[x]]; x=par[x] } return x }
     function union(a,b,  ra,rb){ ra=find(a); rb=find(b); if (ra!=rb) par[rb]=ra }
     function plan_of(dep,  p){ p=dep; sub(/^(redis|valkey)-/,"",p); sub(/-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,"",p); return p }
@@ -33,7 +38,9 @@ cmd_plan(){
       ag=$col["app_guid"]; sg=$col["service_instance_guid"]
       if (ag=="" || sg=="" || sg=="?" || $col["app_name"] ~ /^EXTERNAL/) { skipped++; next }
       if ($col["deployment_exists"]=="no") { ghosts[sg]=1; ghostrows++; next }
+      if (svcre!="" && $col["redis_service_name"] !~ svcre) { excluded[sg]=1; exrows++; next }
       k=ag SUBSEP sg; if (k in seen) next; seen[k]=1; rows++
+      if ($col["method"]!="cf-bind") { nob[k]=$col["method"]; nnob++ }
       app[ag]=$col["app_name"]; aorg[ag]=$col["org"]; asp[ag]=$col["space"]; aplat[ag]=$col["platform"]
       svc[sg]=$col["redis_service_name"]; sorg[sg]=$col["redis_service_org"]; ssp[sg]=$col["redis_service_space"]
       splan[sg]=plan_of($col["redis_deployment"]); sdep[sg]=$col["redis_deployment"]
@@ -70,7 +77,9 @@ cmd_plan(){
       print "wave","component","service","service_guid","service_org","service_space","valkey_plan","app","app_guid","app_org","app_space","flags" > f
       for (i=1;i<=rows;i++) { k=edge[i]; split(k, kk, SUBSEP); ag=kk[1]; sg=kk[2]; r=comp_of[sg]
         fl=""; if (k in hz) fl=fl "hazard,"; if (k in idle) fl=fl "idle,"; if (k in xs) fl=fl "cross-space,"
-        if (nbound[ag]>1) fl=fl "multi-bound,"; if (aplat[ag]=="windows") fl=fl "windows,"; sub(/,$/,"",fl)
+        if (nbound[ag]>1) fl=fl "multi-bound,"; if (aplat[ag]=="windows") fl=fl "windows,"
+        if (k in nob) { m=nob[k]; gsub(/[ :]+/,"-",m); fl=fl "no-binding:" m "," }
+        sub(/,$/,"",fl)
         cid=substr(r,2,8)
         print cw[r], cid, svc[sg], sg, sorg[sg], ssp[sg], splan[sg], app[ag], ag, aorg[ag], asp[ag], fl > f
         wteams[cw[r] SUBSEP aorg[ag]]=1
@@ -95,7 +104,10 @@ cmd_plan(){
       printf "# Migration plan summary (aggregates only)\n\ngenerated %s from %s\n\n", now, FILENAME > h
       printf "| metric | value |\n|---|---|\n" > h
       printf "| connections (app↔service, deduped) | %d |\n| services | %d |\n| apps | %d |\n| orgs (≈teams) | %d |\n", rows, nsvc, napp, norg > h
+      nex=0; for (x in excluded) nex++
       printf "| rows skipped (external / no guid) | %d |\n| ghost services excluded (no deployment) | %d (%d rows) |\n", skipped, ng, ghostrows > h
+      if (svcre!="") printf "| services excluded by --services %s | %d (%d rows) |\n", svcre, nex, exrows > h
+      printf "| connections WITHOUT a binding (static-ref / unknown -> team action, tool skips) | %d |\n", nnob > h
       printf "| multi-bound apps (2+ services → 1 restart per wave) | %d |\n| services used across spaces/orgs (joint window + sharing) | %d |\n", nmb, nxsvc > h
       printf "| hazard apps (cf-bind + pinned ref) | %d (%d connections) |\n| idle connections (no live seen) | %d |\n| services with NO live connection at all | %d |\n| windows apps | %d |\n\n", nhzapp, nhz, nidle, nidlesvc, nwin > h
       printf "## Binding-graph components: %d\n\n| shape | count |\n|---|---|\n", nc > h
@@ -251,6 +263,7 @@ cmd_dryrun(){
     echo "== app $app ($(printf '%s' "$ag" | cut -c1-8))  org/space=$aorg/$asp  flags=[$aflags]"
     echo "   cf target -o $aorg -s $asp"
     case ",$aflags," in *,hazard,*) echo "   !! HAZARD: pinned env present -- preflight refuses until the app team removed it";; esac
+    case ",$aflags," in *,no-binding:*) echo "   SKIP  no binding (${aflags##*no-binding:}) -- TEAM ACTION: update env var / UPS / config to the Valkey; nothing for the tool to rebind"; echo; continue;; esac
     # every wave service this app is bound to
     printf '%s\n' "$rows" | awk -F'\t' -v a="$ag" '$9==a {print $4"\t"$3}' | while IFS=$'\t' read -r sg name; do
       d=$(ledger_done "$sg" "$ag" bind-valkey);  echo "   ${d:+DONE $d  }cf bind-service $app $name                      # rollback: cf unbind-service $app $name"
@@ -311,6 +324,7 @@ cmd_preflight(){
   done < <(printf '%s\n' "$rows" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
   # 4 per app
   while IFS=$'\t' read -r ag app aflags; do
+    case ",$aflags," in *,no-binding:*) ok "app $app: no binding (${aflags##*no-binding:}) -- team action, tool will skip"; continue;; esac
     local a; a=$(cfcurl "/v3/apps/$ag")
     if ! cf_json_ok "$a"; then fail "app $app: guid $ag not found"; continue; fi
     local state; state=$(printf '%s' "$a" | jq -r .state)

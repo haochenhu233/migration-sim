@@ -74,7 +74,7 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 ## Phase 2 — the tool-test population (SBX, 6 Redis; the tool creates the Valkeys)
 
 - [x] `scripts/layout.tsv` + `scripts/reset-population.sh` (2026-10-02): rebinds the existing 14 apps into the shapes the real plan showed — a 5-app shared service incl. the hazard app and Windows, the queue group, a 2-service/2-app chain (multi-bound app → one restart), a SILENT service (bound app stopped), a data-store service (`datastore` flag by hand in waves.tsv); unbinds everything, deletes the Valkey twins (frees IPs), renames standbys back. Re-runnable after every tool test.
-- [ ] run reset → discovery scan of SBX → `plan --wave-size 3` → expect ~5 waves covering every tool path
+- [x] run reset → discovery scan of SBX → `plan --wave-size 3 --services '^sim-redis-'` → waves cover every tool path (2026-10-07; first plan revealed foreign SBX services + non-binding consumers → `--services` filter and `no-binding:<method>` flag added)
 
 (The earlier ~100-connection population idea moves to the lab; SBX stays at 6 Redis.)
 

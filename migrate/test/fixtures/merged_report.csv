@@ -1,0 +1,13 @@
+app_name,space,org,app_guid,method,static_ref,static_ref_target,redis_service_name,redis_service_space,redis_service_org,redis_deployment,service_instance_guid,platform,deployment_exists,live_connection,source
+sim-cache-a,dev,sim,0000000b-0000-4000-8000-000000000011,cf-bind,,,sim-redis-cache,dev,sim,redis-cache-small-00000065-0000-4000-8000-000000000101,00000065-0000-4000-8000-000000000101,linux,yes,yes,both
+sim-cache-b,dev,sim,0000000c-0000-4000-8000-000000000012,cf-bind,,,sim-redis-cache,dev,sim,redis-cache-small-00000065-0000-4000-8000-000000000101,00000065-0000-4000-8000-000000000101,linux,yes,yes,both
+sim-cache-c,dev,sim,0000000d-0000-4000-8000-000000000013,cf-bind,,,sim-redis-cache,dev,sim,redis-cache-small-00000065-0000-4000-8000-000000000101,00000065-0000-4000-8000-000000000101,linux,yes,yes,both
+sim-static-env,dev,sim,00000015-0000-4000-8000-000000000021,static-ref: env-var,REDIS_HOST,10.0.0.1,sim-redis-cache,dev,sim,redis-cache-small-00000065-0000-4000-8000-000000000101,00000065-0000-4000-8000-000000000101,linux,yes,yes,backward
+sim-ups,dev,sim,00000016-0000-4000-8000-000000000022,static-ref: ups,sim-ups-redis,10.0.0.1,sim-redis-cache,dev,sim,redis-cache-small-00000065-0000-4000-8000-000000000101,00000065-0000-4000-8000-000000000101,linux,yes,yes,backward
+sim-session,dev,sim,00000017-0000-4000-8000-000000000023,cf-bind,,,sim-redis-session,dev,sim,redis-cache-small-00000066-0000-4000-8000-000000000102,00000066-0000-4000-8000-000000000102,linux,yes,no,forward
+sim-store,dev,sim,00000018-0000-4000-8000-000000000024,cf-bind,,,sim-redis-store,dev,sim,redis-cache-medium-00000067-0000-4000-8000-000000000103,00000067-0000-4000-8000-000000000103,linux,yes,yes,both
+sim-pinned,dev,sim,00000019-0000-4000-8000-000000000025,cf-bind,REDIS_URL,10.0.0.3,sim-redis-store,dev,sim,redis-cache-medium-00000067-0000-4000-8000-000000000103,00000067-0000-4000-8000-000000000103,linux,yes,yes,both
+sim-win,dev,sim,0000001a-0000-4000-8000-000000000026,cf-bind,,,sim-redis-queue,dev,sim,redis-cache-small-00000068-0000-4000-8000-000000000104,00000068-0000-4000-8000-000000000104,windows,yes,yes,both
+healthcheck,dev,oaisys,0000001f-0000-4000-8000-000000000031,cf-bind,,,serviceshealthcheck-redis,dev,oaisys,redis-cache-small-000000c9-0000-4000-8000-000000000201,000000c9-0000-4000-8000-000000000201,linux,yes,yes,both
+val-test-app,dev,oaisys,00000020-0000-4000-8000-000000000032,cf-bind,,,redis-small-test,dev,oaisys,redis-cache-small-000000ca-0000-4000-8000-000000000202,000000ca-0000-4000-8000-000000000202,linux,yes,no,forward
+ghost-app,dev,sim,00000021-0000-4000-8000-000000000033,cf-bind,,,sim-redis-ghost,dev,sim,redis-cache-small-000000cb-0000-4000-8000-000000000203,000000cb-0000-4000-8000-000000000203,linux,no,no,forward
