@@ -57,6 +57,7 @@ cd ~/ocfp/redis-consumer-discovery
 bash redis-consumer-discovery.sh run        <sbx-env> --path ./sbx-tool
 bash redis-consumer-discovery.sh scan-apps  <sbx-env> --path ./sbx-tool
 bash redis-consumer-discovery.sh list-redis <sbx-env> --path ./sbx-tool
+bash redis-consumer-discovery.sh scan-ups   <sbx-env> --path ./sbx-tool    # sim-ups: unknown -> static-ref: ups
 bash redis-consumer-discovery.sh merge      <sbx-env> --path ./sbx-tool
 
 cd ~/ocfp/migration-sim
@@ -68,7 +69,8 @@ cat runs/sbx/plan-summary.md
 ```
 Expect: 6 services, 12 connections, 1 silent service (session), one 2-service component,
 one 5-app shared service, 1 hazard, 1 Windows app, ~5 waves with the silent one first.
-`sim-static-env` and `sim-ups` show under `sim-redis-cache` with flag `no-binding:static-ref-…`:
+`sim-static-env` and `sim-ups` show under `sim-redis-cache` with flags `no-binding:static-ref-env-var`
+/ `no-binding:static-ref-ups` (`unknown` for sim-ups if `scan-ups` was not run):
 the census found them (correct), but they have no binding, so dry-run/apply print `SKIP … TEAM
 ACTION` for them -- exactly what the real migration does for static-ref / UPS consumers.
 
