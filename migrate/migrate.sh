@@ -246,34 +246,35 @@ cmd_dryrun(){
   napp=$(printf '%s\n' "$rows" | cut -f9 | sort -u | wc -l | tr -d ' '); norg=$(printf '%s\n' "$rows" | cut -f10 | sort -u | wc -l | tr -d ' ')
   echo "DRY-RUN wave $WAVE: $nsvc service(s), $napp app(s) ($napp restarts), $norg org(s). Nothing is executed."
   echo "rollback row per step -- see DESIGN §3; rollback scope = the whole service."
+  echo "every step is a v3 API call by GUID (no 'cf target'): waves run in parallel across orgs/spaces -- DESIGN §1b."
   echo
   # ---- phase A: per service
   printf '%s\n' "$rows" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}' | while IFS=$'\t' read -r sg name sorg ssp plan flags; do
     local std="${name}-redis-standby"
-    echo "== service $name ($(printf '%s' "$sg" | cut -c1-8))  plan=$plan  org/space=$sorg/$ssp  flags=[$flags]"
-    echo "   cf target -o $sorg -s $ssp"
-    d=$(ledger_done "$sg" "" rename-standby); echo "   ${d:+DONE $d  }cf rename-service $name $std                 # rollback: rename back (only if abandoning)"
-    d=$(ledger_done "$sg" "" create-valkey);  echo "   ${d:+DONE $d  }cf create-service valkey $plan $name           # rollback: cf delete-service $name"
-    echo "   ${d:+DONE          }assert: '$name' resolves to a VALKEY instance (new guid), '$std' resolves to guid $(printf '%s' "$sg" | cut -c1-8)"
+    local sg8; sg8=$(printf '%s' "$sg" | cut -c1-8)
+    echo "== service $name ($sg8)  plan=$plan  org/space=$sorg/$ssp  flags=[$flags]"
+    d=$(ledger_done "$sg" "" rename-standby); echo "   ${d:+DONE $d  }PATCH /v3/service_instances/$sg8  {name:\"$std\"}                       # cf rename-service $name $std   | rollback: rename back (only if abandoning)"
+    d=$(ledger_done "$sg" "" create-valkey);  echo "   ${d:+DONE $d  }POST  /v3/service_instances  {managed, name:\"$name\", space:<$name's space>, plan:valkey/$plan} -> job   # cf create-service valkey $plan $name   | rollback: DELETE the new instance"
+    echo "   ${d:+DONE          }assert: GET /v3/service_instances?names=$name&space_guids=<space> -> ONE instance, offering valkey, new guid;  GET /v3/service_instances/$sg8 -> name '$std'"
     case ",$flags," in *,datastore,*) d=$(ledger_done "$sg" "" copy-data); echo "   ${d:+DONE $d  }copy-data $std -> $name  (replication / MIGRATE / DUMP-RESTORE per SESSION-COMMANDS 8c)   # rollback: none needed";; esac
   done
   echo
   # ---- phase B: per app (one restart per app per wave)
   printf '%s\n' "$rows" | awk -F'\t' '!seen[$9]++ {print $9"\t"$8"\t"$10"\t"$11"\t"$12}' | while IFS=$'\t' read -r ag app aorg asp aflags; do
-    echo "== app $app ($(printf '%s' "$ag" | cut -c1-8))  org/space=$aorg/$asp  flags=[$aflags]"
-    echo "   cf target -o $aorg -s $asp"
+    local ag8; ag8=$(printf '%s' "$ag" | cut -c1-8)
+    echo "== app $app ($ag8)  org/space=$aorg/$asp  flags=[$aflags]"
     case ",$aflags," in *,hazard,*) echo "   !! HAZARD: pinned env present -- preflight refuses until the app team removed it";; esac
     case ",$aflags," in *,no-binding:*) echo "   SKIP  no binding (${aflags##*no-binding:}) -- TEAM ACTION: update env var / UPS / config to the Valkey; nothing for the tool to rebind"; echo; continue;; esac
     # every wave service this app is bound to
     printf '%s\n' "$rows" | awk -F'\t' -v a="$ag" '$9==a {print $4"\t"$3}' | while IFS=$'\t' read -r sg name; do
-      d=$(ledger_done "$sg" "$ag" bind-valkey);  echo "   ${d:+DONE $d  }cf bind-service $app $name                      # rollback: cf unbind-service $app $name"
+      d=$(ledger_done "$sg" "$ag" bind-valkey);  echo "   ${d:+DONE $d  }POST   /v3/service_credential_bindings {app:$ag8, service_instance:<valkey $name>} -> job   # cf bind-service $app $name   | rollback: DELETE that binding"
     done
     printf '%s\n' "$rows" | awk -F'\t' -v a="$ag" '$9==a {print $4"\t"$3}' | while IFS=$'\t' read -r sg name; do
-      d=$(ledger_done "$sg" "$ag" unbind-redis); echo "   ${d:+DONE $d  }cf unbind-service $app ${name}-redis-standby   # rollback: cf bind-service $app ${name}-redis-standby"
+      d=$(ledger_done "$sg" "$ag" unbind-redis); echo "   ${d:+DONE $d  }DELETE /v3/service_credential_bindings/<binding $ag8<->$(printf '%s' "$sg" | cut -c1-8)> -> job   # cf unbind-service $app ${name}-redis-standby   | rollback: POST a binding to $(printf '%s' "$sg" | cut -c1-8) again"
     done
     sg1=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$ag" '$9==a {print $4; exit}')
-    d=$(ledger_done "$sg1" "$ag" restart);  echo "   ${d:+DONE $d  }cf restart $app [--strategy rolling if >=2 instances]  # rollback: rebind standby + restart"
-    d=$(ledger_done "$sg1" "$ag" verify);   echo "   ${d:+DONE $d  }verify $app: L1 bindings+running+no crashes · L2 census on valkey, none on standby · L3 CLIENT LIST/ACL LOG   # fail: auto-rollback the SERVICE"
+    d=$(ledger_done "$sg1" "$ag" restart);  echo "   ${d:+DONE $d  }POST   /v3/apps/$ag8/actions/restart   (>=2 instances: POST /v3/deployments {app:$ag8} = rolling; STOPPED app: skipped, rebind only)   # cf restart $app   | rollback: rebind standby + restart"
+    d=$(ledger_done "$sg1" "$ag" verify);   echo "   ${d:+DONE $d  }verify $app: L1 GET /v3/apps/$ag8/processes/web/stats all RUNNING, bindings = valkey only · L2 census on valkey, none on standby · L3 CLIENT LIST/ACL LOG   # fail: auto-rollback the SERVICE"
   done
   echo
   echo "end of wave: services -> STANDBY (grace $(( ${GRACE_DAYS:-14} )) d); no retire."

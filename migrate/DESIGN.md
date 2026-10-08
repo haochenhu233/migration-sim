@@ -63,13 +63,45 @@ on its **service-instance GUID** (`redis_si_guid`, `valkey_si_guid`; apps on `ap
 are recorded attributes. Consequences:
 - `rename-standby` is a ledger event: `{guid, from, to}` — the full name history is on file.
 - `create-valkey` records the new instance's GUID; `plan` writes it back into `waves.tsv`.
-- `cf` commands take names, so **before every action `apply` resolves the name to a GUID**
-  (`cf curl /v3/service_instances?names=<n>&space_guids=<s>`) and asserts it equals the GUID the
-  ledger expects for that role (bind `<name>` ⇒ the Valkey's GUID; unbind
-  `<name>-redis-standby` ⇒ the Redis's GUID). Mismatch ⇒ `drift` event, stop, ask — never bind
-  the wrong instance.
+- `apply` never issues a name-taking `cf` command: every step is a **v3 API call addressed by
+  GUID** (§1b). Before each step it still asserts the name↔GUID mapping it expects
+  (`/v3/service_instances?names=<n>&space_guids=<s>` → exactly the GUID the ledger holds for that
+  role: `<name>` ⇒ the Valkey, `<name>-redis-standby` ⇒ the Redis). Mismatch ⇒ `drift` event,
+  stop, ask — never bind the wrong instance.
 - `status` prints `name (guid-prefix)` for services, so the dashboard stays unambiguous while
   names are in motion. BOSH deployment names are GUID-based already and never change.
+
+## 1b. No `cf target` — waves run in parallel across orgs and spaces
+
+NP spreads ~300 Redis over ~40 orgs, and waves are meant to run **concurrently**. `cf target`
+only writes the org/space into `~/.cf/config.json` so that name-based CLI commands can resolve
+names; it is per config file, not per command, so several workers sharing one `CF_HOME` would
+fight over it. `cf curl` ignores the target entirely. Therefore:
+
+| step | v3 call (all by GUID, space-independent) |
+|---|---|
+| rename Redis → standby | `PATCH /v3/service_instances/<redis>` `{"name":"<n>-redis-standby"}` |
+| create Valkey in the same space | `POST /v3/service_instances` `{type:managed, name:<n>, relationships:{space:<redis's space>, service_plan:<valkey plan>}}` → 202 job |
+| bind app → Valkey | `POST /v3/service_credential_bindings` `{type:app, relationships:{app, service_instance}}` → 202 job |
+| unbind app ← standby | `DELETE /v3/service_credential_bindings/<binding>` → 202 job |
+| restart | `POST /v3/apps/<app>/actions/restart`; ≥2 instances: `POST /v3/deployments {app}` (rolling); stopped app: no call |
+| waits / checks | `GET /v3/jobs/<job>` until COMPLETE/FAILED · `GET /v3/service_instances/<guid>` last_operation · `GET /v3/apps/<app>/processes/web/stats` |
+
+Consequences:
+- **One `cf login`** (an admin) serves every wave; nothing is ever targeted; a worker cannot act in
+  the wrong space because there is no "current space".
+- **Per-worker `CF_HOME`** anyway: `cf curl` refreshes the access token by rewriting
+  `config.json`, and concurrent rewrites race. `apply` copies the logged-in config into
+  `runs/<env>/cf-home/wave-N/` and runs with that `CF_HOME`. If the client's UAA rotates refresh
+  tokens (`jwt.refresh.rotate=true`) the copies would invalidate each other — preflight tests
+  this once (refresh a copy, check the original still works) and, if so, each wave worker logs in
+  itself instead of copying.
+- **Per-wave lock** (`runs/<env>/wave-N.lock`), not a global one; the `STOP` file stays global.
+- **Ledger under concurrent writers:** one line per event appended with `>>` (O_APPEND, a line is
+  far below PIPE_BUF) — appends from several processes never interleave on a local filesystem.
+  `status` reads the whole file, so the dashboard shows every running wave.
+- The CLI equivalent of each call is printed alongside in `dry-run` for operators who think in
+  `cf` commands; it is documentation, not what runs.
 
 ## 2. Per-app state machine
 
