@@ -5,8 +5,8 @@
 set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
-WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; SVCRE=""; ARG=""
-while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
+WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; SVCRE=""; ARG=""; WAVES=""; SVCF=""; YES=""; FORCE=""; NO_ROLLING=""
+while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --waves) WAVES="$2"; shift 2;; --service) SVCF="$2"; shift 2;; --yes) YES=1; shift;; --force) FORCE=1; shift;; --no-rolling) NO_ROLLING=1; shift;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
 PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 
 
@@ -176,11 +176,11 @@ cmd_status(){
     FILENAME==ARGV[1] {                             # ---- pass 1: ledger states (no header)
       if ($2=="") { svc_ev[$1]=$3; svc_ts[$1]=$4; svc_note[$1]=$5; if ($6!="") standby[$1]=$6 }
       else { st[$1 SUBSEP $2]=state_of($3); ts[$1 SUBSEP $2]=$4; note[$1 SUBSEP $2]=$5 }
-      if ($4 > last_ts[$1]) { last_ts[$1]=$4; last_ev[$1]=substr($4,12,8) " " ($2==""?"":$2 " ") $3 ($5!=""?" -- " substr($5,1,48):"") }
+      if ($4 > last_ts[$1]) { last_ts[$1]=$4; last_app[$1]=$2; last_step[$1]=$3; last_note[$1]=$5 }
       next }
     FNR==1 { next }                                 # ---- pass 2: the plan (waves.tsv header)
     wave!="" && $1!=wave { next }
-    { s=$4; a=$9; if (!(s in seen)) { order[++ns]=s; seen[s]=1; plan[s]=$7; disp[s]=$3 " (" substr($4,1,8) ")" }
+    { s=$4; a=$9; aname[a]=$8; if (!(s in seen)) { order[++ns]=s; seen[s]=1; plan[s]=$7; disp[s]=$3 " (" substr($4,1,8) ")" }
       apps[s]++; k=s SUBSEP a
       state = (k in st) ? st[k] : "PENDING"
       if (index($12,"hazard")) hz[s]++
@@ -207,7 +207,7 @@ cmd_status(){
         else                              phase="PENDING"
         sb=(s in standby) ? standby[s] : "-"
         mark=""; if (phase ~ /FAILED|ATTENTION|ROLLED/) mark="  !!"
-        printf "%-28s %-12s %-14s %5d %9s %9s %-14s %s%s\n", disp[s], plan[s], phase, apps[s], switched[s]+0 "/" apps[s], (verified[s]+0) "/" apps[s], sb, (s in last_ev ? last_ev[s] : "-"), mark
+        printf "%-28s %-12s %-14s %5d %9s %9s %-14s %s%s\n", disp[s], plan[s], phase, apps[s], switched[s]+0 "/" apps[s], (verified[s]+0) "/" apps[s], sb, (s in last_ts ? substr(last_ts[s],12,8) " " (last_app[s]==""?"":(last_app[s] in aname ? aname[last_app[s]] : substr(last_app[s],1,8)) " ") last_step[s] (last_note[s]!=""?" -- " substr(last_note[s],1,40):"") : "-"), mark
       }
       hzn=0; for (s in hz) hzn+=hz[s]
       if (hzn>0) printf "\n!! %d hazard app(s) in scope (pinned env) -- preflight will refuse until fixed\n", hzn
@@ -305,7 +305,7 @@ cmd_preflight(){
   ok(){ printf 'PASS  %s\n' "$1"; }; fail(){ printf 'FAIL  %s\n' "$1"; fails=$((fails+1)); }; warn(){ printf 'WARN  %s\n' "$1"; warns=$((warns+1)); }
   echo "PREFLIGHT wave $WAVE (run dir: $RUN)"
   # 1 run-dir state
-  if [ -s "$RUN/lock" ]; then fail "lock held: $(cat "$RUN/lock")"; else ok "no lock"; fi
+  if [ -s "$RUN/wave-$WAVE.lock" ]; then fail "wave $WAVE lock held: $(cat "$RUN/wave-$WAVE.lock")"; else ok "no lock on wave $WAVE"; fi
   [ -e "$RUN/STOP" ] && fail "STOP file present ($RUN/STOP)" || ok "no STOP file"
   local bad; bad=$(ledger_bad); [ "$bad" = 0 ] && ok "ledger parses ($(grep -c . "$LEDGER" 2>/dev/null || echo 0) lines)" || warn "$bad unparsable ledger line(s)"
   # 2 cf session
@@ -328,8 +328,12 @@ cmd_preflight(){
     else fail "service $name: API error checking the standby name (cannot rule out a collision)"; fi
     if [ -z "$cre" ]; then
       if lj=$(cflist "/v3/service_instances?names=$name&space_guids=$sp"); then
-        local vk; vk=$(printf '%s' "$lj" | jq -r '.resources[] | select(.guid!="'"$sg"'") | .guid' | head -1)
-        [ -n "$vk" ] && fail "service $name: another instance already carries the name (guid $vk) -- create would collide"
+        local vk vkst; vk=$(printf '%s' "$lj" | jq -r '.resources[] | select(.guid!="'"$sg"'") | .guid' | head -1)
+        vkst=$(printf '%s' "$lj" | jq -r '.resources[] | select(.guid!="'"$sg"'") | "\(.last_operation.type) \(.last_operation.state)"' | head -1)
+        if [ -n "$vk" ]; then
+          case "$vkst" in "create failed") warn "service $name: a FAILED create ($vk) still carries the name -- apply deletes it and creates again";;
+            *) fail "service $name: another instance already carries the name (guid $vk, $vkst) -- create would collide";; esac
+        fi
       else fail "service $name: API error checking the service name (cannot rule out a collision)"; fi
     fi
     # plan visible in that space (classic plan expected)
@@ -344,12 +348,20 @@ cmd_preflight(){
     local a; a=$(cfcurl "/v3/apps/$ag")
     if ! cf_json_ok "$a"; then fail "app $app: guid $ag not found"; continue; fi
     local state; state=$(printf '%s' "$a" | jq -r .state)
-    [ "$state" = STARTED ] && ok "app $app: STARTED" || warn "app $app: state $state (idle app? it will be restarted anyway)"
-    local stats; stats=$(cfcurl "/v3/apps/$ag/processes/web/stats")
-    if cf_json_ok "$stats"; then
-      local n r; n=$(printf '%s' "$stats" | jq -r '.resources|length'); r=$(printf '%s' "$stats" | jq -r '[.resources[]|select(.state=="RUNNING")]|length')
-      [ "$n" = "$r" ] && ok "app $app: $r/$n instance(s) running" || fail "app $app: only $r/$n instances running -- fix BEFORE migrating (a broken app looks like a migration failure after)"
-    else warn "app $app: no web process stats"; fi
+    local mid=""; [ -s "$LEDGER" ] && mid=$(ledger_lines | jq -r --arg a "$ag" --arg w "$WAVE" 'select(.app==$a and (.wave|tostring)==$w) | .step+":"+.outcome' | tail -1)
+    case "$mid" in ""|verify:ok|rollback:ok|team-action:ok) mid="";; esac
+    if [ "$state" = STARTED ]; then ok "app $app: STARTED"
+    elif [ "$state" = STOPPED ]; then warn "app $app: STOPPED -- rebind only, no restart; it picks up the Valkey when the team starts it"
+    else warn "app $app: state $state"; fi
+    if [ "$state" = STARTED ]; then
+      local stats; stats=$(cfcurl "/v3/apps/$ag/processes/web/stats")
+      if cf_json_ok "$stats"; then
+        local n r; n=$(printf '%s' "$stats" | jq -r '.resources|length'); r=$(printf '%s' "$stats" | jq -r '[.resources[]|select(.state=="RUNNING")]|length')
+        if [ "$n" = "$r" ]; then ok "app $app: $r/$n instance(s) running"
+        elif [ -n "$mid" ]; then warn "app $app: only $r/$n running but MID-MIGRATION (ledger: $mid) -- apply resumes it (or: rollback --app)"
+        else fail "app $app: only $r/$n instances running -- fix BEFORE migrating (a broken app looks like a migration failure after)"; fi
+      else warn "app $app: no web process stats"; fi
+    fi
     case ",$aflags," in *,hazard,*)
       local envj; envj=$(cfcurl "/v3/apps/$ag/environment_variables")
       if ! { cf_json_ok "$envj" && printf '%s' "$envj" | jq -e 'has("var")' >/dev/null 2>&1; }; then
@@ -410,10 +422,325 @@ cmd_summary(){
   rm -f "$RUN/.states.tsv"
 }
 
+
+# ============================================================================ apply
+# apply --wave N | --waves A-B  [--service <name|guid-prefix>] [--yes] [--force] [--no-rolling]
+#   Executes the wave exactly as dry-run prints it, by GUID over the v3 API (DESIGN §1b), driven
+#   by the ledger (every step recorded; steps already ok are skipped => resumable). A range is a
+#   LANE: waves run back-to-back; a stopped wave ends the lane. Per-wave lock; STOP file and Ctrl-C
+#   stop at the next step boundary (the current step always completes and is recorded).
+#   Services phase: rename -> create (all creates issued, then waited) -> copy-data (datastore).
+#   Apps phase, ONE app at a time: bind every wave service -> unbind every standby -> one restart
+#   (STOPPED app: none) -> verify L1. verify/bind/unbind failure => auto-rollback of the SERVICE
+#   (every app of it), wave continues; 3 failures in a row => the wave stops.
+#   Hooks (optional, in the run dir): copy-data.sh <standby_guid> <valkey_guid> <name>
+#                                     verify-hook.sh <app_guid> <app_name>   (exit 0 = healthy)
+OP="${MIGRATE_OP:-${USER:-operator}}"
+JOB_POLL="${JOB_POLL:-5}"; CREATE_TIMEOUT="${CREATE_TIMEOUT:-1500}"; BIND_TIMEOUT="${BIND_TIMEOUT:-300}"
+RESTART_TIMEOUT="${RESTART_TIMEOUT:-300}"; SOAK="${SOAK:-30}"; BREAKER="${BREAKER:-3}"
+now(){ date -u +%FT%TZ; }
+ledger_add(){ # wave service app step outcome ms note
+  jq -nc --arg ts "$(now)" --argjson w "$1" --arg s "$2" --arg a "$3" --arg st "$4" --arg o "$5" --argjson ms "${6:-0}" --arg op "$OP" --arg n "${7:-}" \
+    '{ts:$ts,wave:$w,service:$s,app:$a,step:$st,outcome:$o,ms:$ms,op:$op,note:$n}' >> "$LEDGER"
+}
+cmdlog(){ printf '%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" >> "$RUN/commands.log"; }
+say(){ printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+# cf invocations ignore SIGINT so that Ctrl-C never kills a request mid-flight: the trap in
+# apply only sets a flag, and the step that is running completes and is recorded.
+cfx(){ ( trap '' INT; exec $TMO "$CF" curl "$@" ); }
+# cfreq METHOD PATH [BODY] -> R_STATUS R_BODY R_JOB(/v3/jobs/.. from Location) R_ERR. 0 on 2xx.
+# An error document is an error even with a 2xx-looking shape; no status at all is an error.
+cfreq(){
+  local m="$1" p="$2" b="${3:-}" out
+  if [ -n "$b" ]; then out=$(cfx "$p" -i -X "$m" -H "Content-Type: application/json" -d "$b" 2>/dev/null)
+  else out=$(cfx "$p" -i -X "$m" 2>/dev/null); fi
+  out=$(printf '%s\n' "$out" | tr -d '\r')
+  R_STATUS=$(printf '%s\n' "$out" | awk '$1 ~ /^HTTP\// {s=$2} END{print s}')
+  R_JOB=$(printf '%s\n' "$out" | awk 'tolower($1)=="location:" {sub(/.*\/v3\//,"/v3/",$2); print $2; exit}')
+  R_BODY=$(printf '%s\n' "$out" | awk 'h==0 && /^$/ {h=1; next} h==1')
+  cmdlog "$m" "$p" "${R_STATUS:-none}"
+  R_ERR=""
+  [ -z "$R_STATUS" ] && { R_ERR="no HTTP status from cf curl (not logged in? timeout?)"; return 1; }
+  local e; e=$(printf '%s' "$R_BODY" | jq -r 'if type=="object" and has("errors") then [.errors[]|"\(.title): \(.detail)"]|join("; ") else empty end' 2>/dev/null)
+  [ -n "$e" ] && { R_ERR="HTTP $R_STATUS -- $e"; return 1; }
+  case "$R_STATUS" in 2*) return 0;; *) R_ERR="HTTP $R_STATUS"; return 1;; esac
+}
+# job_wait /v3/jobs/<g> <timeout_s> -> 0 COMPLETE | 1 FAILED/unreadable (R_ERR) | 2 timeout
+job_wait(){
+  local j="$1" t="$2" start st js bad=0; start=$(date +%s)
+  while :; do
+    js=$(cfx "$j" 2>/dev/null); st=$(printf '%s' "$js" | jq -r '.state // empty' 2>/dev/null)
+    case "$st" in
+      COMPLETE) return 0;;
+      FAILED) R_ERR=$(printf '%s' "$js" | jq -r '[.errors[]?|"\(.title): \(.detail)"]|join("; ")'); [ -z "$R_ERR" ] && R_ERR="job FAILED (no detail)"; return 1;;
+      PROCESSING|POLLING) bad=0;;
+      *) bad=$((bad+1)); [ "$bad" -ge 3 ] && { R_ERR="job $j unreadable 3x: $(printf '%s' "$js" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"; return 1; };;
+    esac
+    [ $(( $(date +%s) - start )) -ge "$t" ] && { R_ERR="job $j still '$st' after ${t}s"; return 2; }
+    sleep "$JOB_POLL"
+  done
+}
+# binding_guid <app> <si> -> guid of the app binding, "" if none; "ERR" on API error
+binding_guid(){ local lj; lj=$(cflist "/v3/service_credential_bindings?type=app&app_guids=$1&service_instance_guids=$2") || { echo ERR; return; }
+  printf '%s' "$lj" | jq -r '.resources[0].guid // empty'; }
+# app_stats <app> -> "running/total" ; "ERR" on API error
+app_stats(){ local j; j=$(cfx "/v3/apps/$1/processes/web/stats" 2>/dev/null); cf_json_ok "$j" || { echo ERR; return; }
+  printf '%s' "$j" | jq -r '"\([.resources[]|select(.state=="RUNNING")]|length)/\(.resources|length)"'; }
+wait_running(){ # wait_running <app> <timeout> -> 0 when all instances RUNNING
+  local start s; start=$(date +%s)
+  while :; do s=$(app_stats "$1"); case "$s" in ERR) ;; */*) [ "${s%/*}" = "${s#*/}" ] && [ "${s%/*}" != 0 ] && return 0;; esac
+    [ $(( $(date +%s) - start )) -ge "$2" ] && { R_ERR="instances $s after $2s"; return 1; }; sleep "$JOB_POLL"; done
+}
+halt_check(){ [ -e "$RUN/STOP" ] && { say "!! STOP file present ($RUN/STOP) -- halting at this step boundary"; return 1; }
+  [ "${STOP_REQ:-0}" = 1 ] && { say "!! Ctrl-C -- halting at this step boundary"; return 1; }; return 0; }
+wave_lock(){ local f="$RUN/wave-$1.lock"
+  if ( set -o noclobber; printf '%s %s pid %s\n' "$OP" "$(now)" "$$" > "$f" ) 2>/dev/null; then LOCKF="$f"; return 0; fi
+  echo "!! wave $1 is being applied by: $(cat "$f") -- refusing. Remove $f only if that process is dead."; return 1; }
+wave_unlock(){ [ -n "${LOCKF:-}" ] && rm -f "$LOCKF"; LOCKF=""; }
+svc_note_guid(){ ledger_lines | jq -r --arg s "$1" 'select(.service==$s and .app=="" and .step=="create-valkey" and .outcome=="ok") | .note' | tail -1 | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1; }
+app_last(){ # app_last <svc> <app> -> last step[:outcome] for the pair ("" if none)
+  ledger_lines | jq -r --arg s "$1" --arg a "$2" 'select(.service==$s and .app==$a) | if .outcome=="ok" then .step else .step+":"+.outcome end' | tail -1; }
+
+# restart_app <app> <name> <instances> -> 0 when back to all RUNNING (+soak). R_NOTE = how.
+restart_app(){
+  local ag="$1" app="$2" inst="$3" t0; t0=$(date +%s)
+  if [ "$inst" -ge 2 ] && [ -z "${NO_ROLLING:-}" ]; then
+    R_NOTE="rolling ($inst instances)"
+    cfreq POST "/v3/deployments" "{\"relationships\":{\"app\":{\"data\":{\"guid\":\"$ag\"}}}}" || return 1
+    local dg; dg=$(printf '%s' "$R_BODY" | jq -r '.guid // empty'); [ -n "$dg" ] || { R_ERR="deployment created but no guid in response"; return 1; }
+    local start st; start=$(date +%s)
+    while :; do st=$(cfx "/v3/deployments/$dg" 2>/dev/null | jq -r '"\(.status.value)/\(.status.reason)"' 2>/dev/null)
+      case "$st" in FINALIZED/DEPLOYED) break;; FINALIZED/*) R_ERR="deployment $st"; return 1;; esac
+      [ $(( $(date +%s) - start )) -ge "$RESTART_TIMEOUT" ] && { R_ERR="deployment still $st after ${RESTART_TIMEOUT}s"; return 1; }; sleep "$JOB_POLL"; done
+  else
+    R_NOTE="restart ($inst instance)"
+    cfreq POST "/v3/apps/$ag/actions/restart" || return 1
+  fi
+  wait_running "$ag" "$RESTART_TIMEOUT" || return 1
+  say "   $app up ($(app_stats "$ag")) -- soak ${SOAK}s"; sleep "$SOAK"
+  R_MS=$(( ($(date +%s) - t0) * 1000 )); return 0
+}
+
+# rollback_service <svc_guid> <name> <valkey_guid> <reason>: every app of the service back on Redis
+rollback_service(){
+  local sg="$1" name="$2" vk="$3" why="$4" ag app aflags last t0 ok bg inst st
+  say "!! ROLLBACK service $name ($(printf '%s' "$sg" | cut -c1-8)): $why"
+  while IFS=$'\t' read -r ag app aflags; do
+    case ",$aflags," in *,no-binding:*) continue;; esac
+    last=$(app_last "$sg" "$ag"); case "$last" in ""|rollback|team-action) continue;; esac
+    t0=$(date +%s); ok=1; local did=""
+    # 1) Redis binding back (if it was removed)
+    bg=$(binding_guid "$ag" "$sg")
+    if [ "$bg" = ERR ]; then ok=""; R_ERR="cannot list bindings"
+    elif [ -z "$bg" ]; then
+      if cfreq POST "/v3/service_credential_bindings" "{\"type\":\"app\",\"relationships\":{\"app\":{\"data\":{\"guid\":\"$ag\"}},\"service_instance\":{\"data\":{\"guid\":\"$sg\"}}}}" \
+         && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then did="rebind redis"; else ok=""; fi
+    fi
+    # 2) Valkey binding away
+    if [ -n "$ok" ] && [ -n "$vk" ]; then bg=$(binding_guid "$ag" "$vk")
+      if [ "$bg" = ERR ]; then ok=""; R_ERR="cannot list bindings"
+      elif [ -n "$bg" ]; then
+        if cfreq DELETE "/v3/service_credential_bindings/$bg" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then did="${did:+$did + }unbind valkey"; else ok=""; fi
+      fi
+    fi
+    # 3) restart only if the app was restarted onto the Valkey (and is not stopped)
+    if [ -n "$ok" ]; then case "$last" in restart|verify|verify:fail)
+      st=$(cfx "/v3/apps/$ag" 2>/dev/null | jq -r '.state // "?"')
+      if [ "$st" = STARTED ]; then inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // 1')
+        if restart_app "$ag" "$app" "$inst"; then did="${did:+$did + }restart"; else ok=""; fi; fi;; esac; fi
+    if [ -n "$ok" ]; then ledger_add "$WAVE" "$sg" "$ag" rollback ok $(( ($(date +%s)-t0)*1000 )) "cause: $why; $did"; say "   rolled back $app: ${did:-nothing to undo}"
+    else ledger_add "$WAVE" "$sg" "$ag" rollback fail $(( ($(date +%s)-t0)*1000 )) "cause: $why; FAILED: $R_ERR"; say "   !! rollback of $app FAILED: $R_ERR -- fix by hand, then 'status --wave $WAVE'"; fi
+  done < <(printf '%s\n' "$ROWS" | awk -F'\t' -v s="$sg" '$4==s && !seen[$9]++ {print $9"\t"$8"\t"$12}')
+}
+
+apply_wave(){
+  ROWS=$(wave_rows "$WAVE"); [ -n "$ROWS" ] || { echo "wave $WAVE: no rows in $PLAN"; return 1; }
+  if [ -n "${SVCF:-}" ]; then ROWS=$(printf '%s\n' "$ROWS" | awk -F'\t' -v f="$SVCF" '$3==f || index($4,f)==1'); [ -n "$ROWS" ] || { echo "wave $WAVE: no service matches --service $SVCF"; return 1; }; fi
+  local nsvc napp; nsvc=$(printf '%s\n' "$ROWS" | cut -f4 | sort -u | wc -l | tr -d ' '); napp=$(printf '%s\n' "$ROWS" | cut -f9 | sort -u | wc -l | tr -d ' ')
+  echo "APPLY wave $WAVE: $nsvc service(s), $napp app(s)  run=$RUN  operator=$OP"
+  # gate: preflight (unless --force), then the lock
+  if [ -z "${FORCE:-}" ]; then
+    local pf; pf=$(cmd_preflight 2>&1); printf '%s\n' "$pf" > "$RUN/preflight-wave-$WAVE.log"
+    if printf '%s\n' "$pf" | grep -q '^FAIL'; then printf '%s\n' "$pf" | grep '^FAIL'; echo "!! preflight FAILED -- fix, or --force to override (recorded)"; return 1; fi
+    echo "preflight: PASS ($(printf '%s\n' "$pf" | grep -c '^WARN') warning(s), $RUN/preflight-wave-$WAVE.log)"
+  else ledger_add "$WAVE" "" "" preflight-override ok 0 "--force by $OP"; fi
+  if [ -z "${YES:-}" ]; then
+    if [ -t 0 ]; then printf 'Execute wave %s now? type yes: ' "$WAVE"; read -r a; [ "$a" = yes ] || { echo "not confirmed"; return 1; }
+    else echo "!! not a terminal and no --yes: refusing"; return 1; fi
+  fi
+  wave_lock "$WAVE" || return 1
+  ledger_add "$WAVE" "" "" wave-start ok 0 "$nsvc services, $napp apps"
+  local rc=0; apply_services && apply_apps || rc=1
+  wave_unlock; return $rc
+}
+
+apply_services(){
+  unset VK SKIP JOBS PLANG SPACE CLEANED; declare -gA VK SKIP JOBS PLANG SPACE CLEANED   # per wave
+  local sg name sorg ssp plan flags std j cur st t0 sp pg lj n
+  while IFS=$'\t' read -r sg name sorg ssp plan flags; do
+    halt_check || return 1
+    std="${name}-redis-standby"
+    j=$(cfx "/v3/service_instances/$sg" 2>/dev/null); cf_json_ok "$j" || { ledger_add "$WAVE" "$sg" "" drift fail 0 "GET service: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"; SKIP[$sg]=1; say "!! $name: cannot read instance $sg -- skipped"; continue; }
+    cur=$(printf '%s' "$j" | jq -r .name); sp=$(printf '%s' "$j" | jq -r '.relationships.space.data.guid'); SPACE[$sg]=$sp
+    # -- rename-standby
+    if [ -n "$(ledger_done "$sg" "" rename-standby)" ]; then
+      [ "$cur" = "$std" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "ledger: renamed; CF name is '$cur'"; SKIP[$sg]=1; say "!! $name: drift (CF name '$cur') -- skipped"; continue; }
+    else
+      [ "$cur" = "$name" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "expected name '$name', CF has '$cur'"; SKIP[$sg]=1; say "!! $name: guid $sg is named '$cur' -- skipped"; continue; }
+      t0=$(date +%s)
+      if cfreq PATCH "/v3/service_instances/$sg" "{\"name\":\"$std\"}" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then
+        ledger_add "$WAVE" "$sg" "" rename-standby ok $(( ($(date +%s)-t0)*1000 )) "$name -> $std"; say "$name: renamed -> $std"
+      else ledger_add "$WAVE" "$sg" "" rename-standby fail $(( ($(date +%s)-t0)*1000 )) "$R_ERR"; SKIP[$sg]=1; say "!! $name: rename failed: $R_ERR -- skipped"; continue; fi
+    fi
+    # -- create-valkey (issue now, wait below)
+    if [ -n "$(ledger_done "$sg" "" create-valkey)" ]; then
+      VK[$sg]=$(svc_note_guid "$sg"); [ -n "${VK[$sg]}" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "create-valkey recorded but no guid in its note"; SKIP[$sg]=1; continue; }
+      say "$name: valkey already created (${VK[$sg]:0:8})"; continue
+    fi
+    lj=$(cflist "/v3/service_plans?names=$plan&service_offering_names=valkey&space_guids=$sp&available=true") || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "API error listing valkey plan '$plan'"; SKIP[$sg]=1; say "!! $name: cannot list valkey plans"; continue; }
+    n=$(printf '%s' "$lj" | jq -r '.resources|length'); pg=$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty')
+    [ "$n" = 1 ] || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "valkey plan '$plan': $n match(es) in the space"; SKIP[$sg]=1; say "!! $name: valkey plan '$plan' -> $n match(es) -- skipped"; continue; }
+    PLANG[$sg]=$pg
+    # leftover under the name? (a previous create failed, or completed after the process died)
+    lj=$(cflist "/v3/service_instances?names=$name&space_guids=$sp") || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "API error listing instances named $name"; SKIP[$sg]=1; continue; }
+    local lg lst lpl; lg=$(printf '%s' "$lj" | jq -r '.resources[]|select(.guid!="'"$sg"'")|.guid' | head -1)
+    if [ -n "$lg" ]; then
+      lst=$(printf '%s' "$lj" | jq -r '.resources[]|select(.guid=="'"$lg"'")|"\(.last_operation.type) \(.last_operation.state)"'); lpl=$(printf '%s' "$lj" | jq -r '.resources[]|select(.guid=="'"$lg"'")|.relationships.service_plan.data.guid')
+      if [ "$lst" = "create succeeded" ] && [ "$lpl" = "$pg" ]; then
+        VK[$sg]=$lg; ledger_add "$WAVE" "$sg" "" create-valkey ok 0 "valkey $lg as $name (adopted: already existed, plan $plan)"; printf '%s\t%s\t%s\n' "$sg" "$lg" "$name" >> "$RUN/wave-$WAVE.guids"; say "$name: valkey already exists (${lg:0:8}) -- adopted"; continue
+      elif [ "$lst" = "create failed" ]; then
+        say "$name: deleting failed leftover ${lg:0:8} ($lst)"
+        local cleaned=""
+        if cfreq DELETE "/v3/service_instances/$lg" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then cleaned="deleted failed leftover $lg; "; CLEANED[$sg]="$cleaned"
+        else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "cannot delete failed leftover $lg: $R_ERR"; SKIP[$sg]=1; continue; fi
+      else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "name $name taken by $lg ($lst, plan $lpl) -- not ours to touch"; SKIP[$sg]=1; say "!! $name: name taken by ${lg:0:8} ($lst) -- skipped"; continue; fi
+    fi
+    if cfreq POST "/v3/service_instances" "{\"type\":\"managed\",\"name\":\"$name\",\"relationships\":{\"space\":{\"data\":{\"guid\":\"$sp\"}},\"service_plan\":{\"data\":{\"guid\":\"$pg\"}}}}" && [ -n "$R_JOB" ]; then
+      JOBS[$sg]="$R_JOB $(date +%s)"; say "$name: valkey create issued (plan $plan) -> $R_JOB"
+    else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "${R_ERR:-no job in response}"; SKIP[$sg]=1; say "!! $name: create failed: ${R_ERR:-no job}"; fi
+  done < <(printf '%s\n' "$ROWS" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
+  # -- wait for every create, then assert names<->guids
+  local job t1
+  for sg in "${!JOBS[@]}"; do
+    name=$(printf '%s\n' "$ROWS" | awk -F'\t' -v s="$sg" '$4==s {print $3; exit}'); job="${JOBS[$sg]% *}"; t1="${JOBS[$sg]#* }"
+    say "$name: waiting for valkey deploy ($job, up to ${CREATE_TIMEOUT}s)"
+    if job_wait "$job" "$CREATE_TIMEOUT"; then
+      lj=$(cflist "/v3/service_instances?names=$name&space_guids=${SPACE[$sg]}")
+      n=$(printf '%s' "$lj" | jq -r '.resources|length' 2>/dev/null); local vg vp
+      vg=$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty'); vp=$(printf '%s' "$lj" | jq -r '.resources[0].relationships.service_plan.data.guid // empty')
+      if [ "$n" = 1 ] && [ "$vg" != "$sg" ] && [ "$vp" = "${PLANG[$sg]}" ]; then
+        VK[$sg]=$vg; ledger_add "$WAVE" "$sg" "" create-valkey ok $(( ($(date +%s)-t1)*1000 )) "${CLEANED[$sg]:-}valkey $vg as $name (plan $(printf '%s\n' "$ROWS" | awk -F'\t' -v s="$sg" '$4==s {print $7; exit}'))"
+        printf '%s\t%s\t%s\n' "$sg" "$vg" "$name" >> "$RUN/wave-$WAVE.guids"; say "$name: valkey ready (${vg:0:8})"
+      else ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "job done but assert failed: $n instance(s) named $name, guid ${vg:-none}, plan ${vp:-none}"; SKIP[$sg]=1; say "!! $name: post-create assert failed -- skipped"; fi
+    else ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "$R_ERR"; SKIP[$sg]=1; say "!! $name: valkey create FAILED: $R_ERR -- skipped (redis stays as $name-redis-standby; 'rollback --service' renames it back)"; fi
+  done
+  # -- copy-data for datastore services
+  while IFS=$'\t' read -r sg name flags; do
+    [ -n "${SKIP[$sg]:-}" ] && continue; case ",$flags," in *,datastore,*) ;; *) continue;; esac
+    [ -n "$(ledger_done "$sg" "" copy-data)" ] && continue
+    halt_check || return 1; t0=$(date +%s)
+    if [ -x "$RUN/copy-data.sh" ] || [ -s "$RUN/copy-data.sh" ]; then
+      say "$name: copy-data hook: bash $RUN/copy-data.sh $sg ${VK[$sg]} $name"
+      if bash "$RUN/copy-data.sh" "$sg" "${VK[$sg]}" "$name" >> "$RUN/copy-data-$WAVE.log" 2>&1; then ledger_add "$WAVE" "$sg" "" copy-data ok $(( ($(date +%s)-t0)*1000 )) "hook ok"
+      else ledger_add "$WAVE" "$sg" "" copy-data fail $(( ($(date +%s)-t0)*1000 )) "hook exit $? (see copy-data-$WAVE.log)"; SKIP[$sg]=1; say "!! $name: copy-data hook failed -- skipped"; fi
+    elif [ -t 0 ]; then
+      echo "   $name: DATA COPY needed: ${name}-redis-standby ($sg) -> $name (${VK[$sg]}) -- SESSION-COMMANDS 8c (replication / MIGRATE / DUMP-RESTORE)"
+      printf '   type done when the copy is complete, skip to leave the service for later: '; read -r a
+      if [ "$a" = done ]; then ledger_add "$WAVE" "$sg" "" copy-data ok $(( ($(date +%s)-t0)*1000 )) "manual, confirmed by $OP"
+      else ledger_add "$WAVE" "$sg" "" copy-data blocked 0 "operator deferred"; SKIP[$sg]=1; fi
+    else ledger_add "$WAVE" "$sg" "" copy-data blocked 0 "no copy-data.sh hook and no terminal"; SKIP[$sg]=1; say "!! $name: copy-data needs a hook or a terminal -- skipped"; fi
+  done < <(printf '%s\n' "$ROWS" | awk -F'\t' '{ if ($12 ~ /datastore/) ds[$4]=1; n[$4]=$3 } END { for (s in ds) print s"\t"n[s]"\t"(ds[s]?"datastore":"") }')
+  return 0
+}
+
+apply_apps(){
+  local ag app aflags st inst t0 fails=0 sg name vk bg last did
+  while IFS=$'\t' read -r ag app aflags; do
+    halt_check || return 1
+    local svcs; svcs=$(printf '%s\n' "$ROWS" | awk -F'\t' -v a="$ag" '$9==a {print $4"\t"$3}')
+    case ",$aflags," in *,no-binding:*)
+      while IFS=$'\t' read -r sg name; do [ -n "$(ledger_done "$sg" "$ag" team-action)" ] || ledger_add "$WAVE" "$sg" "$ag" team-action ok 0 "no binding (${aflags##*no-binding:}): team updates env/UPS/config to the valkey"; done <<< "$svcs"
+      say "$app: SKIP (no binding, team action)"; continue;; esac
+    st=$(cfx "/v3/apps/$ag" 2>/dev/null | jq -r '.state // empty' 2>/dev/null)
+    [ -n "$st" ] || { say "!! $app: cannot read app $ag -- skipped"; while IFS=$'\t' read -r sg name; do ledger_add "$WAVE" "$sg" "$ag" drift fail 0 "GET app failed"; done <<< "$svcs"; continue; }
+    inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // 1' 2>/dev/null)
+    local sgf; sgf=$(printf '%s\n' "$svcs" | head -1 | cut -f1)
+    if [ -n "$(ledger_done "$sgf" "$ag" verify)" ] && [ "$(app_last "$sgf" "$ag")" = verify ]; then say "== $app (${ag:0:8}) already verified (ledger) -- skipped"; continue; fi
+    say "== $app (${ag:0:8}) state=$st instances=$inst"
+    local svc_ok=""; did=""
+    # bind every wave service's valkey
+    while IFS=$'\t' read -r sg name; do
+      [ -n "${SKIP[$sg]:-}" ] && { say "   $name: service skipped earlier -- app left on redis for it"; continue; }
+      vk="${VK[$sg]:-}"; [ -n "$vk" ] || { say "   $name: no valkey guid -- skipped"; continue; }
+      if [ -n "$(ledger_done "$sg" "$ag" bind-valkey)" ]; then svc_ok="$svc_ok $sg"; continue; fi
+      t0=$(date +%s); bg=$(binding_guid "$ag" "$vk")
+      if [ "$bg" = ERR ]; then ledger_add "$WAVE" "$sg" "$ag" bind-valkey fail 0 "API error listing bindings"; fails=$((fails+1)); rollback_service "$sg" "$name" "$vk" "bind-valkey of $app: API error"; SKIP[$sg]=1; continue; fi
+      if [ -n "$bg" ]; then ledger_add "$WAVE" "$sg" "$ag" bind-valkey ok 0 "binding already present ($bg)"; svc_ok="$svc_ok $sg"; continue; fi
+      if cfreq POST "/v3/service_credential_bindings" "{\"type\":\"app\",\"relationships\":{\"app\":{\"data\":{\"guid\":\"$ag\"}},\"service_instance\":{\"data\":{\"guid\":\"$vk\"}}}}" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then
+        ledger_add "$WAVE" "$sg" "$ag" bind-valkey ok $(( ($(date +%s)-t0)*1000 )) ""; say "   bound -> valkey $name"; svc_ok="$svc_ok $sg"
+      else ledger_add "$WAVE" "$sg" "$ag" bind-valkey fail $(( ($(date +%s)-t0)*1000 )) "$R_ERR"; say "   !! bind to valkey $name failed: $R_ERR"; fails=$((fails+1)); rollback_service "$sg" "$name" "$vk" "bind-valkey of $app failed: $R_ERR"; SKIP[$sg]=1; fi
+    done <<< "$svcs"
+    [ -n "$svc_ok" ] || { [ "$fails" -ge "$BREAKER" ] && { say "!! $fails failures in a row -- wave stopped (circuit breaker)"; return 1; }; continue; }
+    # unbind every standby
+    local svc_ok2=""
+    for sg in $svc_ok; do name=$(printf '%s\n' "$svcs" | awk -F'\t' -v s="$sg" '$1==s {print $2}'); vk="${VK[$sg]}"
+      if [ -n "$(ledger_done "$sg" "$ag" unbind-redis)" ]; then svc_ok2="$svc_ok2 $sg"; continue; fi
+      t0=$(date +%s); bg=$(binding_guid "$ag" "$sg")
+      if [ "$bg" = ERR ]; then ledger_add "$WAVE" "$sg" "$ag" unbind-redis fail 0 "API error listing bindings"; fails=$((fails+1)); rollback_service "$sg" "$name" "$vk" "unbind-redis of $app: API error"; SKIP[$sg]=1; continue; fi
+      if [ -z "$bg" ]; then ledger_add "$WAVE" "$sg" "$ag" unbind-redis ok 0 "no redis binding found (already gone)"; svc_ok2="$svc_ok2 $sg"; continue; fi
+      if cfreq DELETE "/v3/service_credential_bindings/$bg" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then
+        ledger_add "$WAVE" "$sg" "$ag" unbind-redis ok $(( ($(date +%s)-t0)*1000 )) ""; say "   unbound <- standby $name"; svc_ok2="$svc_ok2 $sg"
+      else ledger_add "$WAVE" "$sg" "$ag" unbind-redis fail $(( ($(date +%s)-t0)*1000 )) "$R_ERR"; say "   !! unbind from standby $name failed: $R_ERR"; fails=$((fails+1)); rollback_service "$sg" "$name" "$vk" "unbind-redis of $app failed: $R_ERR"; SKIP[$sg]=1; fi
+    done
+    [ -n "$svc_ok2" ] || { [ "$fails" -ge "$BREAKER" ] && { say "!! $fails failures in a row -- wave stopped (circuit breaker)"; return 1; }; continue; }
+    halt_check || return 1
+    # ONE restart (recorded under every service of the app in this wave)
+    local sg1="${svc_ok2# }"; sg1="${sg1%% *}"
+    if [ -z "$(ledger_done "$sg1" "$ag" restart)" ]; then
+      if [ "$st" = STOPPED ]; then for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" restart ok 0 "skipped: app STOPPED (rebind only)"; done; say "   restart skipped (app STOPPED)"
+      else
+        if restart_app "$ag" "$app" "$inst"; then for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" restart ok "$R_MS" "$R_NOTE"; done; say "   restarted ($R_NOTE)"
+        else for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" restart fail 0 "$R_ERR"; done; say "   !! restart failed: $R_ERR"; fails=$((fails+1))
+          for sg in $svc_ok2; do name=$(printf '%s\n' "$svcs" | awk -F'\t' -v s="$sg" '$1==s {print $2}'); rollback_service "$sg" "$name" "${VK[$sg]}" "restart of $app failed: $R_ERR"; SKIP[$sg]=1; done
+          [ "$fails" -ge "$BREAKER" ] && { say "!! $fails failures in a row -- wave stopped (circuit breaker)"; return 1; }; continue; fi
+      fi
+    fi
+    # verify L1 (+ optional hook)
+    if [ -z "$(ledger_done "$sg1" "$ag" verify)" ]; then
+      t0=$(date +%s); local vfail=""
+      if [ "$st" != STOPPED ]; then local s; s=$(app_stats "$ag"); [ "$s" != ERR ] && [ "${s%/*}" = "${s#*/}" ] && [ "${s%/*}" != 0 ] || vfail="instances $s"; fi
+      for sg in $svc_ok2; do vk="${VK[$sg]}"
+        bg=$(binding_guid "$ag" "$vk"); { [ "$bg" != ERR ] && [ -n "$bg" ]; } || vfail="${vfail:+$vfail; }no valkey binding ($(printf '%s' "$sg" | cut -c1-8))"
+        bg=$(binding_guid "$ag" "$sg"); [ "$bg" = "" ] || vfail="${vfail:+$vfail; }redis binding still present/unknown ($(printf '%s' "$sg" | cut -c1-8))"
+      done
+      if [ -z "$vfail" ] && [ -s "$RUN/verify-hook.sh" ]; then bash "$RUN/verify-hook.sh" "$ag" "$app" >> "$RUN/verify-$WAVE.log" 2>&1 || vfail="verify-hook exit $?"; fi
+      if [ -z "$vfail" ]; then for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" verify ok $(( ($(date +%s)-t0)*1000 )) "L1 ok${st:+ (state $st)}"; done; say "   verified"; fails=0
+      else for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" verify fail $(( ($(date +%s)-t0)*1000 )) "$vfail"; done; say "   !! verify FAILED: $vfail"; fails=$((fails+1))
+        for sg in $svc_ok2; do name=$(printf '%s\n' "$svcs" | awk -F'\t' -v s="$sg" '$1==s {print $2}'); rollback_service "$sg" "$name" "${VK[$sg]}" "verify of $app failed: $vfail"; SKIP[$sg]=1; done
+        [ "$fails" -ge "$BREAKER" ] && { say "!! $fails failures in a row -- wave stopped (circuit breaker)"; return 1; }; fi
+    fi
+  done < <(printf '%s\n' "$ROWS" | awk -F'\t' '!seen[$9]++ {print $9"\t"$8"\t"$12}')
+  local nskip=0; for sg in "${!SKIP[@]}"; do nskip=$((nskip+1)); done
+  ledger_add "$WAVE" "" "" wave-end ok 0 "$nskip service(s) skipped/rolled back; the rest on standby until confirm + grace"
+  say "wave $WAVE done ($nskip service(s) need attention) -- status --wave $WAVE"
+  return 0
+}
+
+cmd_apply(){
+  local list=""
+  if [ -n "${WAVES:-}" ]; then list=$(seq "${WAVES%-*}" "${WAVES#*-}" | paste -sd' ' -); else list="$WAVE"; fi
+  [ -n "$list" ] || { echo "usage: migrate.sh apply --wave N | --waves A-B [--service X] [--yes] [--force] [--run dir]"; exit 1; }
+  [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
+  STOP_REQ=0; trap 'STOP_REQ=1; echo; echo "!! Ctrl-C: the running step completes and is recorded, then apply stops"' INT
+  trap 'wave_unlock' EXIT
+  local w; for w in $list; do WAVE="$w"; apply_wave || { echo "!! lane stopped at wave $w"; return 1; }; done
+}
+
 case "$SUB" in
   plan)      cmd_plan "$ARG" ;;
+  apply)     cmd_apply ;;
   dry-run)   cmd_dryrun ;;
   preflight) cmd_preflight ;;
   status) if [ -n "$WAVE" ]; then cmd_status; else cmd_summary; fi ;;
-  *) echo "usage: migrate.sh plan <report.csv> | preflight --wave N [--free-ips N] | dry-run --wave N | status [--wave N]   (all: --run <dir>)"; exit 1 ;;
+  *) echo "usage: migrate.sh plan <report.csv> | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N]   (all: --run <dir>)"; exit 1 ;;
 esac

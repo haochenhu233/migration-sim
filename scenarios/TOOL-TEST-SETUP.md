@@ -87,3 +87,30 @@ cache wave must FAIL on `sim-bound-pinned` until `cf set-env sim-bound-pinned SI
 ## After a test
 
 `bash scripts/reset-population.sh` again. Every tool test starts from the same baseline.
+
+## Then apply — wave 1 first (one silent service, one stopped app)
+
+```bash
+cd ~/ocfp/migration-sim && git pull
+# apply = preflight gate -> "type yes" -> lock -> rename -> create valkey (job) -> bind -> unbind -> (no restart: STOPPED) -> verify L1
+bash migrate/migrate.sh apply --wave 1 --run runs/sbx
+bash migrate/migrate.sh status --wave 1 --run runs/sbx
+cf services | grep -i session            # sim-redis-session (valkey) + sim-redis-session-redis-standby (redis)
+cf service sim-redis-session             # bound apps: sim-session-bound
+cf start sim-session-bound && sleep 20 && curl -s https://<sim-session-bound route>/check | jq '.source, .connected'   # picks up the valkey
+cf stop sim-session-bound                # back to the layout
+```
+Paste: the apply output, `status --wave 1`, and the `cf services` lines.
+
+Wave 2 needs two things first: the hazard app's env cleared (`cf unset-env sim-bound-pinned
+REDIS_HOST` + `REDIS_PASSWORD`, restart) -- preflight refuses until then -- and a copy-data hook
+for the store service (`runs/sbx/copy-data.sh <standby_guid> <valkey_guid> <name>`, exit 0 =
+copied; without it apply asks on the terminal). Rehearse the lane model: wave 2 and wave 3 in two
+terminals at once (`--wave 2` and `--wave 3`), then `status` shows both.
+
+Offline rehearsal of the same thing (no CF): `migrate/test/cf-fake` is a stateful fake CF —
+`CFFAKE_STATE=/tmp/s.json migrate/test/cf-fake seed runs/sbx/waves.tsv`, then
+`CF_CMD=$PWD/migrate/test/cf-fake JOB_POLL=0 SOAK=0 bash migrate/migrate.sh apply --waves 1-3 --run <copy of runs/sbx> --yes`.
+Failure injection: `CFFAKE_FAIL_CREATE=<svc name>`, `CFFAKE_CRASH=<app guid>`, `CFFAKE_BIND_FAIL=<app guid>`,
+`CFFAKE_STOPPED=<app guid>` (at seed), `CFFAKE_INSTANCES=<guid>=3`, `runs/<x>/verify-hook.sh` exit 1.
+

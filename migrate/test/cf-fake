@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# cf-fake: a STATEFUL fake `cf curl` for testing apply offline. State lives in $CFFAKE_STATE (json).
+#   cf-fake seed <waves.tsv>     build the initial world from a plan: spaces, redis instances,
+#                                valkey plans, apps (STARTED, 1 instance), app<->redis bindings
+#   cf curl PATH [-i] [-X M] [-H h] [-d body]    v3 subset used by migrate.sh (GET/POST/PATCH/DELETE)
+# Failure injection (env):
+#   CFFAKE_FAIL_CREATE=<svc name>      the valkey create job FAILS
+#   CFFAKE_CRASH=<app guid>            after a restart that app reports CRASHED instances
+#   CFFAKE_STOPPED=<app guid[,..]>     those apps are STOPPED
+#   CFFAKE_INSTANCES=<guid>=N[,..]     instance count per app (default 1)
+#   CFFAKE_CREATE_POLLS=N              job polls before a create completes (default 2)
+#   CFFAKE_BIND_FAIL=<app guid>        binding create for that app FAILS (job)
+export CFFAKE_STATE="${CFFAKE_STATE:-/tmp/cffake.json}"
+python3 - "$@" <<'PY'
+import os, sys, json, csv, uuid, re, urllib.parse
+S=os.environ['CFFAKE_STATE']
+def load(): return json.load(open(S)) if os.path.exists(S) else None
+def save(st): json.dump(st, open(S,'w'), indent=1)
+args=sys.argv[1:]
+if args and args[0]=='seed':
+    rows=list(csv.DictReader(open(args[1]), delimiter='\t'))
+    st={'spaces':{}, 'si':{}, 'plans':{}, 'apps':{}, 'bind':{}, 'jobs':{}, 'dep':{}, 'restarts':{}}
+    for r in rows:
+        sp=r['service_space']+'@'+r['service_org']; spg='sp-'+re.sub(r'[^a-z0-9]','',sp)[:12]
+        st['spaces'][spg]={'name':r['service_space'],'org':r['service_org']}
+        rp='plan-redis-'+r['valkey_plan']; vp='plan-valkey-'+r['valkey_plan']
+        st['plans'][rp]={'name':r['valkey_plan'],'offering':'redis'}; st['plans'][vp]={'name':r['valkey_plan'],'offering':'valkey'}
+        st['si'].setdefault(r['service_guid'],{'name':r['service'],'space':spg,'plan':rp,'last_op':{'type':'create','state':'succeeded'}})
+        st['apps'].setdefault(r['app_guid'],{'name':r['app'],'space':spg,'state':'STARTED'})
+        if 'no-binding' not in r['flags']:
+            bg='b-'+r['app_guid'][:8]+'-'+r['service_guid'][:8]
+            st['bind'][bg]={'app':r['app_guid'],'si':r['service_guid']}
+    for g in os.environ.get('CFFAKE_STOPPED','').split(','):
+        if g in st['apps']: st['apps'][g]['state']='STOPPED'
+    save(st); print('seeded', len(st['si']), 'services', len(st['apps']), 'apps', len(st['bind']), 'bindings'); sys.exit()
+if not args or args[0]!='curl': print('fake: only curl', file=sys.stderr); sys.exit(1)
+st=load() or sys.exit('fake: not seeded')
+path=None; method='GET'; body=''; inc=False; i=1
+while i<len(args):
+    a=args[i]
+    if a=='-i': inc=True
+    elif a=='-X': method=args[i+1]; i+=1
+    elif a=='-H': i+=1
+    elif a=='-d': body=args[i+1]; i+=1
+    elif path is None: path=a
+    i+=1
+u=urllib.parse.urlparse(path); p=u.path; q=urllib.parse.parse_qs(u.query)
+code=200; hdr={}; out=None
+def err(c,title,detail): global code,out; code=c; out={'errors':[{'title':title,'detail':detail}]}
+def job(kind, polls=1, fail=None):
+    jg='job-'+uuid.uuid4().hex[:8]; st['jobs'][jg]={'kind':kind,'polls':polls,'n':0,'fail':fail}; return jg
+def accepted(jg): global code; code=202; hdr['Location']='https://api.fake/v3/jobs/'+jg
+def listing(res): return {'pagination':{'total_results':len(res),'next':None},'resources':res}
+def si_obj(g):
+    s=st['si'][g]; return {'guid':g,'name':s['name'],'last_operation':s['last_op'],'relationships':{'space':{'data':{'guid':s['space']}},'service_plan':{'data':{'guid':s['plan']}}}}
+INST={}
+for kv in os.environ.get('CFFAKE_INSTANCES','').split(','):
+    if '=' in kv: g,n=kv.split('='); INST[g]=int(n)
+if p=='/v3/info': out={'name':'cf-fake'}
+elif p=='/v3/jobs/'+p[9:] and p.startswith('/v3/jobs/'):
+    jg=p[9:]; j=st['jobs'].get(jg)
+    if not j: err(404,'CF-ResourceNotFound','job')
+    else:
+        j['n']+=1
+        if j['n']>=j['polls']:
+            if j['fail']:
+                out={'guid':jg,'state':'FAILED','errors':[{'title':'CF-UnableToPerform','detail':j['fail']}]}
+                if j['kind'].startswith('create:') and j['kind'][7:] in st['si']: st['si'][j['kind'][7:]]['last_op']={'type':'create','state':'failed'}
+            else:
+                out={'guid':jg,'state':'COMPLETE','errors':[]}
+                if j['kind'].startswith('create:'): st['si'][j['kind'][7:]]['last_op']={'type':'create','state':'succeeded'}
+        else: out={'guid':jg,'state':'PROCESSING','errors':[]}
+elif p=='/v3/service_plans':
+    names=q.get('names',[''])[0].split(','); off=q.get('service_offering_names',[''])[0]
+    out=listing([{'guid':g,'name':v['name']} for g,v in st['plans'].items() if v['name'] in names and (not off or v['offering']==off)])
+elif p=='/v3/service_instances' and method=='GET':
+    bad=[k for k in q if k not in ('names','space_guids','guids','type','service_plan_guids','per_page','page')]
+    if bad: err(400,'CF-BadQueryParameter',f"Unknown query parameter(s): '{','.join(bad)}'")
+    else:
+        res=[si_obj(g) for g,s in st['si'].items() if (not q.get('names') or s['name'] in q['names'][0].split(',')) and (not q.get('space_guids') or s['space'] in q['space_guids'][0].split(','))]
+        out=listing(res)
+elif p=='/v3/service_instances' and method=='POST':
+    b=json.loads(body); name=b['name']; sp=b['relationships']['space']['data']['guid']; pl=b['relationships']['service_plan']['data']['guid']
+    if any(s['name']==name and s['space']==sp for s in st['si'].values()): err(422,'CF-UnprocessableEntity',f"The service instance name is taken: {name}")
+    else:
+        g=str(uuid.uuid4()); st['si'][g]={'name':name,'space':sp,'plan':pl,'last_op':{'type':'create','state':'in progress'}}
+        fail=f"Service broker error: provision failed for {name}" if os.environ.get('CFFAKE_FAIL_CREATE')==name else None
+        accepted(job('create:'+g, int(os.environ.get('CFFAKE_CREATE_POLLS','2')), fail))
+elif p.startswith('/v3/service_instances/'):
+    g=p.split('/')[3]
+    if g not in st['si']: err(404,'CF-ResourceNotFound','Service instance not found')
+    elif method=='GET': out=si_obj(g)
+    elif method=='PATCH':
+        b=json.loads(body)
+        if 'name' in b: st['si'][g]['name']=b['name']
+        accepted(job('update:'+g))
+    elif method=='DELETE': del st['si'][g]; accepted(job('delete'))
+elif p=='/v3/service_credential_bindings' and method=='GET':
+    bad=[k for k in q if k not in ('app_guids','service_instance_guids','type','names','guids','per_page','page')]
+    if bad: err(400,'CF-BadQueryParameter',f"Unknown query parameter(s): '{','.join(bad)}'")
+    else:
+        res=[{'guid':g,'type':'app','relationships':{'app':{'data':{'guid':b['app']}},'service_instance':{'data':{'guid':b['si']}}}} for g,b in st['bind'].items()
+             if (not q.get('app_guids') or b['app'] in q['app_guids'][0].split(',')) and (not q.get('service_instance_guids') or b['si'] in q['service_instance_guids'][0].split(','))]
+        out=listing(res)
+elif p=='/v3/service_credential_bindings' and method=='POST':
+    b=json.loads(body); ag=b['relationships']['app']['data']['guid']; sg=b['relationships']['service_instance']['data']['guid']
+    if ag not in st['apps'] or sg not in st['si']: err(422,'CF-UnprocessableEntity','app or service instance not found')
+    elif any(x['app']==ag and x['si']==sg for x in st['bind'].values()): err(422,'CF-UnprocessableEntity','The app is already bound to the service instance')
+    elif os.environ.get('CFFAKE_BIND_FAIL')==ag: accepted(job('bind', 1, 'Service broker error: bind refused'))
+    else:
+        bg='b-'+uuid.uuid4().hex[:8]; st['bind'][bg]={'app':ag,'si':sg}; accepted(job('bind'))
+elif p.startswith('/v3/service_credential_bindings/') and method=='DELETE':
+    g=p.split('/')[3]
+    if g not in st['bind']: err(404,'CF-ResourceNotFound','binding not found')
+    else: del st['bind'][g]; accepted(job('unbind'))
+elif p=='/v3/deployments' and method=='POST':
+    ag=json.loads(body)['relationships']['app']['data']['guid']; dg='dep-'+uuid.uuid4().hex[:6]
+    st['dep'][dg]={'app':ag,'n':0}; st['restarts'][ag]=st['restarts'].get(ag,0)+1; out={'guid':dg,'status':{'value':'ACTIVE','reason':'DEPLOYING'}}
+elif p.startswith('/v3/deployments/'):
+    d=st['dep'].get(p.split('/')[3]); d['n']+=1; out={'guid':p.split('/')[3],'status':{'value':'FINALIZED' if d['n']>=1 else 'ACTIVE','reason':'DEPLOYED' if d['n']>=1 else 'DEPLOYING'}}
+elif p.startswith('/v3/apps/'):
+    parts=p.split('/'); g=parts[3]; a=st['apps'].get(g)
+    if not a: err(404,'CF-ResourceNotFound','App not found')
+    elif len(parts)==4: out={'guid':g,'name':a['name'],'state':a['state'],'relationships':{'space':{'data':{'guid':a['space']}}}}
+    elif p.endswith('/actions/restart'): st['restarts'][g]=st['restarts'].get(g,0)+1; out={'guid':g,'state':'STARTED'}
+    elif p.endswith('/processes/web'): out={'guid':g,'instances':INST.get(g,1)}
+    elif p.endswith('/processes/web/stats'):
+        n=INST.get(g,1); crashed = os.environ.get('CFFAKE_CRASH')==g and st['restarts'].get(g,0)>0
+        out=listing([{'index':i,'state':('CRASHED' if crashed and i==0 else 'RUNNING') if a['state']=='STARTED' else 'DOWN'} for i in range(n)])
+    elif p.endswith('/environment_variables'): out={'var':{}}
+    else: err(404,'CF-NotFound','fake: unhandled '+p)
+else: err(404,'CF-NotFound','fake: unhandled '+method+' '+p)
+save(st)
+if inc:
+    sys.stdout.write(f'HTTP/1.1 {code} X\r\n'+''.join(f'{k}: {v}\r\n' for k,v in hdr.items())+'\r\n')
+sys.stdout.write(json.dumps(out) if out is not None else '')
+PY

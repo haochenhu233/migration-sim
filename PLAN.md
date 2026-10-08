@@ -150,6 +150,7 @@ plus a review document for the client, built from the binding graph:
 ---
 
 ## Decisions
+- **2026-10-08 — `apply` built and exercised against a stateful fake CF** (happy path, STOPPED app, failed provision → leftover deleted and re-created, mid-wave crash → resume, restart/verify failure → service auto-rollback, rolling restart, lock refusal, STOP file, lane `--waves A-B`). Not yet: per-worker `CF_HOME` copy + UAA refresh-rotation check (needed only for parallel lanes), `rollback`/`confirm`/`retire`/`report` commands, L2/L3 in `verify`.
 - **2026-10-08 — no `cf target`, parallel waves (DESIGN §1b).** NP's services/apps span ~40 orgs and waves run concurrently; `apply` drives the v3 API by GUID (rename/create/bind/unbind/restart/jobs), one admin login, per-worker `CF_HOME` copies only to keep token refreshes from racing, per-wave locks. `dry-run` now prints the API calls (CLI equivalents as comments).
 
 - 2026-10-02 — **Team-side changes under policy A are exactly three, all optional-until-needed or already named:** (1) pipelines that CREATE the service: `cf create-service redis …` → `valkey` (create-if-missing pipelines are unaffected; unconditional ones fail loudly with "name already in use"; `disable-service-access redis` flushes out the rest); (2) code selecting the binding by VCAP label `redis` — a code change unless the Valkey offering carries a `redis` tag (platform lever: settle before the academy); (3) the ~20 pinned addresses. Bind commands, manifests, service names, restarts: untouched.
