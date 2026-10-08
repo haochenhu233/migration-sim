@@ -244,7 +244,7 @@ cmd_dryrun(){
   local rows; rows=$(wave_rows "$WAVE"); [ -n "$rows" ] || { echo "wave $WAVE: no rows in $PLAN"; exit 1; }
   local nsvc napp norg; nsvc=$(printf '%s\n' "$rows" | cut -f4 | sort -u | wc -l | tr -d ' ')
   napp=$(printf '%s\n' "$rows" | cut -f9 | sort -u | wc -l | tr -d ' '); norg=$(printf '%s\n' "$rows" | cut -f10 | sort -u | wc -l | tr -d ' ')
-  echo "DRY-RUN wave $WAVE: $nsvc service(s), $napp app(s) ($napp restarts), $norg org(s). Nothing is executed."
+  echo "DRY-RUN wave $WAVE: $nsvc service(s), $napp app(s) (<= $napp restarts: STOPPED and no-binding apps are not restarted), $norg org(s). Nothing is executed."
   echo "rollback row per step -- see DESIGN §3; rollback scope = the whole service."
   echo "every step is a v3 API call by GUID (no 'cf target'): waves run in parallel across orgs/spaces -- DESIGN §1b."
   echo
@@ -287,7 +287,9 @@ cmd_dryrun(){
       "NOT FOUND") echo "   !! app guid $ag8 not found in CF -- plan is stale for this app (preflight FAILs)";;
       *)         echo "   ${d:+DONE $d  }POST   /v3/apps/$ag8/actions/restart   (>=2 instances: POST /v3/deployments {app:$ag8} = rolling)   # cf restart $app   | rollback: rebind standby + restart";;
     esac
-    d=$(ledger_done "$sg1" "$ag" verify);   echo "   ${d:+DONE $d  }verify $app: L1 GET /v3/apps/$ag8/processes/web/stats all RUNNING, bindings = valkey only · L2 census on valkey, none on standby · L3 CLIENT LIST/ACL LOG   # fail: auto-rollback the SERVICE"
+    d=$(ledger_done "$sg1" "$ag" verify)
+    if [ "$astate" = STOPPED ]; then echo "   ${d:+DONE $d  }verify $app: L1 bindings = valkey only, state still STOPPED (L2/L3 apply when the team starts it)   # fail: auto-rollback the SERVICE"
+    else echo "   ${d:+DONE $d  }verify $app: L1 GET /v3/apps/$ag8/processes/web/stats all RUNNING, bindings = valkey only · L2 census on valkey, none on standby · L3 CLIENT LIST/ACL LOG   # fail: auto-rollback the SERVICE"; fi
   done
   echo
   echo "end of wave: services -> STANDBY (grace $(( ${GRACE_DAYS:-14} )) d); no retire."
