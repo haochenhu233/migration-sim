@@ -150,13 +150,29 @@ has a factual answer.
 | `plan <merged_report.csv>` | writes `waves.tsv`; **groups by connected component** of the binding graph (an app and every service it is bound to travel in one wave, so a multi-bound app restarts once) and reports services that span several teams (joint window needed); (`wave, service, redis_si_guid, valkey_plan, app, app_guid, flags`): services per wave (operator edits), apps per service (from the report), pipeline pairs kept in one wave, hazard apps flagged, data-store services flagged for copy; `--services <ERE>` scopes to our service names (the scan covers the whole foundation); connections whose `method` is not `cf-bind` (static-ref env/UPS, unknown) get `no-binding:<method>` — the app really consumes that Redis but there is nothing to rebind, so preflight/dry-run/apply list it as a **team action** and skip it |
 | `preflight --wave N` | lock free · classic plan visible · **IP headroom = free IPs on the services network ≥ Valkeys to create in the wave (+ the whole plan for a project-level preflight)** · quota · every app running · no pending service operations · hazard apps' env fixed · pipeline pairs complete → prints the **blast radius** (services / apps / teams) |
 | `dry-run --wave N` | every command in order, with the rollback row after each |
-| `apply --wave N [--service Y] [--app X]` | executes; idempotent via the ledger; `STOP` file honored between steps; Ctrl-C finishes the current step, records it, exits |
+| `apply --wave N` / `--waves A-B` [`--service Y`] [`--app X`] | executes (a range = a lane, sequential); idempotent via the ledger; `STOP` file honored between steps; Ctrl-C finishes the current step, records it, exits |
 | `status [--wave N]` / `watch` | the dashboard (§5) |
 | `verify --wave N` | app health · connection census on the Valkey side (discovery worker) · `/check` for sim apps · key counts where data was copied · **"bound to Redis again?"** drift check |
 | `rollback --app X` / `--service Y` / `--wave N` | per §3, reason recorded |
 | `confirm --service Y --by <team>` | app-team sign-off; starts the standby clock |
 | `retire --service Y` | **before deleting: re-run the connection census on the standby Redis — refuse if anyone is still connected** (catches copied-credential apps that were never updated) · then: after the client's full confirmation, ~1–2 weeks post-cutover (standby grace default **14 days**); refuses before `confirm` + grace; asks twice; the only irreversible step |
 | `report --wave N` | evidence pack from the ledger (markdown): per app switched/verified/downtime, timeline, incidents, rollbacks, operators |
+
+## 4a. Execution model — inside a wave, and lanes across waves
+
+Inside a wave: **services phase** (rename → create → copy-data) issues every create at once and
+waits for the jobs — a Valkey is a BOSH deploy (~5–10 min), serialising them buys nothing;
+**apps phase** (bind → unbind → restart → verify) is **one app at a time** — the circuit
+breaker (3 failed verifies in a row ⇒ stop the wave) and the per-service auto-rollback need a
+sequential order to mean anything.
+
+Across waves: **lanes**. `apply --waves 1-7` runs those waves back-to-back in one terminal; the
+operator opens as many lanes as the window needs (NP: ~300 creates × ~7 min ÷ 4 lanes ≈ 9 h of
+service creation, plus apps phases). Each wave takes its own lock when it starts (§1b); a failed
+wave stops its lane only; `STOP` halts every lane at the next step boundary; `status` shows all
+lanes. Start with the silent waves — creates + rebinds, no restarts. The rehearsal must confirm
+how many concurrent Blacksmith provisions the lab tolerates (create one wave's services at once
+in SBX, watch Blacksmith/BOSH), and set the lane count from that.
 
 ## 5. Dashboard — two levels
 
