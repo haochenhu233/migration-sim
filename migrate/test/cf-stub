@@ -5,7 +5,7 @@
 [ "$1" = curl ] || { echo "stub: only 'cf curl' supported" >&2; exit 1; }
 p="$2"; HERE="$(cd "$(dirname "$0")" && pwd)"; RUN="${CFSTUB_RUN:-$HERE/../example}"
 python3 - "$p" "$RUN" <<'PY'
-import sys, csv, json, os, re
+import os, sys, csv, json, os, re
 p, run = sys.argv[1], sys.argv[2]
 rows=list(csv.DictReader(open(run+'/waves.tsv'), delimiter='\t'))
 renamed=set(); created=set()
@@ -46,6 +46,6 @@ m=re.match(r'/v3/apps/([^/?]+)$', p)
 if m:
     g=m.group(1)
     if g not in app: out({"errors":[{"title":"CF-ResourceNotFound"}]}); sys.exit()
-    out({"guid":g,"name":app[g]['app'],"state":"STARTED"}); sys.exit()
+    out({"guid":g,"name":app[g]['app'],"state":"STOPPED" if g in os.environ.get("STUB_STOPPED","").split(",") else "STARTED"}); sys.exit()
 out({"errors":[{"title":"stub: unhandled "+p}]})
 PY

@@ -249,7 +249,12 @@ cmd_dryrun(){
   echo "every step is a v3 API call by GUID (no 'cf target'): waves run in parallel across orgs/spaces -- DESIGN §1b."
   echo
   # ---- phase A: per service
-  printf '%s\n' "$rows" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}' | while IFS=$'\t' read -r sg name sorg ssp plan flags; do
+  # service flags = union over the service's rows of the service-level ones (datastore, cross-space);
+  # app-level flags (hazard, windows, idle, multi-bound, no-binding) stay on the app lines.
+  printf '%s\n' "$rows" | awk -F'\t' '
+    { n=split($12,f,","); for(i=1;i<=n;i++) if (f[i] ~ /^(datastore|cross-space)$/ && !(($4,f[i]) in have)) { have[$4,f[i]]=1; sf[$4]=(sf[$4]==""?"":sf[$4]",") f[i] } }
+    !seen[$4]++ { ord[++k]=$4; info[$4]=$3"\t"$5"\t"$6"\t"$7 }
+    END { for(i=1;i<=k;i++) print ord[i]"\t"info[ord[i]]"\t"sf[ord[i]] }' | while IFS=$'\t' read -r sg name sorg ssp plan flags; do
     local std="${name}-redis-standby"
     local sg8; sg8=$(printf '%s' "$sg" | cut -c1-8)
     echo "== service $name ($sg8)  plan=$plan  org/space=$sorg/$ssp  flags=[$flags]"
@@ -260,9 +265,12 @@ cmd_dryrun(){
   done
   echo
   # ---- phase B: per app (one restart per app per wave)
+  local live=""; cf_json_ok "$(cfcurl "/v3/info")" && live=1 || echo "(cf API not reachable: app state not checked -- a STOPPED app would be rebind-only, no restart)"
   printf '%s\n' "$rows" | awk -F'\t' '!seen[$9]++ {print $9"\t"$8"\t"$10"\t"$11"\t"$12}' | while IFS=$'\t' read -r ag app aorg asp aflags; do
     local ag8; ag8=$(printf '%s' "$ag" | cut -c1-8)
-    echo "== app $app ($ag8)  org/space=$aorg/$asp  flags=[$aflags]"
+    aflags=$(printf '%s' "$aflags" | tr ',' '\n' | grep -vE '^(datastore|cross-space)$' | paste -sd, -)
+    local astate="?"; if [ -n "$live" ]; then local aj; aj=$(cfcurl "/v3/apps/$ag"); cf_json_ok "$aj" && astate=$(printf '%s' "$aj" | jq -r .state) || astate="NOT FOUND"; fi
+    echo "== app $app ($ag8)  org/space=$aorg/$asp  flags=[$aflags]  state=$astate"
     case ",$aflags," in *,hazard,*) echo "   !! HAZARD: pinned env present -- preflight refuses until the app team removed it";; esac
     case ",$aflags," in *,no-binding:*) echo "   SKIP  no binding (${aflags##*no-binding:}) -- TEAM ACTION: update env var / UPS / config to the Valkey; nothing for the tool to rebind"; echo; continue;; esac
     # every wave service this app is bound to
@@ -273,7 +281,12 @@ cmd_dryrun(){
       d=$(ledger_done "$sg" "$ag" unbind-redis); echo "   ${d:+DONE $d  }DELETE /v3/service_credential_bindings/<binding $ag8<->$(printf '%s' "$sg" | cut -c1-8)> -> job   # cf unbind-service $app ${name}-redis-standby   | rollback: POST a binding to $(printf '%s' "$sg" | cut -c1-8) again"
     done
     sg1=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$ag" '$9==a {print $4; exit}')
-    d=$(ledger_done "$sg1" "$ag" restart);  echo "   ${d:+DONE $d  }POST   /v3/apps/$ag8/actions/restart   (>=2 instances: POST /v3/deployments {app:$ag8} = rolling; STOPPED app: skipped, rebind only)   # cf restart $app   | rollback: rebind standby + restart"
+    d=$(ledger_done "$sg1" "$ag" restart)
+    case "$astate" in
+      STOPPED)   echo "   ${d:+DONE $d  }restart SKIPPED: app is STOPPED -- rebind only, it stays stopped and picks up the Valkey when the team next starts it";;
+      "NOT FOUND") echo "   !! app guid $ag8 not found in CF -- plan is stale for this app (preflight FAILs)";;
+      *)         echo "   ${d:+DONE $d  }POST   /v3/apps/$ag8/actions/restart   (>=2 instances: POST /v3/deployments {app:$ag8} = rolling)   # cf restart $app   | rollback: rebind standby + restart";;
+    esac
     d=$(ledger_done "$sg1" "$ag" verify);   echo "   ${d:+DONE $d  }verify $app: L1 GET /v3/apps/$ag8/processes/web/stats all RUNNING, bindings = valkey only · L2 census on valkey, none on standby · L3 CLIENT LIST/ACL LOG   # fail: auto-rollback the SERVICE"
   done
   echo
