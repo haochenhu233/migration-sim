@@ -183,7 +183,8 @@ cmd_status(){
     { s=$4; a=$9; aname[a]=$8; if (!(s in seen)) { order[++ns]=s; seen[s]=1; plan[s]=$7; disp[s]=$3 " (" substr($4,1,8) ")" }
       apps[s]++; k=s SUBSEP a
       state = (k in st) ? st[k] : "PENDING"
-      if (index($12,"hazard")) hz[s]++
+      if (state=="TEAM-ACTION") { team[s]++; total_apps++; teamapps[s]=teamapps[s] (teamapps[s]==""?"":", ") $8; next }
+      if (index($12,"hazard") && rank(state) <= 1) hz[s]++
       if (rank(state) >= 4) switched[s]++
       if (state=="VERIFIED") verified[s]++
       if (rank(state) < 0) failed[s]++
@@ -201,16 +202,20 @@ cmd_status(){
         else if (ev ~ /copy-data:fail/)   phase="COPY-FAILED"
         else if (failed[s]>0)             phase="ATTENTION"
         else if (rolled[s]>0 && switched[s]==0) phase="ROLLED-BACK"
-        else if (verified[s]==apps[s])    phase="VERIFIED"
+        else if (verified[s]==apps[s]-team[s]) phase="VERIFIED"
         else if (switched[s]>0 || minrank[s]>=2) phase="MIGRATING"
         else if (ev=="create-valkey")     phase="READY"
         else                              phase="PENDING"
         sb=(s in standby) ? standby[s] : "-"
         mark=""; if (phase ~ /FAILED|ATTENTION|ROLLED/) mark="  !!"
-        printf "%-28s %-12s %-14s %5d %9s %9s %-14s %s%s\n", disp[s], plan[s], phase, apps[s], switched[s]+0 "/" apps[s], (verified[s]+0) "/" apps[s], sb, (s in last_ts ? substr(last_ts[s],12,8) " " (last_app[s]==""?"":(last_app[s] in aname ? aname[last_app[s]] : substr(last_app[s],1,8)) " ") last_step[s] (last_note[s]!=""?" -- " substr(last_note[s],1,40):"") : "-"), mark
+        n=apps[s]-team[s]; ac=(team[s]>0 ? n "+" team[s] : n)
+        printf "%-28s %-12s %-14s %5s %9s %9s %-14s %s%s\n", disp[s], plan[s], phase, ac, switched[s]+0 "/" n, (verified[s]+0) "/" n, sb, (s in last_ts ? substr(last_ts[s],12,8) " " (last_app[s]==""?"":(last_app[s] in aname ? aname[last_app[s]] : substr(last_app[s],1,8)) " ") last_step[s] (last_note[s]!=""?" -- " substr(last_note[s],1,40):"") : "-"), mark
       }
+      tn=0; for (s in team) tn+=team[s]
+      if (tn>0) { printf "\napps shown as N+T: T are team-action (no binding; the team re-points them, the tool does not):\n"
+        for (i=1;i<=ns;i++) if (team[order[i]]>0) printf "   %-28s %s\n", disp[order[i]], teamapps[order[i]] }
       hzn=0; for (s in hz) hzn+=hz[s]
-      if (hzn>0) printf "\n!! %d hazard app(s) in scope (pinned env) -- preflight will refuse until fixed\n", hzn
+      if (hzn>0) printf "\n!! %d hazard app(s) still pending (pinned env per plan) -- preflight checks the live env; clear it before apply\n", hzn
     }' "$RUN/.states.tsv" "$PLAN"
   # per-app detail for services needing attention
   awk -F'\t' 'NR>1 && $2!="" && ($3 ~ /fail|blocked|rollback/) {printf "   %-15s %-15s %-28s %s\n", $1, $2, $3, $5}' "$RUN/.states.tsv" | { read -r first && { echo; echo "attention:"; echo "$first"; cat; }; }
@@ -445,6 +450,9 @@ ledger_add(){ # wave service app step outcome ms note
 }
 cmdlog(){ printf '%s\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" >> "$RUN/commands.log"; }
 say(){ printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+# have_tty: an operator can answer a prompt. Tested on /dev/tty, not fd 0, because prompts also
+# sit inside `while read ... done < <(...)` loops where fd 0 is the loop's input.
+have_tty(){ { : </dev/tty; } 2>/dev/null; }
 # cf invocations ignore SIGINT so that Ctrl-C never kills a request mid-flight: the trap in
 # apply only sets a flag, and the step that is running completes and is recorded.
 cfx(){ ( trap '' INT; exec $TMO "$CF" curl "$@" ); }
@@ -565,7 +573,7 @@ apply_wave(){
     echo "preflight: PASS ($(printf '%s\n' "$pf" | grep -c '^WARN') warning(s), $RUN/preflight-wave-$WAVE.log)"
   else ledger_add "$WAVE" "" "" preflight-override ok 0 "--force by $OP"; fi
   if [ -z "${YES:-}" ]; then
-    if [ -t 0 ]; then printf 'Execute wave %s now? type yes: ' "$WAVE"; read -r a; [ "$a" = yes ] || { echo "not confirmed"; return 1; }
+    if have_tty; then printf 'Execute wave %s now? type yes: ' "$WAVE"; read -r a </dev/tty; [ "$a" = yes ] || { echo "not confirmed"; return 1; }
     else echo "!! not a terminal and no --yes: refusing"; return 1; fi
   fi
   wave_lock "$WAVE" || return 1
@@ -643,9 +651,9 @@ apply_services(){
       say "$name: copy-data hook: bash $RUN/copy-data.sh $sg ${VK[$sg]} $name"
       if bash "$RUN/copy-data.sh" "$sg" "${VK[$sg]}" "$name" >> "$RUN/copy-data-$WAVE.log" 2>&1; then ledger_add "$WAVE" "$sg" "" copy-data ok $(( ($(date +%s)-t0)*1000 )) "hook ok"
       else ledger_add "$WAVE" "$sg" "" copy-data fail $(( ($(date +%s)-t0)*1000 )) "hook exit $? (see copy-data-$WAVE.log)"; SKIP[$sg]=1; say "!! $name: copy-data hook failed -- skipped"; fi
-    elif [ -t 0 ]; then
+    elif have_tty; then   # NOT -t 0: this loop's stdin is the process substitution below
       echo "   $name: DATA COPY needed: ${name}-redis-standby ($sg) -> $name (${VK[$sg]}) -- SESSION-COMMANDS 8c (replication / MIGRATE / DUMP-RESTORE)"
-      printf '   type done when the copy is complete, skip to leave the service for later: '; read -r a
+      printf '   type done when the copy is complete, skip to leave the service for later: '; read -r a </dev/tty
       if [ "$a" = done ]; then ledger_add "$WAVE" "$sg" "" copy-data ok $(( ($(date +%s)-t0)*1000 )) "manual, confirmed by $OP"
       else ledger_add "$WAVE" "$sg" "" copy-data blocked 0 "operator deferred"; SKIP[$sg]=1; fi
     else ledger_add "$WAVE" "$sg" "" copy-data blocked 0 "no copy-data.sh hook and no terminal"; SKIP[$sg]=1; say "!! $name: copy-data needs a hook or a terminal -- skipped"; fi
