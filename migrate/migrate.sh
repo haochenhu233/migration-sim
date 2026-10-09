@@ -6,7 +6,8 @@ set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
 WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; SVCRE=""; ARG=""; WAVES=""; SVCF=""; YES=""; FORCE=""; NO_ROLLING=""
-while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --waves) WAVES="$2"; shift 2;; --service) SVCF="$2"; shift 2;; --yes) YES=1; shift;; --force) FORCE=1; shift;; --no-rolling) NO_ROLLING=1; shift;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
+APPF=""; REASON=""; BY=""; GRACE="336h"; NO_CENSUS=""
+while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --waves) WAVES="$2"; shift 2;; --service) SVCF="$2"; shift 2;; --yes) YES=1; shift;; --force) FORCE=1; shift;; --no-rolling) NO_ROLLING=1; shift;; --app) APPF="$2"; shift 2;; --reason) REASON="$2"; shift 2;; --by) BY="$2"; shift 2;; --grace) GRACE="$2"; shift 2;; --no-census) NO_CENSUS=1; shift;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
 PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 
 
@@ -218,7 +219,7 @@ cmd_status(){
       if (hzn>0) printf "\n!! %d hazard app(s) still pending (pinned env per plan) -- preflight checks the live env; clear it before apply\n", hzn
     }' "$RUN/.states.tsv" "$PLAN"
   # per-app detail for services needing attention
-  awk -F'\t' 'NR>1 && $2!="" && ($3 ~ /fail|blocked|rollback/) {printf "   %-15s %-15s %-28s %s\n", $1, $2, $3, $5}' "$RUN/.states.tsv" | { read -r first && { echo; echo "attention:"; echo "$first"; cat; }; }
+  awk -F'\t' 'NR>1 && $2!="" && ($3 ~ /fail|blocked|rollback/) {printf "   %-15s %-15s %-28s %s\n", $1, $2, $3, $5}' "$RUN/.states.tsv" | { IFS= read -r first && { echo; echo "attention:"; echo "$first"; cat; }; }
   rm -f "$RUN/.states.tsv"
 }
 
@@ -234,9 +235,14 @@ cflist(){ local j; j=$(cfcurl "$1"); printf '%s' "$j" | jq -e 'type=="object" an
 
 # wave_rows <N>: the wave's plan rows (TSV, no header). Columns: see cmd_plan header.
 wave_rows(){ awk -F'\t' -v w="$1" 'NR>1 && $1==w' "$PLAN"; }
-# ledger_done <service_guid> <app_guid|""> <step>: "ts" if the ledger has that step ok, else ""
+# ledger_done <service_guid> <app_guid|""> <step>: "ts" if the ledger has that step ok, else "".
+# Only events AFTER the pair's last rollback count: a rollback resets the pair, so a re-apply
+# redoes bind/unbind/restart/verify (service-level steps never have a rollback event).
 ledger_done(){ [ -s "$LEDGER" ] || return 0
-  ledger_lines | jq -r --arg s "$1" --arg a "$2" --arg st "$3" 'select(.service==$s and .app==$a and .step==$st and .outcome=="ok") | .ts' | tail -1; }
+  ledger_lines | jq -rs --arg s "$1" --arg a "$2" --arg st "$3" '
+    [ .[] | select(.service==$s and .app==$a) ]
+    | (map(.step=="rollback") | rindex(true) // -1) as $i
+    | .[$i+1:] | map(select(.step==$st and .outcome=="ok")) | (last // empty) | .ts'; }
 
 # ============================================================================ dry-run
 # dry-run --wave N: the exact command sequence apply would run, in the rehearsed order:
@@ -400,27 +406,29 @@ cmd_summary(){
     FNR==1 { next }
     { w=$1; s=$4; a=$9; if (!(w in seenw)) { worder[++nw]=w; seenw[w]=1 }
       if (!(s in seens)) { seens[s]=1; wsvc[w]++; ev=svc_ev[s]
-        if (ev=="create-valkey" || ev=="confirm" || ev=="retire") wcreated[w]++
+        if (ev ~ /^(create-valkey|copy-data|confirm|retire)$/ || ev ~ /^copy-data:/) wcreated[w]++
         if (ev ~ /create-valkey:fail/) wcfail[w]++
         if (ev=="confirm") wstandby[w]++
         if (ev=="retire")  wretired[w]++ }
-      wconn[w]++; k=s SUBSEP a; state=(k in st)?st[k]:"pending"; r=rank(state)
+      k=s SUBSEP a; state=(k in st)?st[k]:"pending"
+      if (state=="team-action") { wteam[w]++; print w, $3, $8, state, note[k] > (sdir "/wave-" w ".tsv"); next }   # handed to the team: not a tool connection
+      wconn[w]++; r=rank(state)
       if (r>=4) wmig[w]++;  if (r==5) wver[w]++;  if (r<0) { wfail[w]++; print w, s, a, state, note[k] >> (sdir "/failed.tsv") }
       if (r==0) wrb[w]++;   if (r==1) wpend[w]++;  if (r==2 || r==3) wprog[w]++
       if (r>=4) print w, $3, $8, state >> (sdir "/migrated.tsv")
       print w, $3, $8, state, note[k] > (sdir "/wave-" w ".tsv") }
     END {
       print "generated " now "  (ledger lines skipped as unparsable: " bad ")" > (sdir "/summary.tsv")
-      print "wave\tservices\tcreated\tcreate_fail\tstandby\tretired\tconnections\tmigrated\tverified\tfailed\trolled_back\tin_progress\tpending" > (sdir "/summary.tsv")
-      printf "%-5s %8s %8s %7s %7s %7s | %11s %14s %14s %7s %11s %8s %7s\n", "wave","services","created","c-fail","standby","retired","connections","migrated","verified","failed","rolled-back","in-prog","pending"
+      print "wave\tservices\tcreated\tcreate_fail\tstandby\tretired\tconnections\tmigrated\tverified\tfailed\trolled_back\tin_progress\tpending\tteam" > (sdir "/summary.tsv")
+      printf "%-5s %8s %8s %7s %7s %7s | %11s %14s %14s %7s %11s %8s %7s %5s\n", "wave","services","created","c-fail","standby","retired","connections","migrated","verified","failed","rolled-back","in-prog","pending","team"
       for (i=1;i<=nw;i++) { w=worder[i]
-        printf "%-5s %8d %8d %7d %7d %7d | %11d %9d %4s %9d %4s %7d %11d %8d %7d\n", w, wsvc[w], wcreated[w]+0, wcfail[w]+0, wstandby[w]+0, wretired[w]+0, wconn[w], wmig[w]+0, pct(wmig[w],wconn[w]), wver[w]+0, pct(wver[w],wconn[w]), wfail[w]+0, wrb[w]+0, wprog[w]+0, wpend[w]+0
-        printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", w, wsvc[w], wcreated[w]+0, wcfail[w]+0, wstandby[w]+0, wretired[w]+0, wconn[w], wmig[w]+0, wver[w]+0, wfail[w]+0, wrb[w]+0, wprog[w]+0, wpend[w]+0 > (sdir "/summary.tsv")
-        T[1]+=wsvc[w]; T[2]+=wcreated[w]; T[3]+=wcfail[w]; T[4]+=wstandby[w]; T[5]+=wretired[w]; T[6]+=wconn[w]; T[7]+=wmig[w]; T[8]+=wver[w]; T[9]+=wfail[w]; T[10]+=wrb[w]; T[11]+=wpend[w]; T[12]+=wprog[w] }
-      printf "%-5s %8d %8d %7d %7d %7d | %11d %9d %4s %9d %4s %7d %11d %8d %7d\n", "TOTAL", T[1],T[2],T[3],T[4],T[5],T[6],T[7],pct(T[7],T[6]),T[8],pct(T[8],T[6]),T[9],T[10],T[12],T[11]
-      printf "TOTAL\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", T[1],T[2],T[3],T[4],T[5],T[6],T[7],T[8],T[9],T[10],T[12],T[11] > (sdir "/summary.tsv")
+        printf "%-5s %8d %8d %7d %7d %7d | %11d %9d %4s %9d %4s %7d %11d %8d %7d %5d\n", w, wsvc[w], wcreated[w]+0, wcfail[w]+0, wstandby[w]+0, wretired[w]+0, wconn[w]+0, wmig[w]+0, pct(wmig[w],wconn[w]), wver[w]+0, pct(wver[w],wconn[w]), wfail[w]+0, wrb[w]+0, wprog[w]+0, wpend[w]+0, wteam[w]+0
+        printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", w, wsvc[w], wcreated[w]+0, wcfail[w]+0, wstandby[w]+0, wretired[w]+0, wconn[w]+0, wmig[w]+0, wver[w]+0, wfail[w]+0, wrb[w]+0, wprog[w]+0, wpend[w]+0, wteam[w]+0 > (sdir "/summary.tsv")
+        T[1]+=wsvc[w]; T[2]+=wcreated[w]; T[3]+=wcfail[w]; T[4]+=wstandby[w]; T[5]+=wretired[w]; T[6]+=wconn[w]; T[7]+=wmig[w]; T[8]+=wver[w]; T[9]+=wfail[w]; T[10]+=wrb[w]; T[11]+=wpend[w]; T[12]+=wprog[w]; T[13]+=wteam[w] }
+      printf "%-5s %8d %8d %7d %7d %7d | %11d %9d %4s %9d %4s %7d %11d %8d %7d %5d\n", "TOTAL", T[1],T[2],T[3],T[4],T[5],T[6],T[7],pct(T[7],T[6]),T[8],pct(T[8],T[6]),T[9],T[10],T[12],T[11],T[13]
+      printf "TOTAL\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", T[1],T[2],T[3],T[4],T[5],T[6],T[7],T[8],T[9],T[10],T[12],T[11],T[13] > (sdir "/summary.tsv")
       n=40; f=T[6]?int(n*T[8]/T[6]):0; bar=""; for (j=0;j<n;j++) bar=bar (j<f?"#":".")
-      printf "\nverified  [%s] %s of %d connections   |  services retired %d/%d\n", bar, pct(T[8],T[6]), T[6], T[5], T[1]
+      printf "\nverified  [%s] %s of %d tool connections (+%d handed to teams)   |  services retired %d/%d\n", bar, pct(T[8],T[6]), T[6], T[13], T[5], T[1]
       if (T[9]>0) printf "!! %d connection(s) failed/blocked -- see status/failed.tsv or: migrate.sh status --wave N\n", T[9]
       if (bad>0)  printf "!! %d ledger line(s) unparsable (crash mid-write?) -- skipped; check the tail of ledger.jsonl\n", bad
     }' "$RUN/.states.tsv" "$PLAN"
@@ -744,11 +752,106 @@ cmd_apply(){
   local w; for w in $list; do WAVE="$w"; apply_wave || { echo "!! lane stopped at wave $w"; return 1; }; done
 }
 
+# ---- rollback / confirm / retire (DESIGN §3, §4) -------------------------------------------
+# svc_select: ROWS = this wave's rows for --service (name or guid prefix); sets SG NAME VK
+svc_select(){
+  [ -n "$WAVE" ] && [ -n "${SVCF:-}" ] || { echo "usage: migrate.sh $SUB --wave N --service <name|guid> [--run dir] ..."; return 1; }
+  ROWS=$(wave_rows "$WAVE" | awk -F'\t' -v f="$SVCF" '$3==f || index($4,f)==1'); [ -n "$ROWS" ] || { echo "wave $WAVE: no service matches --service $SVCF"; return 1; }
+  SG=$(printf '%s\n' "$ROWS" | cut -f4 | sort -u); [ "$(printf '%s\n' "$SG" | wc -l | tr -d ' ')" = 1 ] || { echo "--service $SVCF matches several services in wave $WAVE"; return 1; }
+  NAME=$(printf '%s\n' "$ROWS" | head -1 | cut -f3); VK=$(svc_note_guid "$SG")
+  SVC_EV=$(ledger_lines | jq -r --arg s "$SG" 'select(.service==$s and .app=="" and .outcome=="ok" and (.step=="confirm" or .step=="retire")) | .step' | tail -1)
+}
+confirm_or_die(){ # confirm_or_die <prompt> <expected>
+  [ -n "${YES:-}" ] && return 0
+  have_tty || { echo "!! not a terminal and no --yes: refusing"; return 1; }
+  local a; printf '%s' "$1"; read -r a </dev/tty; [ "$a" = "$2" ] || { echo "not confirmed"; return 1; }
+}
+
+cmd_rollback(){
+  svc_select || return 1
+  [ "$SVC_EV" = retire ] && { echo "!! $NAME: standby already RETIRED -- rollback impossible (DESIGN §3)"; return 1; }
+  [ -n "$VK" ] || { echo "$NAME: no valkey was created for it -- nothing to roll back"; return 1; }
+  if [ -n "${APPF:-}" ]; then ROWS=$(printf '%s\n' "$ROWS" | awk -F'\t' -v f="$APPF" '$8==f || index($9,f)==1'); [ -n "$ROWS" ] || { echo "no app matches --app $APPF"; return 1; }; fi
+  local why="operator ${REASON:-no reason given}"; [ -n "${APPF:-}" ] && why="$why (app-level override --app $APPF)"
+  local n; n=$(printf '%s\n' "$ROWS" | cut -f9 | sort -u | wc -l | tr -d ' ')
+  echo "ROLLBACK wave $WAVE service $NAME ($(printf '%s' "$SG" | cut -c1-8)): $n app(s) back to ${NAME}-redis-standby; the valkey ($(printf '%s' "$VK" | cut -c1-8)) is kept"
+  [ "$SVC_EV" = confirm ] && echo "   note: service was CONFIRMED -- writes made to the valkey since cutover are lost for it"
+  confirm_or_die "type yes to roll back: " yes || return 1
+  wave_lock "$WAVE" || return 1; trap 'wave_unlock' EXIT
+  rollback_service "$SG" "$NAME" "$VK" "$why"
+  wave_unlock
+  [ "$(app_last_any_fail "$SG")" = 0 ] || { echo "!! some apps did not roll back -- status --wave $WAVE"; return 1; }
+  echo "rolled back -- status --wave $WAVE; re-migrate later with: apply --wave $WAVE --service $NAME"
+}
+app_last_any_fail(){ # 1 if any app of the service has a last event rollback:fail
+  ledger_lines | jq -rs --arg s "$1" '[.[] | select(.service==$s and .app!="")] | group_by(.app) | map(last) | map(select(.step=="rollback" and .outcome=="fail")) | length > 0' | grep -q true && echo 1 || echo 0; }
+
+cmd_confirm(){
+  svc_select || return 1
+  [ -n "${BY:-}" ] || { echo "usage: migrate.sh confirm --wave N --service <name> --by <team> [--grace ${GRACE}]"; return 1; }
+  case "$SVC_EV" in retire) echo "$NAME: already retired"; return 1;; confirm) echo "$NAME: already confirmed ($(ledger_lines | jq -r --arg s "$SG" 'select(.service==$s and .step=="confirm" and .outcome=="ok") | .ts+" "+.note' | tail -1))"; return 0;; esac
+  printf '%s' "$GRACE" | grep -qE '^[0-9]+h$' || { echo "--grace must be <hours>h (e.g. 336h = 14 days)"; return 1; }
+  local notv="" ag app aflags last
+  while IFS=$'\t' read -r ag app aflags; do
+    case ",$aflags," in *,no-binding:*) continue;; esac
+    last=$(app_last "$SG" "$ag"); [ "$last" = verify ] || notv="$notv $app(${last:-pending})"
+  done < <(printf '%s\n' "$ROWS" | awk -F'\t' -v s="$SG" '$4==s && !seen[$9]++ {print $9"\t"$8"\t"$12}')
+  [ -z "$notv" ] || { echo "!! $NAME: not every app is VERIFIED --$notv -- confirm means the team signed off on a fully migrated service"; return 1; }
+  ledger_add "$WAVE" "$SG" "" confirm ok 0 "by $BY; grace $GRACE; recorded by $OP"
+  echo "$NAME: CONFIRMED by $BY -- standby ${NAME}-redis-standby kept for $GRACE, then 'retire --wave $WAVE --service $NAME'"
+}
+
+DELETE_TIMEOUT="${DELETE_TIMEOUT:-1500}"
+cmd_retire(){
+  svc_select || return 1
+  case "$SVC_EV" in retire) echo "$NAME: already retired"; return 0;; confirm) ;; *) echo "!! $NAME: not confirmed -- 'confirm --wave $WAVE --service $NAME --by <team>' first"; return 1;; esac
+  local cts grace until nowts; cts=$(ledger_lines | jq -r --arg s "$SG" 'select(.service==$s and .step=="confirm" and .outcome=="ok") | .ts' | tail -1)
+  grace=$(ledger_lines | jq -r --arg s "$SG" 'select(.service==$s and .step=="confirm" and .outcome=="ok") | .note' | tail -1 | grep -oE 'grace [0-9]+h' | grep -oE '[0-9]+')
+  until=$(( $(date -u -d "$cts" +%s 2>/dev/null || date -u -j -f %Y-%m-%dT%H:%M:%SZ "$cts" +%s) + ${grace:-24}*3600 )); nowts=$(date +%s)
+  local forced=""
+  if [ "$nowts" -lt "$until" ]; then
+    if [ -n "${FORCE:-}" ]; then forced="grace overridden (--force)"; echo "!! standby grace runs until $(date -u -r "$until" +%FT%TZ 2>/dev/null || date -u -d "@$until" +%FT%TZ) -- overriding with --force (recorded)"
+    else echo "!! $NAME: standby grace runs until $(date -u -r "$until" +%FT%TZ 2>/dev/null || date -u -d "@$until" +%FT%TZ) -- refusing (--force to override, recorded)"; return 1; fi
+  fi
+  # live checks on the standby: it exists under the expected name, nothing is bound to it
+  local j; j=$(cfx "/v3/service_instances/$SG" 2>/dev/null); cf_json_ok "$j" || { echo "!! cannot read standby $SG: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no/invalid response"' 2>/dev/null)"; return 1; }
+  local sname; sname=$(printf '%s' "$j" | jq -r .name)
+  [ "$sname" = "${NAME}-redis-standby" ] || { echo "!! standby $SG is named '$sname', expected '${NAME}-redis-standby' -- refusing (drift)"; return 1; }
+  local bl; bl=$(cflist "/v3/service_credential_bindings?service_instance_guids=$SG") || { echo "!! cannot list bindings of the standby (API error) -- refusing"; return 1; }
+  local nb; nb=$(printf '%s' "$bl" | jq '.resources|length')
+  [ "$nb" = 0 ] || { echo "!! $nb binding(s)/key(s) still on the standby:"; printf '%s' "$bl" | jq -r '.resources[] | "   \(.type) \(.name // "") app=\(.relationships.app.data.guid // "-")"'; echo "   refusing -- these consumers were never migrated"; return 1; }
+  # connection census on the standby: hook, or the operator attests it was done by hand
+  local census
+  if [ -s "$RUN/retire-census.sh" ]; then
+    if bash "$RUN/retire-census.sh" "$SG" "$NAME" >> "$RUN/retire-census-$WAVE.log" 2>&1; then census="census hook ok"
+    else echo "!! retire-census.sh says someone is still connected to ${NAME}-redis-standby (exit $?, see retire-census-$WAVE.log) -- refusing"; return 1; fi
+  elif [ -n "${NO_CENSUS:-}" ]; then census="census attested by hand ($OP, --no-census)"
+  else echo "!! no $RUN/retire-census.sh hook: run the connection census on ${NAME}-redis-standby yourself (CLIENT LIST / discovery 'run') and pass --no-census to attest it is empty"; return 1; fi
+  echo "RETIRE wave $WAVE: DELETE ${NAME}-redis-standby ($SG) -- the Redis and its data are destroyed; rollback becomes IMPOSSIBLE"
+  echo "   confirmed $cts by: $(ledger_lines | jq -r --arg s "$SG" 'select(.service==$s and .step=="confirm" and .outcome=="ok") | .note' | tail -1)"
+  confirm_or_die "type the service name ($NAME) to continue: " "$NAME" || return 1
+  confirm_or_die "type delete to destroy ${NAME}-redis-standby: " delete || return 1
+  wave_lock "$WAVE" || return 1; trap 'wave_unlock' EXIT
+  local t0; t0=$(date +%s)
+  if cfreq DELETE "/v3/service_instances/$SG" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$DELETE_TIMEOUT"; }; then
+    ledger_add "$WAVE" "$SG" "" retire ok $(( ($(date +%s)-t0)*1000 )) "deleted ${NAME}-redis-standby; $census${forced:+; $forced}${YES:+; --yes}"
+    say "$NAME: standby deleted ($(( $(date +%s)-t0 ))s) -- the IP is released when BOSH finishes the delete-deployment"
+  else
+    ledger_add "$WAVE" "$SG" "" retire fail $(( ($(date +%s)-t0)*1000 )) "DELETE failed: $R_ERR"
+    say "!! $NAME: delete FAILED: $R_ERR -- the standby still exists"; wave_unlock; return 1
+  fi
+  wave_unlock
+}
+
 case "$SUB" in
   plan)      cmd_plan "$ARG" ;;
   apply)     cmd_apply ;;
   dry-run)   cmd_dryrun ;;
   preflight) cmd_preflight ;;
   status) if [ -n "$WAVE" ]; then cmd_status; else cmd_summary; fi ;;
-  *) echo "usage: migrate.sh plan <report.csv> | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N]   (all: --run <dir>)"; exit 1 ;;
+  rollback)  cmd_rollback ;;
+  confirm)   cmd_confirm ;;
+  retire)    cmd_retire ;;
+  *) echo "usage: migrate.sh plan <report.csv> | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N]"
+     echo "       rollback --wave N --service Y [--app X] [--reason ..] | confirm --wave N --service Y --by <team> [--grace 336h] | retire --wave N --service Y [--no-census] [--force]   (all: --run <dir>)"; exit 1 ;;
 esac

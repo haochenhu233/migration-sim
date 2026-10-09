@@ -108,6 +108,35 @@ for the store service (`runs/sbx/copy-data.sh <standby_guid> <valkey_guid> <name
 copied; without it apply asks on the terminal). Rehearse the lane model: wave 2 and wave 3 in two
 terminals at once (`--wave 2` and `--wave 3`), then `status` shows both.
 
+**Done in SBX 2026-10-09:** wave 1 (3 min 17 s, rebind-only on the STOPPED app, `/check` =
+valkey 8.1.8), wave 2 (3 Valkeys provisioned concurrently in ~3 min, 8 apps in 7.5 min; store
+parked on the datastore decision, 2 apps handed to the team), wave 3 (5 min). Found and fixed on
+the way: the copy-data prompt tested the loop's stdin instead of the tty; team-action apps held a
+service in MIGRATING; hazard footer ignored progress.
+
+## Then the rest of the lifecycle — rollback (scenario 11), confirm, retire (scenario 12)
+
+```bash
+# 11 -- timed rollback of one service: every app of it back on the standby (rebind redis, unbind
+#       valkey, restart only the ones that had been restarted). The valkey is kept.
+time bash migrate/migrate.sh rollback --wave 2 --service sim-redis-cache --reason "scenario 11" --run runs/sbx
+bash migrate/migrate.sh status --wave 2 --run runs/sbx      # phase ROLLED-BACK, apps 0/5
+curl -s https://<sim-cache-bound route>/check | jq '.server, .source'        # redis again, canary from Sept 30 intact
+#       --app <name> rolls back ONE app (recorded as an override); re-migrate = apply the same wave/service
+bash migrate/migrate.sh apply --wave 2 --service sim-redis-cache --run runs/sbx   # redoes bind/unbind/restart/verify after the rollback
+
+# confirm -- the app team's sign-off; refuses unless every tool app of the service is VERIFIED
+bash migrate/migrate.sh confirm --wave 2 --service sim-redis-cache --by "cache team" --grace 1h --run runs/sbx   # NP/PD: default 336h = 14 d
+bash migrate/migrate.sh status --wave 2 --run runs/sbx      # phase STANDBY, standby-until = confirm + grace
+
+# 12 -- retire: refuses before confirm, before the grace ends (--force overrides, recorded), if the
+#       standby's name drifted, if any binding/key is still on it, and without a census of who is
+#       still connected: a runs/sbx/retire-census.sh <standby_guid> <name> hook (exit 0 = nobody),
+#       or --no-census after you checked by hand (CLIENT LIST on the standby VM). Asks twice.
+bash migrate/migrate.sh retire --wave 2 --service sim-redis-cache --no-census --run runs/sbx
+bash migrate/migrate.sh status --run runs/sbx               # retired 1/6; then watch the IP come back (bosh deployments / cloud-config)
+```
+
 Offline rehearsal of the same thing (no CF): `migrate/test/cf-fake` is a stateful fake CF —
 `CFFAKE_STATE=/tmp/s.json migrate/test/cf-fake seed runs/sbx/waves.tsv`, then
 `CF_CMD=$PWD/migrate/test/cf-fake JOB_POLL=0 SOAK=0 bash migrate/migrate.sh apply --waves 1-3 --run <copy of runs/sbx> --yes`.

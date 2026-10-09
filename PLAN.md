@@ -100,11 +100,11 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress · `[-]` dropped
 - [x] `dry-run --wave N`: exact command sequence in the rehearsed order (per service: rename, create under original name, copy if flagged; per app: bind all, unbind all standby, ONE restart, verify), DONE marks from the ledger, rollback row per step
 - [ ] `apply` — idempotent, ledger-driven, STOP file, Ctrl-C safe, rolling restart for ≥2 instances, soak timer
 - [ ] `verify` — L1 platform (bindings, running, crashes) · L2 network (census on Valkey: conns to Valkey, none to Redis) · L3 server-side (CLIENT LIST / ACL LOG on Valkey) · L4 logs + optional team health URL · L5 data counts; `/check` only for sim apps (DESIGN §6b)
-- [ ] `rollback --app/--service/--wave` per the table
-- [ ] `confirm` / `retire` (confirm + grace + double prompt)
+- [x] `rollback --wave N --service Y [--app X]` per the table (service unit; app override recorded; re-apply redoes the pair after a rollback)
+- [x] `confirm` / `retire` (confirm needs every tool app VERIFIED; retire needs confirm + grace, name unchanged, zero bindings/keys, census hook or `--no-census`, double prompt)
 - [ ] `report --wave N` evidence pack
 - [ ] data copy for store-mode services (RDB snapshot / brief sync) + key-count verification
-- [ ] rollback scope = service (auto-rollback re-binds every moved app of the service); `--scope app` override
+- [x] rollback scope = service (auto-rollback re-binds every moved app of the service); `--app` override
 - [ ] preflight: Valkey plan `persistent` parity with the Redis plan
 - [ ] handles pinned-env apps (refuse in preflight), UPS, service keys (new key), multi-instance, Windows, TLS consumers (TLS plan + cert trust)
 
@@ -150,7 +150,8 @@ plus a review document for the client, built from the binding graph:
 ---
 
 ## Decisions
-- **2026-10-08 — `apply` built and exercised against a stateful fake CF** (happy path, STOPPED app, failed provision → leftover deleted and re-created, mid-wave crash → resume, restart/verify failure → service auto-rollback, rolling restart, lock refusal, STOP file, lane `--waves A-B`). Not yet: per-worker `CF_HOME` copy + UAA refresh-rotation check (needed only for parallel lanes), `rollback`/`confirm`/`retire`/`report` commands, L2/L3 in `verify`.
+- **2026-10-08 — `apply` built and exercised against a stateful fake CF** (happy path, STOPPED app, failed provision → leftover deleted and re-created, mid-wave crash → resume, restart/verify failure → service auto-rollback, rolling restart, lock refusal, STOP file, lane `--waves A-B`). Not yet: per-worker `CF_HOME` copy + UAA refresh-rotation check (needed only for parallel lanes), `report`, L2/L3 in `verify`.
+- **2026-10-09 — SBX waves 1–3 applied for real through the tool** (6 Valkeys, 13/15 tool connections verified, store parked on the datastore answer, 2 apps to the team; 3 concurrent Blacksmith provisions fine, ~3 min). `rollback`/`confirm`/`retire` built and exercised offline (rollback → re-apply → confirm → retire; retire refusals: not confirmed, grace, no census, after retire). `status` counts team-action apps apart (`N+T`).
 - **2026-10-08 — no `cf target`, parallel waves (DESIGN §1b).** NP's services/apps span ~40 orgs and waves run concurrently; `apply` drives the v3 API by GUID (rename/create/bind/unbind/restart/jobs), one admin login, per-worker `CF_HOME` copies only to keep token refreshes from racing, per-wave locks. `dry-run` now prints the API calls (CLI equivalents as comments).
 
 - 2026-10-02 — **Team-side changes under policy A are exactly three, all optional-until-needed or already named:** (1) pipelines that CREATE the service: `cf create-service redis …` → `valkey` (create-if-missing pipelines are unaffected; unconditional ones fail loudly with "name already in use"; `disable-service-access redis` flushes out the rest); (2) code selecting the binding by VCAP label `redis` — a code change unless the Valkey offering carries a `redis` tag (platform lever: settle before the academy); (3) the ~20 pinned addresses. Bind commands, manifests, service names, restarts: untouched.
