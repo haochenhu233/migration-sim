@@ -151,6 +151,7 @@ plus a review document for the client, built from the binding graph:
 
 ## Decisions
 - **2026-10-08 — `apply` built and exercised against a stateful fake CF** (happy path, STOPPED app, failed provision → leftover deleted and re-created, mid-wave crash → resume, restart/verify failure → service auto-rollback, rolling restart, lock refusal, STOP file, lane `--waves A-B`). Not yet: per-worker `CF_HOME` copy + UAA refresh-rotation check (needed only for parallel lanes), `report`, L2/L3 in `verify`.
+- 2026-10-09 — **`confirm` and `retire` are kept but not part of the operator flow** (preflight → dry-run → apply → status, + rollback when needed). Retirement only when the client asks; then `confirm --by … --grace 0h` + `retire` is the whole procedure.
 - **2026-10-09 — SBX waves 1–3 applied for real through the tool** (6 Valkeys, 13/15 tool connections verified, store parked on the datastore answer, 2 apps to the team; 3 concurrent Blacksmith provisions fine, ~3 min). `rollback`/`confirm`/`retire` built and exercised offline (rollback → re-apply → confirm → retire; retire refusals: not confirmed, grace, no census, after retire). `status` counts team-action apps apart (`N+T`).
 - **2026-10-08 — no `cf target`, parallel waves (DESIGN §1b).** NP's services/apps span ~40 orgs and waves run concurrently; `apply` drives the v3 API by GUID (rename/create/bind/unbind/restart/jobs), one admin login, per-worker `CF_HOME` copies only to keep token refreshes from racing, per-wave locks. `dry-run` now prints the API calls (CLI equivalents as comments).
 
