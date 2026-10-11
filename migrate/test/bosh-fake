@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# bosh-fake: just enough `bosh` for free-ips.sh tests. cloud-config and instances --json are canned;
-# `int` is delegated to the real bosh CLI (present on the bastion and the dev box).
+# bosh-fake: just enough `bosh` for free-ips.sh tests. `config --type cloud --name <n> --json` and
+# `instances --json` are canned; `int` is delegated to the real bosh CLI (present on the bastion and the dev box).
+# The cloud config is kept under the name "sbx-cc"; "default" is "--- {}" like on the OCFP director.
 # BOSHFAKE_EMPTY=1 -> instances lists nothing (must be refused), BOSHFAKE_BAD=1 -> instances errors,
 # BOSHFAKE_NOREDIS=1 -> no deployment carries a plan service guid (wrong director), BOSHFAKE_V6=1 -> an IPv6 subnet,
-# BOSHFAKE_NAMEDCC=1 -> the director keeps its cloud config under the name "sbx-cc": `cloud-config` (= name
-# "default") returns "--- {}" and only `config --type cloud --name sbx-cc` returns the canned one.
+# BOSHFAKE_BANNER=1 -> genesis-style banner lines + ANSI colour in front of every JSON (must be skipped).
+banner(){ [ -n "${BOSHFAKE_BANNER:-}" ] && printf '\033[3mVerifying availability of vault ...\033[0mok\n[sbx/bosh] using environment file ~/deployments/bosh/sbx.yml\nUsing environment \x27https://10.0.0.1:25555\x27 as client \x27admin\x27\n\n'; return 0; }
 cmd="$1"
 if [ "$cmd" = config ]; then
-  [ "${2:-}" = --type ] && [ "${3:-}" = cloud ] && [ "${4:-}" = --name ] || { echo "bosh-fake: only 'config --type cloud --name <n>' is faked" >&2; exit 1; }
-  [ "${5:-}" = sbx-cc ] || { echo "Finding config: Config 'cloud/${5:-}' doesn't exist" >&2; exit 1; }
-  cmd=cloud-config
-elif [ "$cmd" = cloud-config ] && [ -n "${BOSHFAKE_NAMEDCC:-}" ]; then echo '--- {}'; exit 0
+  [ "${2:-}" = --type ] && [ "${3:-}" = cloud ] && [ "${4:-}" = --name ] && [ "${6:-}" = --json ] || { echo "bosh-fake: only 'config --type cloud --name <n> --json' is faked" >&2; exit 1; }
+  case "${5:-}" in
+    sbx-cc)  banner; printf '{"Tables":[{"Content":"","Header":{"content":"Content","id":"ID","name":"Name","type":"Type"},"Rows":[{"content":%s,"created_at":"2026-08-21 17:18:29 UTC","id":"296","name":"sbx-cc","type":"cloud"}]}]}\n' "$("$0" cloud-config | jq -Rs .)"; exit 0;;
+    default) banner; printf '{"Tables":[{"Rows":[{"content":"--- {}\\n","id":"1","name":"default","type":"cloud"}]}]}\n'; exit 0;;
+    *)       echo "Finding config: Config 'cloud/${5:-}' doesn't exist" >&2; exit 1;;
+  esac
 fi
 case "$cmd" in
   cloud-config) cat <<'Y'
@@ -39,6 +42,7 @@ Y
 Y
   ;;
   instances) [ -n "${BOSHFAKE_BAD:-}" ] && { echo "Fetching deployments: Director responded with non-successful status code '401'" >&2; exit 1; }
+       banner
        if [ -n "${BOSHFAKE_EMPTY:-}" ]; then echo '{"Tables":[{"Rows":[]}]}'; else
        R="redis-cache-small-00000065-0000-4000-8000-000000000101"; [ -n "${BOSHFAKE_NOREDIS:-}" ] && R="redis-cache-small-ffffffff-0000-4000-8000-000000000000"
        cat <<J

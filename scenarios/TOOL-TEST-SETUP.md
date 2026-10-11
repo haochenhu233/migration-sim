@@ -117,13 +117,15 @@ service in MIGRATING; hazard footer ignored progress.
 ## IP headroom from BOSH (before provisioning; the cf network is shared with CF growth)
 
 ```bash
-eval "$(genesis @sbx-us b --connect)"     # export the env's director into this shell; plain `bosh` then works
-bosh configs --type cloud                 # OCFP keeps the cloud config under a NAME; `bosh cloud-config` (= "default") is "--- {}"
-bash migrate/free-ips.sh --network ocfp-int-sbx-us-east-1.cf --cloud-config <that name> --plan runs/sbx/waves.tsv --out runs/sbx/free-ips.txt
+BOSH_CMD="genesis @sbx-us b"              # the env's director, as you run bosh by hand (no --connect: higher envs have several directors)
+$BOSH_CMD configs --type cloud            # OCFP keeps the cloud config under a NAME (e.g. ocfp-int-sbx-us-east-1.cf); "default" is "--- {}"
+#   the NETWORK name is inside it and differs from the config name (e.g. ocfp-int-sbx-us-east-1-ocf)
+bash migrate/free-ips.sh --network ocfp-int-sbx-us-east-1-ocf --cloud-config ocfp-int-sbx-us-east-1.cf --plan runs/sbx/waves.tsv --out runs/sbx/free-ips.txt
 #  per subnet: pool / used / free (counts only, safe to paste); refuses a director that runs none of the plan's Redis
 #  deployments, 0 instances, non-IPv4 ranges, a cloud config without networks. preflight then reads free-ips.txt
 #  (minus Valkeys created since; WARN >24h). Clustered valkey plans: --ips-per-service <nodes>.
-#  BOSH_CMD="genesis @sbx-us b" also works interactively but genesis's non-tty path failed inside the script (2026-10-11).
+#  bosh is called with --json and genesis's banner/colour in front of the JSON is skipped; `bosh int` on the
+#  local YAML runs plain `bosh` (BOSH_INT to override).
 ```
 
 ## Then the rest of the lifecycle — rollback (scenario 11), confirm, retire (scenario 12)

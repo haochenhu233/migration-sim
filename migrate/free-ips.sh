@@ -15,32 +15,39 @@
 #   NEED with --plan = services still to create x --ips-per-service (default 1: standalone plans;
 #   a clustered plan needs its node count). Services whose Valkey the ledger already shows as
 #   created are not counted again (their IP is already in `used`).
-#   Read-only. BOSH_CMD = the bosh invocation that works here (default: bosh; bastion: genesis ... bosh).
+#   Read-only. BOSH_CMD = the bosh invocation that reaches the director (default: bosh; bastion: "genesis @<env> b" --
+#   wrapper banners/colour in front of bosh's JSON are skipped). `bosh int` on local files runs plain bosh (BOSH_INT).
 #   bash/jq/awk only (gawk, mawk >= 1.3.3 and BWK awk).
 set -u
 NET=""; PLAN=""; OUT=""; IPS_PER=1; CCNAME=""
 while [ "${1:-}" ]; do case "$1" in --network) NET="$2"; shift 2;; --plan) PLAN="$2"; shift 2;; --out) OUT="$2"; shift 2;; --ips-per-service) IPS_PER="$2"; shift 2;; --cloud-config) CCNAME="$2"; shift 2;; *) echo "unknown arg $1"; exit 2;; esac; done
 [ -n "$NET" ] || { echo "usage: free-ips.sh --network <bosh network name> [--cloud-config <name>] [--plan waves.tsv] [--out free-ips.txt] [--ips-per-service N]   (BOSH_CMD='genesis ... bosh' if needed)"; exit 2; }
 case "$IPS_PER" in ''|*[!0-9]*|0) echo "--ips-per-service must be a positive integer"; exit 2;; esac
-B="${BOSH_CMD:-bosh}"
+B="${BOSH_CMD:-bosh}"; BI="${BOSH_INT:-bosh}"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 die(){ echo "!! $*" >&2; exit 1; }
-# bint <file> <path>: `bosh int --path`, stdout on success; "ABSENT" exit 0 when the path is missing; die on any other error
-bint(){ local out rc; out=$($B int "$1" --path "$2" 2> "$TMP/bint.err"); rc=$?
+# bjson <out.json> <bosh args...>: run `$B <args> --json`; drop whatever a wrapper (genesis) prints in front
+# of the JSON (banner lines, ANSI colour), require bosh's Tables shape. Dies with bosh's stderr on failure.
+bjson(){ local out="$1"; shift
+  $B "$@" --json > "$TMP/raw.out" 2> "$TMP/raw.err" || die "bosh $* failed: $(tail -1 "$TMP/raw.err")"
+  sed "s/$(printf '\033')\[[0-9;]*m//g" "$TMP/raw.out" | sed -n '/^{/,$p' > "$out"   # ESC via printf: BSD sed has no \x1b
+  jq -e '.Tables and (.Tables|length>0)' "$out" > /dev/null 2>&1 || die "bosh $* --json: no JSON Tables in the output: $(head -c 200 "$TMP/raw.out")"; }
+# bint <file> <path>: `bosh int --path` on a LOCAL file (no director: plain bosh, BOSH_INT to override);
+#   stdout on success; "ABSENT" exit 0 when the path is missing; die on any other error
+bint(){ local out rc; out=$($BI int "$1" --path "$2" 2> "$TMP/bint.err"); rc=$?
   if [ $rc -eq 0 ]; then printf '%s\n' "$out"; return 0; fi
   if grep -qE "Expected to find (a map key|exactly one matching array item|array index)" "$TMP/bint.err"; then echo ABSENT; return 0; fi
   die "bosh int --path $2 failed: $(head -1 "$TMP/bint.err")"; }
 # list items from `bosh int` output ("- a.b.c.d - e.f.g.h" -> "a.b.c.d-e.f.g.h"), joined by comma
 items(){ awk '/^- / { sub(/^- /, ""); gsub(/ /, ""); print }' | paste -sd, -; }
 
-# 1) cloud-config: the subnets of the network. `bosh cloud-config` is the config NAMED "default";
-#    a director with named cloud configs (`bosh configs --type cloud`) needs --cloud-config <name>.
-if [ -n "$CCNAME" ]; then
-  $B config --type cloud --name "$CCNAME" > "$TMP/cc.yml" 2> "$TMP/cc.err" || die "bosh config --type cloud --name $CCNAME failed: $(cat "$TMP/cc.err")"
-else
-  $B cloud-config > "$TMP/cc.yml" 2> "$TMP/cc.err" || die "bosh cloud-config failed: $(cat "$TMP/cc.err")"
-fi
-[ -s "$TMP/cc.yml" ] || die "bosh cloud-config returned nothing"
+# 1) cloud config: the subnets of the network. Fetched by NAME (`bosh cloud-config` = the one named
+#    "default"; OCFP directors keep it under a name: `bosh configs --type cloud`). `bosh config --json`
+#    carries the YAML as .Tables[0].Rows[0].content.
+CCNAME="${CCNAME:-default}"
+bjson "$TMP/cc.json" config --type cloud --name "$CCNAME"
+[ "$(jq '.Tables[0].Rows|length' "$TMP/cc.json")" -eq 1 ] || die "cloud config '$CCNAME' not found (bosh config --type cloud --name $CCNAME returned no row); names: bosh configs --type cloud"
+jq -er '.Tables[0].Rows[0].content' "$TMP/cc.json" > "$TMP/cc.yml" || die "bosh config --json row has no .content key: $(head -c 200 "$TMP/cc.json")"
 [ "$(bint "$TMP/cc.yml" /networks)" != ABSENT ] || die "cloud config '${CCNAME:-default}' has no networks -- named cloud configs? run: bosh configs --type cloud, then pass --cloud-config <name>"
 nsub=$(bint "$TMP/cc.yml" "/networks/name=$NET/subnets")
 [ "$nsub" != ABSENT ] || die "network '$NET' not in cloud-config (or has no subnets); networks: $(bint "$TMP/cc.yml" /networks | awk '/^- name:/ {print $3} /^  name:/ {print $2}' | paste -sd, -)"
@@ -62,8 +69,7 @@ done
 
 # 2) every IP BOSH has reserved: instances of all deployments (a hard-stopped instance has no VM but keeps its IP).
 #    Shape-checked: no Tables / no rows is an error, not "nothing deployed".
-$B instances --json > "$TMP/inst.json" 2> "$TMP/inst.err" || die "bosh instances failed: $(cat "$TMP/inst.err")"
-jq -e '.Tables and (.Tables|length>0)' "$TMP/inst.json" > /dev/null 2>&1 || die "bosh instances --json: unexpected shape (no Tables): $(head -c 200 "$TMP/inst.json")"
+bjson "$TMP/inst.json" instances
 jq -r '.Tables[].Rows[]?.ips // empty' "$TMP/inst.json" | tr ',' '\n' | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u > "$TMP/used.txt"
 NINST=$(jq '[.Tables[].Rows[]?] | length' "$TMP/inst.json"); NDEP=$(jq '[.Tables[] | select((.Rows|length)>0)] | length' "$TMP/inst.json")
 [ "$NINST" -gt 0 ] || die "bosh instances lists 0 instances on this director -- wrong director/credentials? (refusing to report everything as free)"
