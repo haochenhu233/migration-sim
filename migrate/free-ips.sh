@@ -18,9 +18,9 @@
 #   Read-only. BOSH_CMD = the bosh invocation that works here (default: bosh; bastion: genesis ... bosh).
 #   bash/jq/awk only (gawk, mawk >= 1.3.3 and BWK awk).
 set -u
-NET=""; PLAN=""; OUT=""; IPS_PER=1
-while [ "${1:-}" ]; do case "$1" in --network) NET="$2"; shift 2;; --plan) PLAN="$2"; shift 2;; --out) OUT="$2"; shift 2;; --ips-per-service) IPS_PER="$2"; shift 2;; *) echo "unknown arg $1"; exit 2;; esac; done
-[ -n "$NET" ] || { echo "usage: free-ips.sh --network <bosh network name> [--plan waves.tsv] [--out free-ips.txt] [--ips-per-service N]   (BOSH_CMD='genesis ... bosh' if needed)"; exit 2; }
+NET=""; PLAN=""; OUT=""; IPS_PER=1; CCNAME=""
+while [ "${1:-}" ]; do case "$1" in --network) NET="$2"; shift 2;; --plan) PLAN="$2"; shift 2;; --out) OUT="$2"; shift 2;; --ips-per-service) IPS_PER="$2"; shift 2;; --cloud-config) CCNAME="$2"; shift 2;; *) echo "unknown arg $1"; exit 2;; esac; done
+[ -n "$NET" ] || { echo "usage: free-ips.sh --network <bosh network name> [--cloud-config <name>] [--plan waves.tsv] [--out free-ips.txt] [--ips-per-service N]   (BOSH_CMD='genesis ... bosh' if needed)"; exit 2; }
 case "$IPS_PER" in ''|*[!0-9]*|0) echo "--ips-per-service must be a positive integer"; exit 2;; esac
 B="${BOSH_CMD:-bosh}"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
@@ -33,9 +33,15 @@ bint(){ local out rc; out=$($B int "$1" --path "$2" 2> "$TMP/bint.err"); rc=$?
 # list items from `bosh int` output ("- a.b.c.d - e.f.g.h" -> "a.b.c.d-e.f.g.h"), joined by comma
 items(){ awk '/^- / { sub(/^- /, ""); gsub(/ /, ""); print }' | paste -sd, -; }
 
-# 1) cloud-config: the subnets of the network
-$B cloud-config > "$TMP/cc.yml" 2> "$TMP/cc.err" || die "bosh cloud-config failed: $(cat "$TMP/cc.err")"
+# 1) cloud-config: the subnets of the network. `bosh cloud-config` is the config NAMED "default";
+#    a director with named cloud configs (`bosh configs --type cloud`) needs --cloud-config <name>.
+if [ -n "$CCNAME" ]; then
+  $B config --type cloud --name "$CCNAME" > "$TMP/cc.yml" 2> "$TMP/cc.err" || die "bosh config --type cloud --name $CCNAME failed: $(cat "$TMP/cc.err")"
+else
+  $B cloud-config > "$TMP/cc.yml" 2> "$TMP/cc.err" || die "bosh cloud-config failed: $(cat "$TMP/cc.err")"
+fi
 [ -s "$TMP/cc.yml" ] || die "bosh cloud-config returned nothing"
+[ "$(bint "$TMP/cc.yml" /networks)" != ABSENT ] || die "cloud config '${CCNAME:-default}' has no networks -- named cloud configs? run: bosh configs --type cloud, then pass --cloud-config <name>"
 nsub=$(bint "$TMP/cc.yml" "/networks/name=$NET/subnets")
 [ "$nsub" != ABSENT ] || die "network '$NET' not in cloud-config (or has no subnets); networks: $(bint "$TMP/cc.yml" /networks | awk '/^- name:/ {print $3} /^  name:/ {print $2}' | paste -sd, -)"
 nsub=$(printf '%s\n' "$nsub" | grep -c '^- ')

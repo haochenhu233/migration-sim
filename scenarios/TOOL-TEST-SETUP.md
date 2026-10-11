@@ -117,11 +117,13 @@ service in MIGRATING; hazard footer ignored progress.
 ## IP headroom from BOSH (before provisioning; the cf network is shared with CF growth)
 
 ```bash
-BOSH_CMD="genesis @sbx bosh"      # whatever reaches the director Blacksmith deploys through, read-only
-bash migrate/free-ips.sh --network <cf network name in cloud-config> --plan runs/sbx/waves.tsv --out runs/sbx/free-ips.txt
+eval "$(genesis @sbx-us b --connect)"     # export the env's director into this shell; plain `bosh` then works
+bosh configs --type cloud                 # OCFP keeps the cloud config under a NAME; `bosh cloud-config` (= "default") is "--- {}"
+bash migrate/free-ips.sh --network ocfp-int-sbx-us-east-1.cf --cloud-config <that name> --plan runs/sbx/waves.tsv --out runs/sbx/free-ips.txt
 #  per subnet: pool / used / free (counts only, safe to paste); refuses a director that runs none of the plan's Redis
-#  deployments, 0 instances, non-IPv4 ranges. preflight then reads free-ips.txt (minus Valkeys created since; WARN >24h).
-#  Clustered valkey plans: --ips-per-service <nodes>.
+#  deployments, 0 instances, non-IPv4 ranges, a cloud config without networks. preflight then reads free-ips.txt
+#  (minus Valkeys created since; WARN >24h). Clustered valkey plans: --ips-per-service <nodes>.
+#  BOSH_CMD="genesis @sbx-us b" also works interactively but genesis's non-tty path failed inside the script (2026-10-11).
 ```
 
 ## Then the rest of the lifecycle — rollback (scenario 11), confirm, retire (scenario 12)

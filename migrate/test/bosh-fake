@@ -2,8 +2,17 @@
 # bosh-fake: just enough `bosh` for free-ips.sh tests. cloud-config and instances --json are canned;
 # `int` is delegated to the real bosh CLI (present on the bastion and the dev box).
 # BOSHFAKE_EMPTY=1 -> instances lists nothing (must be refused), BOSHFAKE_BAD=1 -> instances errors,
-# BOSHFAKE_NOREDIS=1 -> no deployment carries a plan service guid (wrong director), BOSHFAKE_V6=1 -> an IPv6 subnet.
-case "$1" in
+# BOSHFAKE_NOREDIS=1 -> no deployment carries a plan service guid (wrong director), BOSHFAKE_V6=1 -> an IPv6 subnet,
+# BOSHFAKE_NAMEDCC=1 -> the director keeps its cloud config under the name "sbx-cc": `cloud-config` (= name
+# "default") returns "--- {}" and only `config --type cloud --name sbx-cc` returns the canned one.
+cmd="$1"
+if [ "$cmd" = config ]; then
+  [ "${2:-}" = --type ] && [ "${3:-}" = cloud ] && [ "${4:-}" = --name ] || { echo "bosh-fake: only 'config --type cloud --name <n>' is faked" >&2; exit 1; }
+  [ "${5:-}" = sbx-cc ] || { echo "Finding config: Config 'cloud/${5:-}' doesn't exist" >&2; exit 1; }
+  cmd=cloud-config
+elif [ "$cmd" = cloud-config ] && [ -n "${BOSHFAKE_NAMEDCC:-}" ]; then echo '--- {}'; exit 0
+fi
+case "$cmd" in
   cloud-config) cat <<'Y'
 azs: [{name: z1}, {name: z2}]
 networks:
