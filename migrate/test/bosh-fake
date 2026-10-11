@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# bosh-fake: just enough `bosh` for free-ips.sh tests. cloud-config and instances --json are canned;
+# `int` is delegated to the real bosh CLI (present on the bastion and the dev box).
+# BOSHFAKE_EMPTY=1 -> instances lists nothing (must be refused), BOSHFAKE_BAD=1 -> instances errors,
+# BOSHFAKE_NOREDIS=1 -> no deployment carries a plan service guid (wrong director), BOSHFAKE_V6=1 -> an IPv6 subnet.
+case "$1" in
+  cloud-config) cat <<'Y'
+azs: [{name: z1}, {name: z2}]
+networks:
+- name: cf
+  type: manual
+  subnets:
+  - range: 10.10.0.0/24
+    gateway: 10.10.0.1
+    azs: [z1]
+    reserved: [10.10.0.2 - 10.10.0.9, 10.10.0.250]
+    static: [10.10.0.10-10.10.0.19]
+  - range: 172.16.4.0/26
+    gateway: 172.16.4.1
+    az: z2
+    reserved: [172.16.4.2]
+Y
+  [ -n "${BOSHFAKE_V6:-}" ] && printf '  - range: fd00::/64\n    gateway: fd00::1\n'
+  cat <<'Y'
+- name: services
+  type: manual
+  subnets:
+  - range: 10.20.0.0/28
+    gateway: 10.20.0.1
+Y
+  ;;
+  instances) [ -n "${BOSHFAKE_BAD:-}" ] && { echo "Fetching deployments: Director responded with non-successful status code '401'" >&2; exit 1; }
+       if [ -n "${BOSHFAKE_EMPTY:-}" ]; then echo '{"Tables":[{"Rows":[]}]}'; else
+       R="redis-cache-small-00000065-0000-4000-8000-000000000101"; [ -n "${BOSHFAKE_NOREDIS:-}" ] && R="redis-cache-small-ffffffff-0000-4000-8000-000000000000"
+       cat <<J
+{"Tables":[
+ {"Title":"Deployment 'cf'","Rows":[
+   {"instance":"diego-cell/0","process_state":"running","ips":"10.10.0.20"},
+   {"instance":"diego-cell/1","process_state":"running","ips":"10.10.0.21\n10.10.9.9"},
+   {"instance":"router/0","process_state":"running","ips":"10.10.0.11"}]},
+ {"Title":"Deployment '$R'","Rows":[{"instance":"standalone/0","process_state":"stopped","ips":"10.10.0.30"}]},
+ {"Title":"Deployment 'redis-cache-small-other'","Rows":[{"instance":"standalone/0","process_state":"running","ips":"172.16.4.10"}]},
+ {"Title":"Deployment 'bosh-dns'","Rows":[{"instance":"nats/0","process_state":"running","ips":"10.10.0.250"}]}]}
+J
+       fi ;;
+  int) shift; exec bosh int "$@" ;;
+  *) echo "bosh-fake: unhandled $*" >&2; exit 1 ;;
+esac

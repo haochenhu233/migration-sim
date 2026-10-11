@@ -387,7 +387,21 @@ cmd_preflight(){
   norg=$(printf '%s\n' "$rows" | cut -f10 | sort -u | wc -l | tr -d ' '); nhz=$(printf '%s\n' "$rows" | awk -F'\t' '$12 ~ /hazard/' | wc -l | tr -d ' ')
   echo
   echo "BLAST RADIUS wave $WAVE: $nsvc service(s) -> $nsvc Valkey(s) to create (IPs needed: $nsvc), $napp app restart(s), $norg org(s); hazards in wave: $nhz"
-  [ -n "${FREE_IPS:-}" ] && { [ "$FREE_IPS" -ge "$nsvc" ] && ok "IP headroom: $FREE_IPS free >= $nsvc needed" || fail "IP headroom: $FREE_IPS free < $nsvc needed"; } || warn "IP headroom not checked (pass --free-ips N from the blacksmith pool / cloud-config)"
+  local fsrc=""
+  if [ -z "${FREE_IPS:-}" ] && [ -s "$RUN/free-ips.txt" ]; then   # written by migrate/free-ips.sh
+    local fn fts fep age since
+    fn=$(sed -n 's/^free_ips=\([0-9][0-9]*\) .*/\1/p' "$RUN/free-ips.txt"); fts=$(sed -n 's/.* ts=\([0-9T:Z-]*\).*/\1/p' "$RUN/free-ips.txt")
+    fep=$(date -u -d "$fts" +%s 2>/dev/null || date -u -j -f %Y-%m-%dT%H:%M:%SZ "$fts" +%s 2>/dev/null || true)
+    if [ -z "$fn" ] || [ -z "$fts" ] || [ -z "$fep" ]; then fail "free-ips.txt is unreadable ($(head -c 80 "$RUN/free-ips.txt")) -- re-run migrate/free-ips.sh or pass --free-ips"
+    else
+      age=$(( ( $(date +%s) - fep ) / 3600 ))
+      # Valkeys created since the snapshot took IPs out of that number
+      since=$(ledger_lines | jq -r --arg t "$fts" 'select(.step=="create-valkey" and .outcome=="ok" and .app=="" and .ts > $t) | .service' | sort -u | wc -l | tr -d ' ')
+      FREE_IPS=$(( fn - since )); fsrc=" (free-ips.txt ${age}h old: $fn, minus $since created since)"
+      [ "$age" -ge 24 ] && warn "free-ips.txt is ${age}h old -- re-run migrate/free-ips.sh (the network is shared with CF growth)"
+    fi
+  fi
+  [ -n "${FREE_IPS:-}" ] && { [ "$FREE_IPS" -ge "$nsvc" ] && ok "IP headroom: $FREE_IPS free >= $nsvc needed$fsrc" || fail "IP headroom: $FREE_IPS free < $nsvc needed$fsrc"; } || warn "IP headroom not checked (pass --free-ips N from the blacksmith pool / cloud-config)"
   echo
   if [ "$fails" -gt 0 ]; then echo "PREFLIGHT: $fails FAIL, $warns WARN -- do not apply"; exit 1; else echo "PREFLIGHT: OK ($warns WARN)"; fi
 }
@@ -578,6 +592,8 @@ apply_wave(){
   if [ -z "${FORCE:-}" ]; then
     local pf; pf=$(cmd_preflight 2>&1); printf '%s\n' "$pf" > "$RUN/preflight-wave-$WAVE.log"
     if printf '%s\n' "$pf" | grep -q '^FAIL'; then printf '%s\n' "$pf" | grep '^FAIL'; echo "!! preflight FAILED -- fix, or --force to override (recorded)"; return 1; fi
+    # a preflight that died before its verdict (crash, bash abort) is NOT a pass
+    printf '%s\n' "$pf" | grep -q '^PREFLIGHT: OK' || { printf '%s\n' "$pf" | tail -3; echo "!! preflight ended without a verdict -- refusing (see $RUN/preflight-wave-$WAVE.log)"; return 1; }
     echo "preflight: PASS ($(printf '%s\n' "$pf" | grep -c '^WARN') warning(s), $RUN/preflight-wave-$WAVE.log)"
   else ledger_add "$WAVE" "" "" preflight-override ok 0 "--force by $OP"; fi
   if [ -z "${YES:-}" ]; then

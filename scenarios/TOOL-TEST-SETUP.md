@@ -114,6 +114,16 @@ parked on the datastore decision, 2 apps handed to the team), wave 3 (5 min). Fo
 the way: the copy-data prompt tested the loop's stdin instead of the tty; team-action apps held a
 service in MIGRATING; hazard footer ignored progress.
 
+## IP headroom from BOSH (before provisioning; the cf network is shared with CF growth)
+
+```bash
+BOSH_CMD="genesis @sbx bosh"      # whatever reaches the director Blacksmith deploys through, read-only
+bash migrate/free-ips.sh --network <cf network name in cloud-config> --plan runs/sbx/waves.tsv --out runs/sbx/free-ips.txt
+#  per subnet: pool / used / free (counts only, safe to paste); refuses a director that runs none of the plan's Redis
+#  deployments, 0 instances, non-IPv4 ranges. preflight then reads free-ips.txt (minus Valkeys created since; WARN >24h).
+#  Clustered valkey plans: --ips-per-service <nodes>.
+```
+
 ## Then the rest of the lifecycle — rollback (scenario 11), confirm, retire (scenario 12)
 
 ```bash
