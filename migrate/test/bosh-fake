@@ -8,11 +8,11 @@
 banner(){ [ -n "${BOSHFAKE_BANNER:-}" ] && printf '\033[3mVerifying availability of vault ...\033[0mok\n[sbx/bosh] using environment file ~/deployments/bosh/sbx.yml\nUsing environment \x27https://10.0.0.1:25555\x27 as client \x27admin\x27\n\n'; return 0; }
 cmd="$1"
 if [ "$cmd" = config ]; then
-  [ "${2:-}" = --type ] && [ "${3:-}" = cloud ] && [ "${4:-}" = --name ] && [ "${6:-}" = --json ] || { echo "bosh-fake: only 'config --type cloud --name <n> --json' is faked" >&2; exit 1; }
-  case "${5:-}" in
+  [ "${2:-}" = --name ] && [ "${4:-}" = --type ] && [ "${5:-}" = cloud ] && [ "${6:-}" = --json ] || { echo "bosh-fake: only 'config --name <n> --type cloud --json' is faked" >&2; exit 1; }
+  case "${3:-}" in
     sbx-cc)  banner; printf '{"Tables":[{"Content":"","Header":{"content":"Content","id":"ID","name":"Name","type":"Type"},"Rows":[{"content":%s,"created_at":"2026-08-21 17:18:29 UTC","id":"296","name":"sbx-cc","type":"cloud"}]}]}\n' "$("$0" cloud-config | jq -Rs .)"; exit 0;;
     default) banner; printf '{"Tables":[{"Rows":[{"content":"--- {}\\n","id":"1","name":"default","type":"cloud"}]}]}\n'; exit 0;;
-    *)       echo "Finding config: Config 'cloud/${5:-}' doesn't exist" >&2; exit 1;;
+    *)       echo "Finding config: Config 'cloud/${3:-}' doesn't exist" >&2; exit 1;;
   esac
 fi
 case "$cmd" in

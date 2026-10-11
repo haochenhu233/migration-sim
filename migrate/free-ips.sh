@@ -16,7 +16,9 @@
 #   a clustered plan needs its node count). Services whose Valkey the ledger already shows as
 #   created are not counted again (their IP is already in `used`).
 #   Read-only. BOSH_CMD = the bosh invocation that reaches the director (default: bosh; bastion: "genesis @<env> b" --
-#   wrapper banners/colour in front of bosh's JSON are skipped). `bosh int` on local files runs plain bosh (BOSH_INT).
+#   wrapper banners/colour in front of bosh's JSON are skipped). It must reach this script: `export BOSH_CMD=...`
+#   or `BOSH_CMD=... bash free-ips.sh` -- a bare `BOSH_CMD=...` line is not inherited and plain bosh runs with no
+#   director ("Expected non-empty Director URL"). `bosh int` on local files runs plain bosh (BOSH_INT).
 #   bash/jq/awk only (gawk, mawk >= 1.3.3 and BWK awk).
 set -u
 NET=""; PLAN=""; OUT=""; IPS_PER=1; CCNAME=""
@@ -29,7 +31,8 @@ die(){ echo "!! $*" >&2; exit 1; }
 # bjson <out.json> <bosh args...>: run `$B <args> --json`; drop whatever a wrapper (genesis) prints in front
 # of the JSON (banner lines, ANSI colour), require bosh's Tables shape. Dies with bosh's stderr on failure.
 bjson(){ local out="$1"; shift
-  $B "$@" --json > "$TMP/raw.out" 2> "$TMP/raw.err" || die "bosh $* failed: $(tail -1 "$TMP/raw.err")"
+  if ! $B "$@" --json > "$TMP/raw.out" 2> "$TMP/raw.err"; then   # with --json bosh reports its error in .Lines on stdout
+    die "'$B $* --json' failed: $( { sed -n '/^{/,$p' "$TMP/raw.out" | jq -r '.Lines[]?' 2>/dev/null; grep -v '^$' "$TMP/raw.err"; } | tr '\n' ' ')"; fi
   sed "s/$(printf '\033')\[[0-9;]*m//g" "$TMP/raw.out" | sed -n '/^{/,$p' > "$out"   # ESC via printf: BSD sed has no \x1b
   jq -e '.Tables and (.Tables|length>0)' "$out" > /dev/null 2>&1 || die "bosh $* --json: no JSON Tables in the output: $(head -c 200 "$TMP/raw.out")"; }
 # bint <file> <path>: `bosh int --path` on a LOCAL file (no director: plain bosh, BOSH_INT to override);
@@ -45,8 +48,8 @@ items(){ awk '/^- / { sub(/^- /, ""); gsub(/ /, ""); print }' | paste -sd, -; }
 #    "default"; OCFP directors keep it under a name: `bosh configs --type cloud`). `bosh config --json`
 #    carries the YAML as .Tables[0].Rows[0].content.
 CCNAME="${CCNAME:-default}"
-bjson "$TMP/cc.json" config --type cloud --name "$CCNAME"
-[ "$(jq '.Tables[0].Rows|length' "$TMP/cc.json")" -eq 1 ] || die "cloud config '$CCNAME' not found (bosh config --type cloud --name $CCNAME returned no row); names: bosh configs --type cloud"
+bjson "$TMP/cc.json" config --name "$CCNAME" --type cloud
+[ "$(jq '.Tables[0].Rows|length' "$TMP/cc.json")" -eq 1 ] || die "cloud config '$CCNAME' not found (bosh config --name $CCNAME --type cloud returned no row); names: bosh configs --type cloud"
 jq -er '.Tables[0].Rows[0].content' "$TMP/cc.json" > "$TMP/cc.yml" || die "bosh config --json row has no .content key: $(head -c 200 "$TMP/cc.json")"
 [ "$(bint "$TMP/cc.yml" /networks)" != ABSENT ] || die "cloud config '${CCNAME:-default}' has no networks -- named cloud configs? run: bosh configs --type cloud, then pass --cloud-config <name>"
 nsub=$(bint "$TMP/cc.yml" "/networks/name=$NET/subnets")

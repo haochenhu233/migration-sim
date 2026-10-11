@@ -117,7 +117,8 @@ service in MIGRATING; hazard footer ignored progress.
 ## IP headroom from BOSH (before provisioning; the cf network is shared with CF growth)
 
 ```bash
-BOSH_CMD="genesis @sbx-us b"              # the env's director, as you run bosh by hand (no --connect: higher envs have several directors)
+export BOSH_CMD="genesis @sbx-us b"       # the env's director, as you run bosh by hand (no --connect: higher envs have several directors).
+#   EXPORT it (or prefix the command): a bare BOSH_CMD=... line is not inherited by the script -> plain bosh, no director
 $BOSH_CMD configs --type cloud            # OCFP keeps the cloud config under a NAME (e.g. ocfp-int-sbx-us-east-1.cf); "default" is "--- {}"
 #   the NETWORK name is inside it and differs from the config name (e.g. ocfp-int-sbx-us-east-1-ocf)
 bash migrate/free-ips.sh --network ocfp-int-sbx-us-east-1-ocf --cloud-config ocfp-int-sbx-us-east-1.cf --plan runs/sbx/waves.tsv --out runs/sbx/free-ips.txt
