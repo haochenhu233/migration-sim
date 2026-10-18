@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# cf-cli-fake: a stateful fake of the cf CLI subcommands scripts/populate.sh uses (target, apps, services,
+# service, create-service, delete-service, push -f, stop, delete). State: $CFCLI_STATE dir.
+# Output shapes follow cf CLI v8: `cf services` columns are
+#   name offering plan "bound apps" "last operation" broker "upgrade available"  (3 preamble lines).
+#   CFCLI_FAIL_CREATE=<name>   that service lands in 'create failed'
+#   CFCLI_FAIL_PUSH=<app>      pushing that app fails (the rest of its manifest chunk is not pushed, like cf)
+#   CFCLI_SLOW=<name>          that service needs 2 polls before 'create succeeded'
+#   CFCLI_LISTFAIL=1           `cf apps` / `cf services` fail (expired token)
+# A push whose manifest binds to a service that is not 'create succeeded' fails, like cf.
+# Unverified live: `cf create-service` on an existing name (modelled as exit 0 "already exists") -- the
+# script never calls it on an existing name, so no decision depends on it.
+S="${CFCLI_STATE:-/tmp/cfcli-fake}"; mkdir -p "$S/svc" "$S/app"
+# a service file holds: offering state polls ; state creating->succeeded when polls reach 0
+svc_state(){ read -r off st polls < "$S/svc/$1"; if [ "$st" = creating ] && [ "${polls:-0}" -le 0 ]; then st=succeeded; fi; echo "$off $st ${polls:-0}"; }
+case "$1" in
+  target) printf 'API endpoint:   https://api.fake\nAPI version:    3.150.0\nuser:           admin\norg:            lab\nspace:          %s\n' "${CFCLI_SPACE:-scale}";;
+  apps) [ -z "${CFCLI_LISTFAIL:-}" ] || { echo "The token expired, was revoked, or the token ID is incorrect. Please log back in to re-authenticate."; exit 1; }
+    printf 'Getting apps in org lab / space scale as admin...\n\nname  requested state  processes  routes\n'; for f in "$S"/app/*; do [ -e "$f" ] && [ "${f%.svc}" = "$f" ] || continue; printf '%s  %s  web:1/1  %s.apps.fake\n' "$(basename "$f")" "$(cat "$f")" "$(basename "$f")"; done;;
+  services) [ -z "${CFCLI_LISTFAIL:-}" ] || { echo "The token expired, was revoked, or the token ID is incorrect. Please log back in to re-authenticate."; exit 1; }
+    printf 'Getting services in org lab / space scale as admin...\n\nname  offering  plan  bound apps  last operation  broker  upgrade available\n'
+    for f in "$S"/svc/*; do [ -e "$f" ] || continue; n=$(basename "$f"); set -- $(svc_state "$n")
+      bound=$(grep -l "^$n\$" "$S"/app/*.svc 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.svc$//' | paste -sd, - )
+      printf '%s  %s  cache-small  %s  create %s  blacksmith  no\n' "$n" "$1" "${bound:-}" "$2"; done;;
+  service) n="$2"; [ -f "$S/svc/$n" ] || { echo "Service instance '$n' not found"; exit 1; }
+    set -- $(svc_state "$n"); off=$1; st=$2; polls=$3
+    if [ "$st" = creating ]; then echo "$off creating $((polls-1))" > "$S/svc/$n"; st="in progress"; elif [ "$st" = succeeded ]; then echo "$off succeeded 0" > "$S/svc/$n"; fi
+    printf 'Showing info of service %s in org lab / space scale as admin...\n\nname:            %s\n\nShowing status of last operation:\n   status:    create %s\n   message:   %s\n' "$n" "$n" "$st" "$([ "$st" = failed ] && echo 'Failed to reserve IP: no more available' || echo 'Instance provisioning completed')";;
+  create-service) off="$2"; n="$4"; [ ! -f "$S/svc/$n" ] || { echo "Service instance $n already exists"; echo OK; exit 0; }
+    if [ "${CFCLI_FAIL_CREATE:-}" = "$n" ]; then echo "$off failed 0" > "$S/svc/$n"; elif [ "${CFCLI_SLOW:-}" = "$n" ]; then echo "$off creating 2" > "$S/svc/$n"; else echo "$off creating 0" > "$S/svc/$n"; fi; echo OK;;
+  delete-service) n="$2"; rm -f "$S/svc/$n"; echo OK;;
+  push) f="$3"; [ -n "${CF_HOME:-}" ] && [ -d "$CF_HOME" ] || { echo "cf-cli-fake: push without a CF_HOME dir" >&2; exit 1; }
+    awk '/^- name:/ {n=$3} /^  services:/ {gsub(/[\[\],]/,""); $1=""; print n, $0}' "$f" | while read -r a svcs; do
+      if [ "${CFCLI_FAIL_PUSH:-}" = "$a" ]; then echo "staging $a FAILED"; exit 1; fi
+      for s in $svcs; do [ -f "$S/svc/$s" ] && [ "$(svc_state "$s" | awk '{print $2}')" = succeeded ] || { echo "Binding $a to $s FAILED: service instance not ready"; exit 1; }; done
+      echo started > "$S/app/$a"; printf '%s\n' $svcs > "$S/app/$a.svc"; echo "pushed $a"; done;;
+  stop) echo stopped > "$S/app/$2";;
+  delete) rm -f "$S/app/$2" "$S/app/$2.svc"; echo OK;;
+  *) echo "cf-cli-fake: unsupported: $*" >&2; exit 1;;
+esac

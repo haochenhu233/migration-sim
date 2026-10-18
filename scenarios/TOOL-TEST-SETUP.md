@@ -129,6 +129,24 @@ bash migrate/free-ips.sh --network ocfp-int-sbx-us-east-1-ocf --cloud-config ocf
 #  local YAML runs plain `bosh` (BOSH_INT to override).
 ```
 
+## Scale population (SBX with the extra subnets, or our lab) — `scripts/populate.sh`
+
+```bash
+cf target -o <org> -s <space>
+bash scripts/populate.sh --services 16 --apps 100 --run runs/sbx --space <space> [--parallel 8] [--prefix scl]
+#  layout -> runs/sbx/layout-scl.tsv (round-robin; every 10th app multi-bound; every app of the LAST service
+#  stopped = one truly silent service). Services --parallel at a time: ready only on 'create succeeded',
+#  'in progress' waited, 'failed' stops the run (delete it by hand; re-run skips the ready ones).
+#  Apps pushed in chunks of --parallel, concurrently, one CF_HOME copy per chunk. Re-run completes a half-pushed chunk.
+#  --space is compared with `cf target`; a failing cf listing stops the run (never "nothing there").
+# then the plan from the scan, scoped to this population:
+#  ... plan <merged.csv> --services '^scl-redis-' ; migrate/free-ips.sh ; preflight
+bash scripts/populate.sh --run runs/sbx --space <space> --teardown    # scl-app-NNN apps, scl-redis-NN[-redis-standby] services (Redis + Valkey)
+```
+Before 16 pairs in SBX: `params.valkey_plans.standalone.limit` / `redis_plans` limit (kit default 7),
+cell memory (100 x 64M), and the three idle subnets added to the `-ocf` network (one per AZ).
+Offline: `scripts/test/cf-cli-fake` (knobs in its header) -- `PATH=<dir with cf -> cf-cli-fake>:$PATH CFCLI_STATE=... CF_HOME=<dir>`.
+
 ## Then the rest of the lifecycle — rollback (scenario 11), confirm, retire (scenario 12)
 
 ```bash
