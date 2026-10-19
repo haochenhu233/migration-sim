@@ -287,9 +287,10 @@ Rule: **the tool writes that copy itself** after every rename (`rename-standby` 
 - the reconciler preserves an existing name but a set landing mid-cycle can be overwritten ⇒
   `name-sync --wave N` re-checks after one cycle. Long-term fix (backlog): implement
   `Broker.Update` + `allow_context_updates` in Blacksmith, then this step disappears.
-- Verified live, once, before the rehearsal: what `SAFE_RUN` reaches the broker's Vault
-  non-interactively, and the output shape of `bosh ssh -c` (the tool strips a `…: stdout | `
-  prefix and looks for the exact value on a line).
+- Verified live in SBX (2026-10-18): `safe-run.sh "safe get secret/<guid>:instance_name"` returns
+  `blacksmith/<uuid>: stdout | <name>` (plus `stderr |` banner lines), i.e. `sudo` works under
+  `bosh ssh -c`, the broker's Vault answers on `http://127.0.0.1:8200`, and the output shape is
+  the one the tool parses (prefix stripped, exact value on a line).
 
 ## 6a. Ordering policy
 
