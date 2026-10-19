@@ -53,15 +53,22 @@ Expected: the standalone Valkey plan is listed in org B. If not, preflight will 
 
 ```bash
 cf target -o "$POP_ORG_A" -s "$POP_SPACE_A"
-time bash scripts/populate.sh --services 10 --apps 60 --run runs/sbx --org "$POP_ORG_A" --space "$POP_SPACE_A" --prefix scla --parallel 8
+time bash scripts/populate.sh --services 10 --apps 60 --run runs/sbx --org "$POP_ORG_A" --space "$POP_SPACE_A" --prefix scla --parallel 3
 
 cf target -o "$POP_ORG_B" -s "$POP_SPACE_B"
-time bash scripts/populate.sh --services 10 --apps 60 --run runs/sbx --org "$POP_ORG_B" --space "$POP_SPACE_B" --prefix sclb --parallel 8
+time bash scripts/populate.sh --services 10 --apps 60 --run runs/sbx --org "$POP_ORG_B" --space "$POP_SPACE_B" --prefix sclb --parallel 3
 ```
 
-Expected per run: `services: ready 10, existed 0, failed 0`, `apps 60 of 60`, `stopped: 6` (every app
-of the last service = the silent service). A failed service stops the run: delete it as the message
-says, re-run — ready services and existing apps are skipped.
+`--parallel 3`, not 8: every concurrent push stages in a ~1 GB task on a Diego cell, and SBX's
+cells are nearly full once ~120 sim apps run — at 8-wide, pushes fail with
+`InsufficientResources` at "Staging app" (seen 2026-10-19). Both orgs must be fresh orgs with the
+default quota (the old sim org's quota was hit); one prefix per org, never the same prefix twice
+(routes are foundation-wide: a second `sclb` population collides with the first).
+
+Expected per run: `services: ready 10, existed 0, failed 0`, `failed chunks: 0`, `apps 60 of 60`,
+`stopped: 6` (every app of the last service = the silent service). A failed service stops the run:
+delete it as the message says, re-run — ready services and staged apps are skipped, an app record
+left by a failed push (no droplet) is deleted and pushed again.
 
 Paste back: the two `== done in …` lines and the `services:` line with its time.
 

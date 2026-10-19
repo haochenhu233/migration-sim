@@ -14,7 +14,9 @@
 #   is 'create succeeded' -- 'in progress' is waited on, 'failed' stops the run: delete it by hand) ->
 #   manifests in chunks of --parallel apps, pushed concurrently, each push with its OWN copy of CF_HOME
 #   (concurrent token refreshes on one config.json race, DESIGN.md) -> stop the silent service's apps.
-#   Idempotent: ready services and existing apps are skipped; a half-pushed chunk is completed on re-run.
+#   Idempotent: ready services and apps WITH A STAGED DROPLET are skipped; an app record left by a failed push
+#   (no droplet) is deleted and pushed again; a half-pushed chunk is completed on re-run.
+#   Staging needs ~1 GB of free Diego cell memory per concurrent push: on full cells (SBX) use --parallel 3.
 # --teardown deletes every <prefix>-app-NNN app and every <prefix>-redis-NN[-redis-standby] service
 #   (Redis AND the Valkey that took the name), waits, reports what is left.
 # Scope: strict name patterns, never 'sim-' (reset-population.sh's scope). --org and --space are REQUIRED
@@ -47,6 +49,14 @@ torg=$(sed -n 's/^org: *//p' "$LOGD/target.txt" | tr -d '[:space:]'); tspace=$(s
 # ---- listings into files, exit status checked (a failing listing is an error, never "nothing there")
 list_apps(){ cf apps > "$LOGD/cf-apps.txt" 2>&1 || die "cf apps failed: $(tail -1 "$LOGD/cf-apps.txt")"
   awk -v re="$APP_RE" 'NR>3 && $1 ~ re {print $1}' "$LOGD/cf-apps.txt" > "$1"; }
+# app_staged <name> -> 0 when the app has a STAGED current droplet (a failed push leaves the record without one:
+#   "existence != readiness"; SBX 2026-10-19: InsufficientResources at staging left 48 empty apps that a re-run skipped).
+#   CF-ResourceNotFound (10010) = no droplet; any other API error stops the run.
+app_staged(){ local g j; g=$(cf app "$1" --guid 2>/dev/null) || die "cf app $1 --guid failed"
+  j=$(cf curl "/v3/apps/$g/droplets/current" 2>/dev/null); printf '%s' "$j" | jq -e 'type=="object"' > /dev/null 2>&1 || die "cf curl droplets/current for $1: no JSON ($(printf '%s' "$j" | head -c 80))"
+  if printf '%s' "$j" | jq -e 'has("errors")' > /dev/null 2>&1; then
+    printf '%s' "$j" | jq -e '.errors[0].code==10010' > /dev/null 2>&1 && return 1 || die "cf curl droplets/current for $1: $(printf '%s' "$j" | jq -r '.errors[0].detail')"; fi
+  printf '%s' "$j" | jq -e '.state=="STAGED"' > /dev/null 2>&1; }
 list_svcs(){ cf services > "$LOGD/cf-services.txt" 2>&1 || die "cf services failed: $(tail -1 "$LOGD/cf-services.txt")"
   awk -v re="$SVC_RE" 'NR>3 && $1 ~ re {print $1 "\t" $2}' "$LOGD/cf-services.txt" > "$1"; }   # name, offering (the only columns decided on)
 # ---- last operation of one service: "succeeded" | "in progress" | "failed" | "" (not found) ; message on failure
@@ -113,6 +123,12 @@ done
 # ---- 3. apps: manifests in chunks, pushed concurrently, one CF_HOME copy per chunk
 echo "== apps: $M in chunks of $PAR, $PAR pushes in parallel, $MEM each"
 list_apps "$LOGD/apps-before.txt"
+# present apps count only with a staged droplet; the others (failed pushes) are deleted and pushed again
+nodrop=0
+for a in $(cat "$LOGD/apps-before.txt"); do grep -qx "$a" <(awk -F'\t' 'NR>1 {print $1}' "$LAYOUT") || continue
+  app_staged "$a" && continue
+  nodrop=$((nodrop+1)); cf delete "$a" -f -r > /dev/null 2>&1 || die "cannot delete $a (present without a staged droplet)"; done
+[ "$nodrop" = 0 ] || { echo "   present without a staged droplet (failed earlier push): $nodrop -- deleted, pushed again"; list_apps "$LOGD/apps-before.txt"; }
 if ls "$LOGD"/chunk-*.log > /dev/null 2>&1; then mkdir -p "$LOGD/prev-$T0" && mv "$LOGD"/chunk-* "$LOGD/push-results.txt" "$LOGD/prev-$T0/" 2>/dev/null; fi
 rm -f "$LOGD/chunks.txt"
 awk -F'\t' -v before="$LOGD/apps-before.txt" -v par="$PAR" -v out="$LOGD" -v mem="$MEM" -v appdir="$APPDIR" '
