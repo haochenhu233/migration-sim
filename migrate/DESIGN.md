@@ -264,10 +264,14 @@ primer/broker-and-forges.md`). Its UI and listings read the per-instance copy at
 Rule: **the tool writes that copy itself** after every rename (`rename-standby` ⇒
 `secret/<redis>` = `<name>-redis-standby`; `rename-valkey` ⇒ `secret/<valkey>` = `<name>`):
 - through `SAFE_RUN` from `runs/<env>/vault.conf` — any command that takes the safe command as
-  its one argument; the shipped `migrate/example/safe-run.sh` does `genesis @env:blacksmith bosh
-  ssh blacksmith/0 -c "export PATH=…/safe/bin VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=$(sudo
-  … creds); <cmd>"` because `safe` on the VM is neither on PATH nor targeted and reads address and
-  token from the environment (`safe/main.go:66,94`) — bounded (`SAFE_TIMEOUT`, default 180 s) and Ctrl-C-shielded like
+  its one argument; the shipped `migrate/example/safe-run.sh` takes the director connection from
+  `genesis @env:blacksmith bosh --connect` (eval'ed inside the script's own process only) and
+  calls `bosh -d <blacksmith deployment> ssh blacksmith/0 -c "export PATH=…/safe/bin
+  VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=$(sudo … creds); <cmd>"` directly, because `safe`
+  on the VM is neither on PATH nor targeted and reads address and token from the environment
+  (`safe/main.go:66,94`), and because the command cannot pass through `genesis … bosh ssh`:
+  genesis before 2026-07-22 re-parses the bosh command inside single quotes, and every version
+  rewrites `$NAME`/`$(` in arguments (`lib/Genesis.pm:677`) — bounded (`SAFE_TIMEOUT`, default 180 s) and Ctrl-C-shielded like
   the CF calls: **known-object check first** — `safe get` must return the name Blacksmith stored
   at provision (`<name>` for the Redis, `<name>-valkey-staged` for a staged Valkey) or already the
   new name; anything else means the wrong Vault is behind `SAFE_RUN` (or not this broker's
