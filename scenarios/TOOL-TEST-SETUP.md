@@ -170,10 +170,12 @@ Offline: `scripts/test/cf-cli-fake` (knobs in its header) -- `PATH=<dir with cf 
 
 ```bash
 # 0 -- once per run dir: how the tool reaches Blacksmith's OWN Vault (secret/<guid>, on the broker VM).
-#      First live check, before anything else -- the read-back must print the current name:
-export SAFE_RUN="genesis @sbx-us:blacksmith bosh ssh blacksmith/0 -c"
-$SAFE_RUN "safe get secret/<a sim redis guid>:instance_name"
-printf 'SAFE_RUN="%s"\n' "$SAFE_RUN" > runs/sbx/vault.conf        # no file = name-sync 'skipped', commands queued
+#      `safe` is not on the VM's PATH and not targeted: the wrapper exports PATH, VAULT_ADDR and the root
+#      token (safe reads both from the environment -- no `safe target`/`safe auth`), then runs the command.
+cp migrate/example/safe-run.sh runs/sbx/safe-run.sh                   # BLACKSMITH_ENV=<env> if not sbx-us
+printf 'SAFE_RUN="bash runs/sbx/safe-run.sh"\n' > runs/sbx/vault.conf   # no file = name-sync 'skipped', commands queued
+#      First live check, before anything else -- a line with the current name must come back:
+bash runs/sbx/safe-run.sh "safe get secret/<a sim redis guid>:instance_name"
 
 # 1 -- 2-3 days ahead: the Valkeys, under the staged name <name>-valkey-staged (Redis and apps untouched)
 bash migrate/free-ips.sh --cloud-config ocfp-int-sbx-us-east-1.cf --network ocfp-int-sbx-us-east-1-ocf --plan runs/sbx/waves.tsv --out runs/sbx/free-ips.txt
