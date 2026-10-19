@@ -30,7 +30,7 @@ case "$1" in
   create-service) off="$2"; n="$4"; [ ! -f "$S/svc/$n" ] || { echo "Service instance $n already exists"; echo OK; exit 0; }
     if [ "${CFCLI_FAIL_CREATE:-}" = "$n" ]; then echo "$off failed 0" > "$S/svc/$n"; elif [ "${CFCLI_SLOW:-}" = "$n" ]; then echo "$off creating 2" > "$S/svc/$n"; else echo "$off creating 0" > "$S/svc/$n"; fi; echo OK;;
   delete-service) n="$2"; rm -f "$S/svc/$n"; echo OK;;
-  push) f="$3"; [ -n "${CF_HOME:-}" ] && [ -d "$CF_HOME" ] || { echo "cf-cli-fake: push without a CF_HOME dir" >&2; exit 1; }
+  push) f="$3"; [ -s "${CF_HOME:-$HOME}/.cf/config.json" ] || { echo "No API endpoint set. Use 'cf login' or 'cf api' to target an endpoint."; echo FAILED; exit 1; }   # like cf: config at $CF_HOME/.cf/config.json
     awk '/^- name:/ {n=$3} /^  services:/ {gsub(/[\[\],]/,""); $1=""; print n, $0}' "$f" | while read -r a svcs; do
       if [ "${CFCLI_FAIL_PUSH:-}" = "$a" ]; then echo "staging $a FAILED"; exit 1; fi
       for s in $svcs; do [ -f "$S/svc/$s" ] && [ "$(svc_state "$s" | awk '{print $2}')" = succeeded ] || { echo "Binding $a to $s FAILED: service instance not ready"; exit 1; }; done

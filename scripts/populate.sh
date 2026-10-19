@@ -127,10 +127,13 @@ awk -F'\t' -v before="$LOGD/apps-before.txt" -v par="$PAR" -v out="$LOGD" -v mem
 todo=$(cat "$LOGD/apps-todo.txt"); echo "   to push: $todo (already present: $(wc -l < "$LOGD/apps-before.txt" | tr -d ' '))"
 if [ "$todo" -gt 0 ]; then
   # one `cf push -f chunk` per line, -P parallel, each in its own CF_HOME copy; -n1 + "$1" (BSD xargs -I is limited to 255 bytes)
-  CFH="${CF_HOME:-$HOME/.cf}"; [ -d "$CFH" ] || die "CF_HOME $CFH not found"
+  # cf reads $CF_HOME/.cf/config.json -- CF_HOME is the PARENT of .cf (cf CLI util/configv3). So the login
+  # lives in ${CF_HOME:-$HOME}/.cf and each chunk gets a copy at <chunk>.cfhome/.cf. (2026-10-18: copying
+  # .cf to <chunk>.cfhome itself gave "No API endpoint set" on every push.)
+  CFH="${CF_HOME:-$HOME}/.cf"; [ -s "$CFH/config.json" ] || die "no cf login found at $CFH/config.json (CF_HOME is the parent of .cf)"
   export CFH
   # the chunk's log always exists: a failing CF_HOME copy lands in it too (not only on the terminal)
-  xargs -P "$PAR" -n1 sh -c 'd="$1.cfhome"; rm -rf "$d"; { cp -R "$CFH" "$d" && CF_HOME="$d" cf push -f "$1"; } > "$1.log" 2>&1; echo "$? $1"; rm -rf "$d"' _ < "$LOGD/chunks.txt" > "$LOGD/push-results.txt"
+  xargs -P "$PAR" -n1 sh -c 'd="$1.cfhome"; rm -rf "$d"; { mkdir -p "$d" && cp -R "$CFH" "$d/.cf" && CF_HOME="$d" cf push -f "$1"; } > "$1.log" 2>&1; echo "$? $1"; rm -rf "$d"' _ < "$LOGD/chunks.txt" > "$LOGD/push-results.txt"
   bad=$(awk '$1!=0' "$LOGD/push-results.txt" | wc -l | tr -d ' ')
   echo "   push chunks: $(wc -l < "$LOGD/chunks.txt" | tr -d ' '), failed chunks: $bad ($(elapsed))"
 fi

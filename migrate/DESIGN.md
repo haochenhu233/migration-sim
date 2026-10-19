@@ -92,7 +92,9 @@ Consequences:
   the wrong space because there is no "current space".
 - **Per-worker `CF_HOME`** anyway: `cf curl` refreshes the access token by rewriting
   `config.json`, and concurrent rewrites race. `apply` copies the logged-in config into
-  `runs/<env>/cf-home/wave-N/` and runs with that `CF_HOME`. If the client's UAA rotates refresh
+  `runs/<env>/cf-home/wave-N/.cf/` and runs with `CF_HOME=runs/<env>/cf-home/wave-N` — `CF_HOME`
+  is the **parent** of `.cf` (cf reads `$CF_HOME/.cf/config.json`); copying `.cf` to the
+  `CF_HOME` directory itself gives "No API endpoint set" (populate.sh, 2026-10-18). If the client's UAA rotates refresh
   tokens (`jwt.refresh.rotate=true`) the copies would invalidate each other — preflight tests
   this once (refresh a copy, check the original still works) and, if so, each wave worker logs in
   itself instead of copying.
