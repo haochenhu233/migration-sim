@@ -22,7 +22,7 @@ cd ~/ocfp/migration-sim && git pull
 export POP_ORG_A=<existing sim org>      POP_SPACE_A=<existing sim space>
 export POP_ORG_B=<new org>               POP_SPACE_B=<new space>
 export BOSH_CMD="genesis @sbx-us b"
-export MIGRATE_OP="$USER"
+# optional: MIGRATE_OP=<name> if the ledger's "op" field should not be your login (shared accounts)
 
 # name-sync: the tool writes Blacksmith's copy of each renamed instance's name through this wrapper
 cp -n migrate/example/safe-run.sh runs/sbx/safe-run.sh
