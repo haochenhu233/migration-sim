@@ -11,6 +11,9 @@
 #   CFFAKE_CREATE_POLLS=N              job polls before a create completes (default 2)
 #   CFFAKE_BIND_FAIL=<app guid>        binding create for that app FAILS (job)
 #   CFFAKE_SHARED=<svc guid>           that instance is shared into one other space (relationships/shared_spaces)
+#   CFFAKE_NO_INCLUDED=1               GET /v3/service_plans/<g>?include=service_offering answers without `included`
+#   CFFAKE_FINISH_JOBS=1               "time passed": every pending job completes before this call (a job of a killed
+#                                      run is never polled again, but the real broker finishes the create anyway)
 #   CFFAKE_WRONG=<si name>:space|plan  GET of that instance reports another space (sp-other) or another plan
 #                                      (plan-valkey-other) -- what provision-check must catch
 # With SAFEFAKE_STATE set, seed and every create also write <dir>/<guid> = the instance name -- what the
@@ -43,6 +46,11 @@ if args and args[0]=='seed':
     save(st); print('seeded', len(st['si']), 'services', len(st['apps']), 'apps', len(st['bind']), 'bindings'); sys.exit()
 if not args or args[0]!='curl': print('fake: only curl', file=sys.stderr); sys.exit(1)
 st=load() or sys.exit('fake: not seeded')
+if os.environ.get('CFFAKE_FINISH_JOBS'):
+    for jg,j in st['jobs'].items():
+        if j['n']<j['polls'] and not j['fail']:
+            j['n']=j['polls']
+            if j['kind'].startswith('create:') and j['kind'][7:] in st['si']: st['si'][j['kind'][7:]]['last_op']={'type':'create','state':'succeeded'}
 path=None; method='GET'; body=''; inc=False; i=1
 while i<len(args):
     a=args[i]
@@ -88,7 +96,7 @@ elif p.startswith('/v3/service_plans/'):
     if not v: err(404,'CF-ResourceNotFound','Service plan not found')
     else:
         out={'guid':g,'name':v['name'],'relationships':{'service_offering':{'data':{'guid':'off-'+v['offering']}}}}
-        if 'service_offering' in q.get('include',[''])[0].split(','): out['included']={'service_offerings':[{'guid':'off-'+v['offering'],'name':v['offering']}]}
+        if 'service_offering' in q.get('include',[''])[0].split(',') and not os.environ.get('CFFAKE_NO_INCLUDED'): out['included']={'service_offerings':[{'guid':'off-'+v['offering'],'name':v['offering']}]}
 elif p.startswith('/v3/spaces/'):
     g=p.split('/')[3]; v=SPACES.get(g)
     if not v: err(404,'CF-ResourceNotFound','Space not found')

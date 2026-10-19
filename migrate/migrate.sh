@@ -805,17 +805,18 @@ cmd_provcheck(){
   printf 'wave\tservice\tredis_guid\tvalkey_guid\torg\tspace\tredis_plan\tvalkey_plan\tvalkey_offering\tvalkey_last_op\tresult\tdetail\n' > "$out"
   declare -A PLN PLO SPN SPO ORN
   # plan_info <guid> -> PLN[g]=name PLO[g]=offering name (GET /v3/service_plans/<g>?include=service_offering); "" on error
-  plan_info(){ [ -n "${PLN[$1]:-}" ] && return 0; local j; j=$(cfcurl "/v3/service_plans/$1?include=service_offering")
+  plan_info(){ [ -n "${1:-}" ] || return 1; [ -n "${PLN[$1]:-}" ] && return 0; local j; j=$(cfcurl "/v3/service_plans/$1?include=service_offering")
     cf_json_ok "$j" || return 1
     PLN[$1]=$(printf '%s' "$j" | jq -r '.name // empty'); PLO[$1]=$(printf '%s' "$j" | jq -r '.included.service_offerings[0].name // empty')
     [ -n "${PLN[$1]}" ] && [ -n "${PLO[$1]}" ] || { PLN[$1]=""; return 1; }; }
   # space_info <guid> -> SPN[g]=space name SPO[g]=org guid ORN[org guid]=org name; "" on error
-  space_info(){ [ -n "${SPN[$1]:-}" ] && return 0; local j; j=$(cfcurl "/v3/spaces/$1"); cf_json_ok "$j" || return 1
-    SPN[$1]=$(printf '%s' "$j" | jq -r '.name // empty'); SPO[$1]=$(printf '%s' "$j" | jq -r '.relationships.organization.data.guid // empty')
-    [ -n "${SPN[$1]}" ] && [ -n "${SPO[$1]}" ] || { SPN[$1]=""; return 1; }
-    local o="${SPO[$1]}"; if [ -z "${ORN[$o]:-}" ]; then j=$(cfcurl "/v3/organizations/$o"); cf_json_ok "$j" || return 1
-      ORN[$o]=$(printf '%s' "$j" | jq -r '.name // empty'); [ -n "${ORN[$o]}" ] || return 1; fi; }
-  local w sg name sorg ssp plan flags nsvc=0 nok=0 nmiss=0 nmis=0 nerr=0
+  space_info(){ [ -n "${1:-}" ] || return 1; [ -n "${SPN[$1]:-}" ] && return 0; local j; j=$(cfcurl "/v3/spaces/$1"); cf_json_ok "$j" || return 1
+    local sn so; sn=$(printf '%s' "$j" | jq -r '.name // empty'); so=$(printf '%s' "$j" | jq -r '.relationships.organization.data.guid // empty')
+    [ -n "$sn" ] && [ -n "$so" ] || return 1
+    if [ -z "${ORN[$so]:-}" ]; then j=$(cfcurl "/v3/organizations/$so"); cf_json_ok "$j" || return 1
+      local on; on=$(printf '%s' "$j" | jq -r '.name // empty'); [ -n "$on" ] || return 1; ORN[$so]="$on"; fi
+    SPN[$1]="$sn"; SPO[$1]="$so"; }   # the cache entry is written only once space AND org are known (a failed org GET must not poison it)
+  local w sg name sorg ssp plan flags nsvc=0 nok=0 nmiss=0 nmis=0 nerr=0 nstg=0 ncut=0
   for w in $list; do
     while IFS=$'\t' read -r sg name sorg ssp plan flags; do [ -n "$sg" ] || continue
       nsvc=$((nsvc+1)); local res detail="" vk="" vn="-" vpn="-" vpo="-" vlo="-" rpn="-" on="-" spn="-" j vj
@@ -829,6 +830,10 @@ cmd_provcheck(){
           rpn="${PLN[$rpl]}"; spn="${SPN[$rsp]}"; on="${ORN[${SPO[$rsp]}]}"
           [ -z "$(ledger_done "$sg" "" create-valkey)" ] || vk=$(svc_note_guid "$sg")
           if [ -z "$vk" ]; then res=MISSING; detail="no valkey in the ledger (not provisioned, or its create failed)"
+            local lj; if lj=$(cflist "/v3/service_instances?names=$(staged_name "$name")&space_guids=$rsp"); then
+              local og ost; og=$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty'); ost=$(printf '%s' "$lj" | jq -r '.resources[0] | "\(.last_operation.type) \(.last_operation.state)"' 2>/dev/null)
+              [ -z "$og" ] || detail="an instance the ledger does not know carries '$(staged_name "$name")' ($og, $ost) -- provision adopts it once its create succeeded, deletes it if it failed, refuses while in progress (wait, then provision again)"
+            else res=API-ERROR; detail="no valkey in the ledger, and listing the staged name in the space failed (API error)"; fi
           else
             vj=$(cfcurl "/v3/service_instances/$vk")
             if ! cf_json_ok "$vj"; then
@@ -853,13 +858,13 @@ cmd_provcheck(){
           fi
         fi
       fi
-      case "$res" in OK) nok=$((nok+1));; MISSING) nmiss=$((nmiss+1));; MISMATCH) nmis=$((nmis+1));; *) nerr=$((nerr+1));; esac
+      case "$res" in OK) nok=$((nok+1)); if [ "$vn" = "$name" ]; then ncut=$((ncut+1)); else nstg=$((nstg+1)); fi;; MISSING) nmiss=$((nmiss+1));; MISMATCH) nmis=$((nmis+1));; *) nerr=$((nerr+1));; esac
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$sg" "${vk:--}" "$on" "$spn" "$rpn" "$vpn" "$vpo" "$vlo" "$res" "$detail" >> "$out"
       printf '%-8s wave %-3s %-40s %s\n' "$res" "$w" "$name" "$detail"
     done < <(wave_rows "$w" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
   done
   echo "written: $out"
-  if [ "$nsvc" -gt 0 ] && [ "$nok" = "$nsvc" ]; then echo "PROVISION-CHECK: OK ($nok of $nsvc staged, 0 missing, 0 mismatched, 0 api-errors)"
+  if [ "$nsvc" -gt 0 ] && [ "$nok" = "$nsvc" ]; then echo "PROVISION-CHECK: OK ($nok of $nsvc ok: $nstg staged, $ncut cut-over; 0 missing, 0 mismatched, 0 api-errors)"
   else echo "PROVISION-CHECK: FAIL ($nok of $nsvc ok, $nmiss missing, $nmis mismatched, $nerr api-errors)"; exit 1; fi
 }
 # name-sync --wave N | --waves A-B: for every rename the ledger holds (Redis -> standby, staged Valkey -> name)

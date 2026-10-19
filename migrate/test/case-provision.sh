@@ -103,13 +103,24 @@ check "H3 svc_note_guid picks the NEW valkey, not the deleted corpse" "[ \"$(jq 
 
 echo "== J: provision-check (read-only): same space/org, same plan name, last op; missing / mismatch / killed run"
 newrun J; bash "$M" provision --waves 1-2 --yes --run "$R" > /dev/null 2>&1
-bash "$M" provision-check --run "$R" > "$R/pc1.log" 2>&1; check "J1 all 12 OK, verdict OK, tsv: 12 lines with org/space, both plans cache-small, offering valkey" "[ $? = 0 ] && grep -q 'PROVISION-CHECK: OK (12 of 12 staged, 0 missing, 0 mismatched, 0 api-errors)' '$R/pc1.log' && [ $(awk -F'\t' 'NR>1 && $11=="OK" && $7=="cache-small" && $8=="cache-small" && $9=="valkey" && $5!="" && $6!=""' "$R/provision-check.tsv" | wc -l | tr -d ' ') = 12 ]"
+bash "$M" provision-check --run "$R" > "$R/pc1.log" 2>&1; check "J1 all 12 OK, verdict OK, tsv: 12 lines with org/space, both plans cache-small, offering valkey" "[ $? = 0 ] && grep -q 'PROVISION-CHECK: OK (12 of 12 ok: 12 staged, 0 cut-over; 0 missing, 0 mismatched, 0 api-errors)' '$R/pc1.log' && [ $(awk -F'\t' 'NR>1 && $11=="OK" && $7=="cache-small" && $8=="cache-small" && $9=="valkey" && $5!="" && $6!=""' "$R/provision-check.tsv" | wc -l | tr -d ' ') = 12 ]"
 CFFAKE_WRONG=cache-0-valkey-staged:space bash "$M" provision-check --wave 1 --run "$R" > "$R/pc2.log" 2>&1; check "J2 valkey in another space -> MISMATCH, verdict FAIL, exit 1" "[ $? = 1 ] && grep -q '^MISMATCH wave 1 *cache-0 .*space differs' '$R/pc2.log' && grep -q 'PROVISION-CHECK: FAIL (3 of 4 ok, 0 missing, 1 mismatched, 0 api-errors)' '$R/pc2.log'"
 CFFAKE_WRONG=cache-0-valkey-staged:plan bash "$M" provision-check --wave 1 --run "$R" > "$R/pc3.log" 2>&1; check "J3 valkey on another plan -> MISMATCH naming both plans" "[ $? = 1 ] && grep -q \"plan name 'cache-other' != redis plan 'cache-small'\" '$R/pc3.log'"
 check "J4 provision-check wrote nothing to the ledger" "[ $(nev create-valkey ok) = 12 ] && [ $(ledger 'select(.step=="drift")' | wc -l | tr -d ' ') = 0 ]"
 newrun J2; bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1
 bash "$M" provision-check --run "$R" > "$R/pc4.log" 2>&1; check "J5 wave 2 not provisioned -> 8 MISSING, verdict FAIL" "[ $? = 1 ] && [ $(grep -c '^MISSING  wave 2 ' "$R/pc4.log") = 8 ] && grep -q 'PROVISION-CHECK: FAIL (4 of 12 ok, 8 missing, 0 mismatched, 0 api-errors)' '$R/pc4.log'"
+CFFAKE_NO_INCLUDED=1 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc6.log" 2>&1; check "J7 plan GET without 'included' (shape not as assumed) -> 4 API-ERROR, never OK" "[ $? = 1 ] && [ $(grep -c '^API-ERROR' "$R/pc6.log") = 4 ] && grep -q 'FAIL (0 of 4 ok, 0 missing, 0 mismatched, 4 api-errors)' '$R/pc6.log'"
+python3 - "$CFFAKE_STATE" "$(ledger "select(.service==\"$G0\" and .step==\"create-valkey\" and .outcome==\"ok\") | .note" | tail -1 | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)" <<'PY'
+import json,sys; f,g=sys.argv[1:]; st=json.load(open(f)); del st['si'][g]; json.dump(st,open(f,'w'))
+PY
+bash "$M" provision-check --wave 1 --run "$R" > "$R/pc7.log" 2>&1; check "J8 valkey deleted by hand -> MISSING 'gone from CF', verdict FAIL" "[ $? = 1 ] && grep -q '^MISSING  wave 1 *cache-0 .*gone from CF' '$R/pc7.log' && grep -q 'FAIL (3 of 4 ok, 1 missing' '$R/pc7.log'"
+bash "$M" apply --wave 2 --yes --run "$R" > /dev/null 2>&1
+bash "$M" provision-check --wave 2 --run "$R" > "$R/pc8.log" 2>&1; check "J9 after apply: cut-over valkeys carry <name>, verdict counts them as cut-over" "[ $? = 0 ] && grep -q 'OK (8 of 8 ok: 0 staged, 8 cut-over;' '$R/pc8.log'"
 newrun J3; CFFAKE_CREATE_POLLS=50 JOB_POLL=1 bash "$M" provision --wave 1 --yes --run "$R" > "$R/pc5.log" 2>&1 & pid=$!; sleep 4; kill -TERM $pid; wait $pid 2>/dev/null
 check "J6 provision killed mid-wave: inventory.tsv written by the EXIT trap, counts line printed" "[ -s '$R/inventory.tsv' ] && grep -q '^inventory: 12 services -- staged ' '$R/pc5.log' && [ $(awk -F'\t' 'NR>1 && $1==1 && $11=="not-provisioned"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 4 ]"
+bash "$M" provision-check --wave 1 --run "$R" > "$R/pc9.log" 2>&1; check "J6b right after the kill: the 4 in-flight creates are reported as MISSING with the in-progress instance named (review: partial state)" "[ $? = 1 ] && [ $(grep -c "^MISSING  wave 1 .*carries '.*-valkey-staged' (.*create in progress) -- provision adopts" "$R/pc9.log") = 4 ]"
+bash "$M" provision --wave 1 --yes --run "$R" > "$R/pc10.log" 2>&1; check "J6c re-run while still in progress: 4 create-valkey fail 'not ours to touch' (refused, not adopted)" "[ $(nev create-valkey fail '(.note|test("in progress"))') = 4 ]"
+CFFAKE_FINISH_JOBS=1 bash "$M" provision --wave 1 --yes --run "$R" > "$R/pc11.log" 2>&1; bash "$M" provision-check --wave 1 --run "$R" > "$R/pc12.log" 2>&1
+check "J6d re-run once the broker finished the creates: adopted ('already existed'), provision-check OK 4 of 4" "[ $? = 0 ] && grep -q 'OK (4 of 4 ok: 4 staged' '$R/pc12.log' && [ $(nev create-valkey ok '(.note|test("adopted"))') = 4 ]"
 
 echo; [ "$fails" = 0 ] && echo "ALL PASS (workdir $W)" || { echo "$fails FAIL (workdir $W)"; exit 1; }

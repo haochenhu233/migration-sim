@@ -132,8 +132,12 @@ wave (4 at a time); note the `waiting for valkey deploy` → `valkey ready` time
 `provision-check` is the check step: same space/org as the Redis, same plan name, last operation
 succeeded — it ends with `PROVISION-CHECK: OK (20 of 20 staged, 0 missing, 0 mismatched, 0 api-errors)`.
 If provision stopped halfway (Ctrl-C, bastion logout, API error): the inventory and its counts line are
-written anyway; `provision-check` lists the `MISSING` ones; run `provision --waves 1-6` again — it fills
-exactly those.
+written anyway; `provision-check` lists the `MISSING` ones. Creates that were already issued keep running
+in Blacksmith (≈1 min each in SBX): `provision-check` names such an instance as "carries '<name>-valkey-staged'
+(…, create in progress)". **Wait until none says "in progress"**, then run `provision --waves 1-6` again —
+it adopts the finished ones (`adopted: already existed` in the ledger) and creates the rest. A re-run while
+a create is still in progress refuses that service (`create-failed` in the inventory, "not ours to touch")
+and the next re-run adopts it; nothing is created twice.
 
 Paste back: `time` of provision, the `TOTAL` line of `status`, `cut -f11 runs/sbx/inventory.tsv | sort | uniq -c`,
 and the `PROVISION-CHECK:` line.
