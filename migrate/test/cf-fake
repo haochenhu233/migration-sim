@@ -11,6 +11,8 @@
 #   CFFAKE_CREATE_POLLS=N              job polls before a create completes (default 2)
 #   CFFAKE_BIND_FAIL=<app guid>        binding create for that app FAILS (job)
 #   CFFAKE_SHARED=<svc guid>           that instance is shared into one other space (relationships/shared_spaces)
+#   CFFAKE_WRONG=<si name>:space|plan  GET of that instance reports another space (sp-other) or another plan
+#                                      (plan-valkey-other) -- what provision-check must catch
 # With SAFEFAKE_STATE set, seed and every create also write <dir>/<guid> = the instance name -- what the
 # broker stores as instance_name at provision time, read back by safe-fake (name-sync's pre-check).
 export CFFAKE_STATE="${CFFAKE_STATE:-/tmp/cffake.json}"
@@ -58,7 +60,12 @@ def job(kind, polls=1, fail=None):
 def accepted(jg): global code; code=202; hdr['Location']='https://api.fake/v3/jobs/'+jg
 def listing(res): return {'pagination':{'total_results':len(res),'next':None},'resources':res}
 def si_obj(g):
-    s=st['si'][g]; return {'guid':g,'name':s['name'],'last_operation':s['last_op'],'relationships':{'space':{'data':{'guid':s['space']}},'service_plan':{'data':{'guid':s['plan']}}}}
+    s=st['si'][g]; sp=s['space']; pl=s['plan']; w=os.environ.get('CFFAKE_WRONG','')
+    if w==s['name']+':space': sp='sp-other'
+    if w==s['name']+':plan': pl='plan-valkey-other'
+    return {'guid':g,'name':s['name'],'last_operation':s['last_op'],'relationships':{'space':{'data':{'guid':sp}},'service_plan':{'data':{'guid':pl}}}}
+SPACES=dict(st['spaces']); SPACES['sp-other']={'name':'other','org':'other-org'}
+PLANS=dict(st['plans']); PLANS['plan-valkey-other']={'name':'cache-other','offering':'valkey'}
 INST={}
 for kv in os.environ.get('CFFAKE_INSTANCES','').split(','):
     if '=' in kv: g,n=kv.split('='); INST[g]=int(n)
@@ -76,6 +83,20 @@ elif p=='/v3/jobs/'+p[9:] and p.startswith('/v3/jobs/'):
                 out={'guid':jg,'state':'COMPLETE','errors':[]}
                 if j['kind'].startswith('create:'): st['si'][j['kind'][7:]]['last_op']={'type':'create','state':'succeeded'}
         else: out={'guid':jg,'state':'PROCESSING','errors':[]}
+elif p.startswith('/v3/service_plans/'):
+    g=p.split('/')[3]; v=PLANS.get(g)
+    if not v: err(404,'CF-ResourceNotFound','Service plan not found')
+    else:
+        out={'guid':g,'name':v['name'],'relationships':{'service_offering':{'data':{'guid':'off-'+v['offering']}}}}
+        if 'service_offering' in q.get('include',[''])[0].split(','): out['included']={'service_offerings':[{'guid':'off-'+v['offering'],'name':v['offering']}]}
+elif p.startswith('/v3/spaces/'):
+    g=p.split('/')[3]; v=SPACES.get(g)
+    if not v: err(404,'CF-ResourceNotFound','Space not found')
+    else: out={'guid':g,'name':v['name'],'relationships':{'organization':{'data':{'guid':'org-'+re.sub(r'[^a-z0-9]','',v['org'])}}}}
+elif p.startswith('/v3/organizations/'):
+    g=p.split('/')[3]; names={'org-'+re.sub(r'[^a-z0-9]','',v['org']):v['org'] for v in SPACES.values()}
+    if g not in names: err(404,'CF-ResourceNotFound','Organization not found')
+    else: out={'guid':g,'name':names[g]}
 elif p=='/v3/service_plans':
     names=q.get('names',[''])[0].split(','); off=q.get('service_offering_names',[''])[0]
     out=listing([{'guid':g,'name':v['name']} for g,v in st['plans'].items() if v['name'] in names and (not off or v['offering']==off)])

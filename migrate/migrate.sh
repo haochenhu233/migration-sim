@@ -749,8 +749,9 @@ cmd_provision(){
   local list; list=$(wave_list); [ -n "$list" ] || { echo "usage: migrate.sh provision --wave N | --waves A-B [--service X] [--yes] [--run dir]"; exit 1; }
   [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
   STOP_REQ=0; trap 'STOP_REQ=1; echo; echo "!! Ctrl-C: the running step completes and is recorded, then provision stops"' INT
-  trap 'wave_unlock' EXIT
+  trap 'write_inventory; inventory_counts; wave_unlock' EXIT     # the inventory is current however provision ends
   local w; for w in $list; do WAVE="$w"; provision_wave || { echo "!! stopped at wave $w"; return 1; }; done
+  echo "next: migrate.sh provision-check --run $RUN   (reads every Redis and Valkey back from CF: same space/org, same plan, last operation)"
 }
 
 # ============================================================================ inventory + name-sync
@@ -773,13 +774,93 @@ write_inventory(){
         (if .cv.outcome=="fail" then .cv.note elif .lastev.step=="drift" then .lastev.note else "" end) ] | @tsv' > "$RUN/.svc.tsv"
   awk -F'\t' -v OFS='\t' '
     FILENAME==ARGV[1] { ren[$1]=$2; rv[$1]=$3; vk[$1]=$4; stg[$1]=$5; cf[$1]=$6; nt[$1]=$7; next }
-    FNR==1 { print "wave","app","app_guid","redis_name","redis_guid","valkey_name","valkey_guid","plan","state","note"; next }
+    FNR==1 { print "wave","app","app_guid","org","space","redis_name","redis_guid","valkey_name","valkey_guid","plan","state","note"; next }
     { s=$4; n=$3; rn=(ren[s]=="true") ? n "-redis-standby" : n
       if (vk[s]=="")                          { vn="-"; st=(cf[s]!="" ? cf[s] : "not-provisioned") }
       else if (stg[s]=="true" && rv[s]!="true") { vn=n "-valkey-staged"; st=(cf[s]=="drift" ? "drift" : "staged") }
       else                                    { vn=n; st="cut-over" }
-      print $1, $8, $9, rn, s, vn, (vk[s]=="" ? "-" : vk[s]), $7, st, nt[s] }' "$RUN/.svc.tsv" "$PLAN" > "$RUN/inventory.tsv"
+      print $1, $8, $9, $5, $6, rn, s, vn, (vk[s]=="" ? "-" : vk[s]), $7, st, nt[s] }' "$RUN/.svc.tsv" "$PLAN" > "$RUN/inventory.tsv"
   rm -f "$RUN/.svc.tsv"
+}
+# inventory_counts: one line of counts over inventory.tsv (services, not app lines; no names) -- printed when
+#   provision ends, however it ends (EXIT trap), so a killed run still leaves the file and its summary.
+inventory_counts(){ [ -s "$RUN/inventory.tsv" ] || return 0
+  awk -F'\t' 'NR>1 && !seen[$7]++ { n++; c[$11]++ } END { printf "inventory: %d services -- staged %d, cut-over %d, not-provisioned %d, create-failed %d, drift %d  (%s)\n", n, c["staged"], c["cut-over"], c["not-provisioned"], c["create-failed"], c["drift"], FILENAME }' "$RUN/inventory.tsv"; }
+
+# ============================================================================ provision-check (read-only)
+# provision-check [--wave N | --waves A-B]  (default: every wave in the plan): for every service of the plan,
+#   read the Redis AND its Valkey from CF now and compare what the client wants proven after provision:
+#     same space (GUID) and so the same org (the space's org, named for the report), same plan NAME under the
+#     valkey offering, Valkey's last operation succeeded, Valkey named <name>-valkey-staged (or <name> once
+#     renamed by apply). A service with no Valkey in the ledger, or whose Valkey is gone from CF, is MISSING.
+#   Writes $RUN/provision-check.tsv (one line per service, names inside -> stays in the env) and ends with the
+#   verdict line to paste out: PROVISION-CHECK: OK|FAIL (n of n staged, missing, mismatched, api-errors).
+#   Writes nothing to the ledger. The verdict is printed only after every service was walked (gate rule: a
+#   crash before it is a refusal, never a pass). Exit 1 on FAIL.
+cmd_provcheck(){
+  [ -s "$PLAN" ] || { echo "no $PLAN -- run: migrate.sh plan <merged_report.csv>"; exit 1; }
+  local list; list=$(wave_list); [ -n "$list" ] || list=$(awk -F'\t' 'NR>1 {print $1}' "$PLAN" | sort -un | paste -sd' ' -)
+  local info; info=$(cfcurl "/v3/info"); cf_json_ok "$info" || { echo "!! cf curl /v3/info failed -- not logged in?"; exit 1; }
+  local out="$RUN/provision-check.tsv"
+  printf 'wave\tservice\tredis_guid\tvalkey_guid\torg\tspace\tredis_plan\tvalkey_plan\tvalkey_offering\tvalkey_last_op\tresult\tdetail\n' > "$out"
+  declare -A PLN PLO SPN SPO ORN
+  # plan_info <guid> -> PLN[g]=name PLO[g]=offering name (GET /v3/service_plans/<g>?include=service_offering); "" on error
+  plan_info(){ [ -n "${PLN[$1]:-}" ] && return 0; local j; j=$(cfcurl "/v3/service_plans/$1?include=service_offering")
+    cf_json_ok "$j" || return 1
+    PLN[$1]=$(printf '%s' "$j" | jq -r '.name // empty'); PLO[$1]=$(printf '%s' "$j" | jq -r '.included.service_offerings[0].name // empty')
+    [ -n "${PLN[$1]}" ] && [ -n "${PLO[$1]}" ] || { PLN[$1]=""; return 1; }; }
+  # space_info <guid> -> SPN[g]=space name SPO[g]=org guid ORN[org guid]=org name; "" on error
+  space_info(){ [ -n "${SPN[$1]:-}" ] && return 0; local j; j=$(cfcurl "/v3/spaces/$1"); cf_json_ok "$j" || return 1
+    SPN[$1]=$(printf '%s' "$j" | jq -r '.name // empty'); SPO[$1]=$(printf '%s' "$j" | jq -r '.relationships.organization.data.guid // empty')
+    [ -n "${SPN[$1]}" ] && [ -n "${SPO[$1]}" ] || { SPN[$1]=""; return 1; }
+    local o="${SPO[$1]}"; if [ -z "${ORN[$o]:-}" ]; then j=$(cfcurl "/v3/organizations/$o"); cf_json_ok "$j" || return 1
+      ORN[$o]=$(printf '%s' "$j" | jq -r '.name // empty'); [ -n "${ORN[$o]}" ] || return 1; fi; }
+  local w sg name sorg ssp plan flags nsvc=0 nok=0 nmiss=0 nmis=0 nerr=0
+  for w in $list; do
+    while IFS=$'\t' read -r sg name sorg ssp plan flags; do [ -n "$sg" ] || continue
+      nsvc=$((nsvc+1)); local res detail="" vk="" vn="-" vpn="-" vpo="-" vlo="-" rpn="-" on="-" spn="-" j vj
+      j=$(cfcurl "/v3/service_instances/$sg")
+      if ! cf_json_ok "$j"; then res=API-ERROR; detail="GET redis: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"
+      else
+        local rsp rpl; rsp=$(printf '%s' "$j" | jq -r '.relationships.space.data.guid // empty'); rpl=$(printf '%s' "$j" | jq -r '.relationships.service_plan.data.guid // empty')
+        if ! plan_info "$rpl"; then res=API-ERROR; detail="GET redis plan $rpl failed or had no name/offering"
+        elif ! space_info "$rsp"; then res=API-ERROR; detail="GET space $rsp / its org failed"
+        else
+          rpn="${PLN[$rpl]}"; spn="${SPN[$rsp]}"; on="${ORN[${SPO[$rsp]}]}"
+          [ -z "$(ledger_done "$sg" "" create-valkey)" ] || vk=$(svc_note_guid "$sg")
+          if [ -z "$vk" ]; then res=MISSING; detail="no valkey in the ledger (not provisioned, or its create failed)"
+          else
+            vj=$(cfcurl "/v3/service_instances/$vk")
+            if ! cf_json_ok "$vj"; then
+              if printf '%s' "$vj" | jq -e '.errors[0].title=="CF-ResourceNotFound"' >/dev/null 2>&1; then res=MISSING; detail="valkey $vk (ledger) gone from CF -- provision again records the loss and creates it"
+              else res=API-ERROR; detail="GET valkey $vk: $(printf '%s' "$vj" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"; fi
+            else
+              local vsp vpl; vn=$(printf '%s' "$vj" | jq -r .name); vsp=$(printf '%s' "$vj" | jq -r '.relationships.space.data.guid // empty'); vpl=$(printf '%s' "$vj" | jq -r '.relationships.service_plan.data.guid // empty')
+              vlo=$(printf '%s' "$vj" | jq -r '"\(.last_operation.type) \(.last_operation.state)"')
+              if ! plan_info "$vpl"; then res=API-ERROR; detail="GET valkey plan $vpl failed or had no name/offering"
+              else
+                vpn="${PLN[$vpl]}"; vpo="${PLO[$vpl]}"; local exp; exp=$(staged_name "$name"); [ -n "$(svc_staged "$sg")" ] || exp="$name"
+                local mm=0
+                [ "$vsp" = "$rsp" ] || { mm=1; detail="$detail; space differs (valkey in $vsp, redis in $rsp)"; }
+                [ "$vpo" = valkey ] || { mm=1; detail="$detail; offering is '$vpo', not valkey"; }
+                [ "$vpn" = "$rpn" ] || { mm=1; detail="$detail; plan name '$vpn' != redis plan '$rpn'"; }
+                [ "$vpn" = "$plan" ] || { mm=1; detail="$detail; plan name '$vpn' != planned '$plan'"; }
+                [ "${vlo#* }" = succeeded ] || { mm=1; detail="$detail; last operation '$vlo'"; }
+                if [ "$vn" = "$exp" ]; then :; elif [ "$exp" != "$name" ] && [ "$vn" = "$name" ]; then detail="$detail; already carries '$name' (renamed, ledger line missing -- apply records it)"; else mm=1; detail="$detail; named '$vn', expected '$exp'"; fi
+                detail="${detail#; }"; if [ "$mm" = 1 ]; then res=MISMATCH; else res=OK; detail="same space/org, plan '$vpn', $vlo${detail:+; $detail}"; fi
+              fi
+            fi
+          fi
+        fi
+      fi
+      case "$res" in OK) nok=$((nok+1));; MISSING) nmiss=$((nmiss+1));; MISMATCH) nmis=$((nmis+1));; *) nerr=$((nerr+1));; esac
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$sg" "${vk:--}" "$on" "$spn" "$rpn" "$vpn" "$vpo" "$vlo" "$res" "$detail" >> "$out"
+      printf '%-8s wave %-3s %-40s %s\n' "$res" "$w" "$name" "$detail"
+    done < <(wave_rows "$w" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
+  done
+  echo "written: $out"
+  if [ "$nsvc" -gt 0 ] && [ "$nok" = "$nsvc" ]; then echo "PROVISION-CHECK: OK ($nok of $nsvc staged, 0 missing, 0 mismatched, 0 api-errors)"
+  else echo "PROVISION-CHECK: FAIL ($nok of $nsvc ok, $nmiss missing, $nmis mismatched, $nerr api-errors)"; exit 1; fi
 }
 # name-sync --wave N | --waves A-B: for every rename the ledger holds (Redis -> standby, staged Valkey -> name)
 #   read Blacksmith's copy back through SAFE_RUN and set the ones that differ. The check-after-one-
@@ -1093,10 +1174,11 @@ case "$SUB" in
   dry-run)   cmd_dryrun ;;
   preflight) cmd_preflight ;;
   status) if [ -n "$WAVE" ]; then cmd_status; else cmd_summary; write_inventory; fi ;;
+  provision-check) cmd_provcheck ;;
   name-sync) cmd_namesync ;;
   rollback)  cmd_rollback ;;
   confirm)   cmd_confirm ;;
   retire)    cmd_retire ;;
-  *) echo "usage: migrate.sh plan <report.csv> | provision --wave N|--waves A-B [--yes] | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N] | name-sync --wave N|--waves A-B"
+  *) echo "usage: migrate.sh plan <report.csv> | provision --wave N|--waves A-B [--yes] | provision-check [--waves A-B] | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N] | name-sync --wave N|--waves A-B"
      echo "       rollback --wave N --service Y [--app X] [--reason ..] | confirm --wave N --service Y --by <team> [--grace 336h] | retire --wave N --service Y [--no-census] [--force]   (all: --run <dir>)"; exit 1 ;;
 esac

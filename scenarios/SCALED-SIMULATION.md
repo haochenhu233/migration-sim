@@ -123,13 +123,20 @@ bash migrate/free-ips.sh --network ocfp-int-sbx-us-east-1-ocf --cloud-config ocf
 time bash migrate/migrate.sh provision --waves 1-6 --run runs/sbx          # adjust 6 to the last wave in plan-summary
 bash migrate/migrate.sh status --run runs/sbx
 column -ts $'\t' runs/sbx/inventory.tsv | less -S
+bash migrate/migrate.sh provision-check --run runs/sbx                     # reads every Redis + Valkey back from CF
 ```
 
 Expected: every service `STAGED` in `status --wave N`; `inventory.tsv` has 120 lines, `state=staged`,
-`valkey_name=<name>-valkey-staged`. Blacksmith creates the Valkeys concurrently per wave (4 at a
-time); note the `waiting for valkey deploy` → `valkey ready` time per service.
+`valkey_name=<name>-valkey-staged`, `org`/`space` filled. Blacksmith creates the Valkeys concurrently per
+wave (4 at a time); note the `waiting for valkey deploy` → `valkey ready` time per service.
+`provision-check` is the check step: same space/org as the Redis, same plan name, last operation
+succeeded — it ends with `PROVISION-CHECK: OK (20 of 20 staged, 0 missing, 0 mismatched, 0 api-errors)`.
+If provision stopped halfway (Ctrl-C, bastion logout, API error): the inventory and its counts line are
+written anyway; `provision-check` lists the `MISSING` ones; run `provision --waves 1-6` again — it fills
+exactly those.
 
-Paste back: `time` of provision, the `TOTAL` line of `status`, and `cut -f9 runs/sbx/inventory.tsv | sort | uniq -c`.
+Paste back: `time` of provision, the `TOTAL` line of `status`, `cut -f11 runs/sbx/inventory.tsv | sort | uniq -c`,
+and the `PROVISION-CHECK:` line.
 
 Re-running `provision` is safe at any time: done services are skipped, a staged Valkey that
 vanished is created again.

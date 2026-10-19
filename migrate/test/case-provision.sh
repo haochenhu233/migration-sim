@@ -24,7 +24,7 @@ newrun A
 bash "$M" provision --waves 1-2 --yes --run "$R" > "$R/prov1.log" 2>&1; check "A1 provision exits 0" "[ $? = 0 ]"
 check "A2 12 staged creates in the ledger" "[ $(nev create-valkey ok '(.note|test("\\(staged"))') = 12 ]"
 check "A3 fake has 12 instances named *-valkey-staged" "[ $(jq '[.si[]|select(.name|endswith("-valkey-staged"))]|length' "$CFFAKE_STATE") = 12 ]"
-check "A4 inventory: 12 lines, all staged, valkey_name = <name>-valkey-staged" "[ $(awk -F'\t' 'NR>1 && $9=="staged" && $6==$4"-valkey-staged" && $4==$6' "$R/inventory.tsv" | wc -l | tr -d ' ') = 0 ] && [ $(awk -F'\t' 'NR>1 && $9=="staged" && $6==($4 "-valkey-staged")' "$R/inventory.tsv" | wc -l | tr -d ' ') = 12 ]"
+check "A4 inventory: 12 lines, all staged, valkey_name = <name>-valkey-staged" "[ $(awk -F'\t' 'NR>1 && !($11=="staged" && $8==($6 "-valkey-staged"))' "$R/inventory.tsv" | wc -l | tr -d ' ') = 0 ] && [ $(awk -F'\t' 'NR>1 && $11=="staged" && $8==($6 "-valkey-staged") && $4!="" && $5!=""' "$R/inventory.tsv" | wc -l | tr -d ' ') = 12 ]"
 bash "$M" status --wave 1 --run "$R" > "$R/status1.log" 2>&1
 check "A5 status wave 1 shows STAGED for 4 services" "[ $(grep -c ' STAGED ' "$R/status1.log") = 4 ]"
 n1=$(grep -c . "$R/ledger.jsonl"); bash "$M" provision --waves 1-2 --yes --run "$R" > "$R/prov2.log" 2>&1
@@ -49,7 +49,7 @@ check "C2 4 rename-standby ok, 4 rename-valkey ok, 0 day-of creates in wave 1" "
 check "C3 CF names: redis cache-0 -> cache-0-redis-standby, valkey -> cache-0" "[ \"$(siname $G0)\" = cache-0-redis-standby ] && [ \"$(jq -r '.si[]|select(.name=="cache-0")|.plan' "$CFFAKE_STATE")\" = plan-valkey-cache-small ]"
 check "C4 8 name-sync ok (4 redis + 4 valkey), values read back" "[ $(nev name-sync ok) = 8 ] && [ \"$(cat "$SAFEFAKE_STATE/$G0")\" = cache-0-redis-standby ] && [ \"$(cat "$SAFEFAKE_STATE/$(jq -r '.si|to_entries[]|select(.value.name=="cache-0" and .value.plan=="plan-valkey-cache-small")|.key' "$CFFAKE_STATE")")\" = cache-0 ]"
 check "C5 4 apps verified" "[ $(nev verify ok) = 4 ]"
-check "C6 inventory: wave 1 cut-over with the real names, wave 2 still staged" "[ $(awk -F'\t' 'NR>1 && $1==1 && $9=="cut-over" && $6==$4 && $4=="cache-0"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 0 ] && [ $(awk -F'\t' 'NR>1 && $1==1 && $9=="cut-over" && $6=="cache-0" && $4=="cache-0-redis-standby"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 1 ] && [ $(awk -F'\t' 'NR>1 && $1==2 && $9=="staged"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 8 ]"
+check "C6 inventory: wave 1 cut-over with the real names, wave 2 still staged" "[ $(awk -F'\t' 'NR>1 && $1==1 && $11=="cut-over" && $8==$6 && $6=="cache-0"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 0 ] && [ $(awk -F'\t' 'NR>1 && $1==1 && $11=="cut-over" && $8=="cache-0" && $6=="cache-0-redis-standby"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 1 ] && [ $(awk -F'\t' 'NR>1 && $1==2 && $11=="staged"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 8 ]"
 bash "$M" status --wave 1 --run "$R" > "$R/status1b.log" 2>&1
 check "C7 status wave 1: 4 VERIFIED, no name-sync footer" "[ $(grep -c ' VERIFIED ' "$R/status1b.log") = 4 ] && ! grep -q 'name-sync pending' '$R/status1b.log'"
 bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply1b.log" 2>&1; check "C8 apply wave 1 again: idempotent (no new rename/create events)" "[ $? = 0 ] && [ $(nev rename-valkey ok) = 4 ] && [ $(nev rename-standby ok) = 4 ]"
@@ -69,13 +69,13 @@ check "D4 status wave 2: footer 'name-sync pending: 2' (cache-4 failed + cache-3
 bash "$M" name-sync --wave 2 --run "$R" > "$R/ns2.log" 2>&1; check "D5 name-sync --wave 2: 14 in sync, 2 set now (cache-4 redis after the failure; cache-3 redis whose ledger line was hand-added without a sync)" "[ $? = 0 ] && grep -q 'name-sync: 14 in sync, 2 set now, 0 failed; still pending: 0' '$R/ns2.log'"
 check "D6 the fixed value is in Blacksmith's (fake) vault" "[ \"$(cat "$SAFEFAKE_STATE/$G4")\" = cache-4-redis-standby ]"
 bash "$M" status --run "$R" > "$R/summary.log" 2>&1
-check "D7 summary: 12 created, 12 verified, inventory all cut-over" "grep -q '^TOTAL *12 *12 ' '$R/summary.log' && [ $(awk -F'\t' 'NR>1 && $9=="cut-over"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 12 ]"
+check "D7 summary: 12 created, 12 verified, inventory all cut-over" "grep -q '^TOTAL *12 *12 ' '$R/summary.log' && [ $(awk -F'\t' 'NR>1 && $11=="cut-over"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 12 ]"
 
 echo "== E: orphan staged valkey (fresh ledger, instances already there) -> preflight FAIL, provision adopts"
 newrun E; bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1; rm -f "$R/ledger.jsonl" "$R/inventory.tsv"
 bash "$M" preflight --wave 1 --run "$R" > "$R/pf.log" 2>&1; check "E1 preflight FAILs: staged exists but ledger has no create-valkey" "[ $? != 0 ] && [ $(grep -c 'but the ledger has no create-valkey' "$R/pf.log") = 4 ]"
 bash "$M" provision --wave 1 --yes --run "$R" > "$R/prov.log" 2>&1; check "E2 provision adopts the 4 (no new instances)" "[ $(nev create-valkey ok '(.note|test("adopted"))') = 4 ] && [ $(jq '[.si[]|select(.name|endswith("-valkey-staged"))]|length' "$CFFAKE_STATE") = 4 ]"
-bash "$M" status --wave 1 --run "$R" > "$R/status.log" 2>&1; check "E3 adopted staged valkeys show STAGED, inventory staged (review finding 1)" "[ $(grep -c ' STAGED ' "$R/status.log") = 4 ] && [ $(awk -F'\t' 'NR>1 && $9=="staged"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 4 ]"
+bash "$M" status --wave 1 --run "$R" > "$R/status.log" 2>&1; check "E3 adopted staged valkeys show STAGED, inventory staged (review finding 1)" "[ $(grep -c ' STAGED ' "$R/status.log") = 4 ] && [ $(awk -F'\t' 'NR>1 && $11=="staged"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 4 ]"
 bash "$M" preflight --wave 1 --free-ips 0 --run "$R" > "$R/pf2.log" 2>&1; check "E4 preflight: 0 IPs needed for a staged wave, passes with --free-ips 0 (review finding 2)" "[ $? = 0 ] && grep -q '0 Valkey(s) still to create (IPs needed: 0; 4 already' '$R/pf2.log'"
 bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1; check "E5 apply renames the adopted staged valkeys: 4 rename-valkey ok, CF names right, 8 name-sync ok" "[ $? = 0 ] && [ $(nev rename-valkey ok) = 4 ] && [ \"$(siname $G0)\" = cache-0-redis-standby ] && [ $(jq '[.si[]|select(.name=="cache-0")]|length' "$CFFAKE_STATE") = 1 ] && [ $(nev name-sync ok) = 8 ]"
 
@@ -86,7 +86,7 @@ check "F2 8 name-sync skipped, 8 commands in name-sync-wave-1.sh" "[ $(nev name-
 bash "$M" status --wave 1 --run "$R" > "$R/status.log" 2>&1; check "F3 status footer: name-sync pending: 8" "grep -q 'name-sync pending: 8 ' '$R/status.log'"
 bash "$M" name-sync --wave 1 --run "$R" > "$R/ns.log" 2>&1; check "F4 name-sync without vault.conf refuses with a hint" "[ $? != 0 ] && grep -q 'no SAFE_RUN' '$R/ns.log'"
 newrun G; bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1
-check "G1 day-of apply: 4 creates under the real name, no rename-valkey, inventory cut-over" "[ $(nev create-valkey ok '(.note|test("\\(staged")|not)') = 4 ] && [ $(nev rename-valkey ok) = 0 ] && [ $(awk -F'\t' 'NR>1 && $1==1 && $9=="cut-over"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 4 ] && [ $(nev verify ok) = 4 ]"
+check "G1 day-of apply: 4 creates under the real name, no rename-valkey, inventory cut-over" "[ $(nev create-valkey ok '(.note|test("\\(staged")|not)') = 4 ] && [ $(nev rename-valkey ok) = 0 ] && [ $(awk -F'\t' 'NR>1 && $1==1 && $11=="cut-over"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 4 ] && [ $(nev verify ok) = 4 ]"
 
 echo "== I: SAFE_RUN reaches the wrong Vault -> name-sync pre-check fails, nothing written (review finding 5)"
 newrun I; bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1
@@ -100,5 +100,16 @@ check "H1 1 create-valkey fail, inventory shows create-failed for cache-22" "[ $
 bash "$M" provision --wave 1 --yes --run "$R" > "$R/prov2.log" 2>&1
 check "H2 re-run: corpse deleted, new staged valkey ok, 4 staged in CF" "[ $(nev create-valkey ok '(.note|test("deleted failed leftover"))') = 1 ] && [ $(jq '[.si[]|select((.name|endswith("-valkey-staged")) and .last_op.state=="succeeded")]|length' "$CFFAKE_STATE") = 4 ]"
 check "H3 svc_note_guid picks the NEW valkey, not the deleted corpse" "[ \"$(jq -r '.si|to_entries[]|select(.value.name=="cache-22-valkey-staged")|.key' "$CFFAKE_STATE")\" = \"$(ledger 'select(.step=="create-valkey" and .outcome=="ok" and (.note|test("deleted failed leftover"))) | .note' | grep -oE '[0-9a-f-]{36}' | head -1)\" ]"
+
+echo "== J: provision-check (read-only): same space/org, same plan name, last op; missing / mismatch / killed run"
+newrun J; bash "$M" provision --waves 1-2 --yes --run "$R" > /dev/null 2>&1
+bash "$M" provision-check --run "$R" > "$R/pc1.log" 2>&1; check "J1 all 12 OK, verdict OK, tsv: 12 lines with org/space, both plans cache-small, offering valkey" "[ $? = 0 ] && grep -q 'PROVISION-CHECK: OK (12 of 12 staged, 0 missing, 0 mismatched, 0 api-errors)' '$R/pc1.log' && [ $(awk -F'\t' 'NR>1 && $11=="OK" && $7=="cache-small" && $8=="cache-small" && $9=="valkey" && $5!="" && $6!=""' "$R/provision-check.tsv" | wc -l | tr -d ' ') = 12 ]"
+CFFAKE_WRONG=cache-0-valkey-staged:space bash "$M" provision-check --wave 1 --run "$R" > "$R/pc2.log" 2>&1; check "J2 valkey in another space -> MISMATCH, verdict FAIL, exit 1" "[ $? = 1 ] && grep -q '^MISMATCH wave 1 *cache-0 .*space differs' '$R/pc2.log' && grep -q 'PROVISION-CHECK: FAIL (3 of 4 ok, 0 missing, 1 mismatched, 0 api-errors)' '$R/pc2.log'"
+CFFAKE_WRONG=cache-0-valkey-staged:plan bash "$M" provision-check --wave 1 --run "$R" > "$R/pc3.log" 2>&1; check "J3 valkey on another plan -> MISMATCH naming both plans" "[ $? = 1 ] && grep -q \"plan name 'cache-other' != redis plan 'cache-small'\" '$R/pc3.log'"
+check "J4 provision-check wrote nothing to the ledger" "[ $(nev create-valkey ok) = 12 ] && [ $(ledger 'select(.step=="drift")' | wc -l | tr -d ' ') = 0 ]"
+newrun J2; bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1
+bash "$M" provision-check --run "$R" > "$R/pc4.log" 2>&1; check "J5 wave 2 not provisioned -> 8 MISSING, verdict FAIL" "[ $? = 1 ] && [ $(grep -c '^MISSING  wave 2 ' "$R/pc4.log") = 8 ] && grep -q 'PROVISION-CHECK: FAIL (4 of 12 ok, 8 missing, 0 mismatched, 0 api-errors)' '$R/pc4.log'"
+newrun J3; CFFAKE_CREATE_POLLS=50 JOB_POLL=1 bash "$M" provision --wave 1 --yes --run "$R" > "$R/pc5.log" 2>&1 & pid=$!; sleep 4; kill -TERM $pid; wait $pid 2>/dev/null
+check "J6 provision killed mid-wave: inventory.tsv written by the EXIT trap, counts line printed" "[ -s '$R/inventory.tsv' ] && grep -q '^inventory: 12 services -- staged ' '$R/pc5.log' && [ $(awk -F'\t' 'NR>1 && $1==1 && $11=="not-provisioned"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 4 ]"
 
 echo; [ "$fails" = 0 ] && echo "ALL PASS (workdir $W)" || { echo "$fails FAIL (workdir $W)"; exit 1; }

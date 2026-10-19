@@ -182,7 +182,8 @@ bash migrate/free-ips.sh --cloud-config ocfp-int-sbx-us-east-1.cf --network ocfp
 bash migrate/migrate.sh provision --waves 1-5 --run runs/sbx          # re-runnable; a vanished staged Valkey is created again
 bash migrate/migrate.sh status --wave 1 --run runs/sbx                # phase STAGED
 column -ts $'\t' runs/sbx/inventory.tsv                               # -> the client reviews this (names inside: stays in the env)
-#    columns: wave app app_guid redis_name redis_guid valkey_name valkey_guid plan state note
+#    columns: wave app app_guid org space redis_name redis_guid valkey_name valkey_guid plan state note
+bash migrate/migrate.sh provision-check --run runs/sbx                 # same space/org, same plan name, last op -> PROVISION-CHECK: OK|FAIL
 #    state: not-provisioned | staged | cut-over | create-failed | drift (note says why; a client question answers itself)
 
 # 2 -- cutover day: preflight checks the staged Valkey is still there under its name and plan, and that no
