@@ -148,7 +148,8 @@ has a factual answer.
 | command | does |
 |---|---|
 | `plan <merged_report.csv>` | writes `waves.tsv`; **groups by connected component** of the binding graph (an app and every service it is bound to travel in one wave, so a multi-bound app restarts once) and reports services that span several teams (joint window needed); (`wave, service, redis_si_guid, valkey_plan, app, app_guid, flags`): services per wave (operator edits), apps per service (from the report), pipeline pairs kept in one wave, hazard apps flagged, data-store services flagged for copy; `--services <ERE>` scopes to our service names (the scan covers the whole foundation); connections whose `method` is not `cf-bind` (static-ref env/UPS, unknown) get `no-binding:<method>` — the app really consumes that Redis but there is nothing to rebind, so preflight/dry-run/apply list it as a **team action** and skip it |
-| `preflight --wave N` | lock free · classic plan visible · **IP headroom = free IPs on the services network ≥ Valkeys to create in the wave (+ the whole plan for a project-level preflight)** · quota · every app running · no pending service operations · hazard apps' env fixed · pipeline pairs complete → prints the **blast radius** (services / apps / teams) |
+| `provision --wave N` / `--waves A-B` | **2–3 days ahead (decided 2026-10-18):** creates the wave's Valkeys now under the staged name `<name>-valkey-staged` (same plan lookup, leftover rules and assert as a day-of create); Redis and apps untouched; writes `inventory.tsv` for the client's review. Re-runnable; a staged Valkey that vanished is recorded (`create-valkey fail` voids the earlier ok) and created again |
+| `preflight --wave N` | lock free · **not shared into other spaces** (CF refuses to rename a shared instance; the tool has no sharing flow — NP has 0) · **staged Valkey present under its name and plan; a staged instance the ledger does not know ⇒ FAIL, run `provision` again (adopts it)** · classic plan visible · **IP headroom = free IPs on the services network ≥ Valkeys to create in the wave (+ the whole plan for a project-level preflight)** · quota · every app running · no pending service operations · hazard apps' env fixed · pipeline pairs complete → prints the **blast radius** (services / apps / teams) |
 | `dry-run --wave N` | every command in order, with the rollback row after each |
 | `apply --wave N` / `--waves A-B` [`--service Y`] [`--app X`] | executes (a range = a lane, sequential); idempotent via the ledger; `STOP` file honored between steps; Ctrl-C finishes the current step, records it, exits |
 | `status [--wave N]` / `watch` | the dashboard (§5) |
@@ -156,6 +157,7 @@ has a factual answer.
 | `rollback --app X` / `--service Y` / `--wave N` | per §3, reason recorded |
 | `confirm --service Y --by <team>` | app-team sign-off; starts the standby clock |
 | `retire --service Y` | **before deleting: re-run the connection census on the standby Redis — refuse if anyone is still connected** (catches copied-credential apps that were never updated) · then: after the client's full confirmation, ~1–2 weeks post-cutover (standby grace default **14 days**); refuses before `confirm` + grace; asks twice; the only irreversible step |
+| `name-sync --wave N` / `--waves A-B` | re-reads Blacksmith's copy of every renamed instance's name (§6d) through `SAFE_RUN` and sets the ones that differ — the "check after one reconciler cycle" step; `status` shows `name-sync pending: N` until it is 0 |
 | `report --wave N` | evidence pack from the ledger (markdown): per app switched/verified/downtime, timeline, incidents, rollbacks, operators |
 
 ## 4a. Execution model — inside a wave, and lanes across waves
@@ -245,6 +247,42 @@ Suggested tmux layout: status (top) · `tail -f commands.log` (bottom-left) · s
   standby, Valkey holding the real name) — the tool records it; swapping back is only for
   abandoning the service's migration. The earlier alternatives (create as `-valkey` + swap at
   the end; substituted names) are superseded.
+- **Provisioned ahead (decided 2026-10-18): the staged name.** `provision` creates the Valkey
+  days before the window as `<name>-valkey-staged` (ledger note `(staged`); on cutover day
+  `apply` renames the Redis to the standby name and then the staged Valkey to `<name>`
+  (`rename-valkey`). From that point the names are exactly the rename-first ones above, so
+  rollback, confirm and retire are unchanged. Without a staged Valkey, `apply` creates under
+  `<name>` as before (day-of fallback). `copy-data` stays on cutover day: a copy made days
+  ahead would be stale.
+
+## 6d. Blacksmith's copy of the name — `name-sync` (decided 2026-10-18)
+
+Blacksmith stores `instance_name` at provision time and never learns of a CF rename (the
+broker's `Update` is not implemented; `allow_context_updates` is off — `knowledge/blacksmith/
+primer/broker-and-forges.md`). Its UI and listings read the per-instance copy at
+`secret/<guid>:instance_name` in the broker's **own** Vault, reachable only on the broker VM.
+Rule: **the tool writes that copy itself** after every rename (`rename-standby` ⇒
+`secret/<redis>` = `<name>-redis-standby`; `rename-valkey` ⇒ `secret/<valkey>` = `<name>`):
+- through `SAFE_RUN` from `runs/<env>/vault.conf` (e.g. `SAFE_RUN="genesis @sbx-us:blacksmith
+  bosh ssh blacksmith/0 -c"`), bounded (`SAFE_TIMEOUT`, default 180 s) and Ctrl-C-shielded like
+  the CF calls: **known-object check first** — `safe get` must return the name Blacksmith stored
+  at provision (`<name>` for the Redis, `<name>-valkey-staged` for a staged Valkey) or already the
+  new name; anything else means the wrong Vault is behind `SAFE_RUN` (or not this broker's
+  instance) and **nothing is written** (`name-sync fail … pre-check`). Then `safe set …` and
+  `safe get …`; **the read-back is the check**, not an exit code (ssh wrappers do not reliably
+  pass it);
+- recorded as `name-sync ok|fail|skipped` (service-level, never a phase: CF is the system of
+  record for the name, the broker's copy is cosmetic); never fatal for the wave; `status`'s
+  `name-sync pending: N` counts every rename in the ledger whose last `name-sync` is not ok —
+  a rename with no sync event at all (crash, or a wave applied before this existed) is pending;
+- every command is also appended to `runs/<env>/name-sync-wave-N.sh`, so without `vault.conf`
+  (event `skipped`) the operator runs that file inside `genesis @env:blacksmith ssh`;
+- the reconciler preserves an existing name but a set landing mid-cycle can be overwritten ⇒
+  `name-sync --wave N` re-checks after one cycle. Long-term fix (backlog): implement
+  `Broker.Update` + `allow_context_updates` in Blacksmith, then this step disappears.
+- Verified live, once, before the rehearsal: what `SAFE_RUN` reaches the broker's Vault
+  non-interactively, and the output shape of `bosh ssh -c` (the tool strips a `…: stdout | `
+  prefix and looks for the exact value on a line).
 
 ## 6a. Ordering policy
 

@@ -166,6 +166,38 @@ Before 20 pairs in SBX: `params.valkey_plans.standalone` and the Redis plan stee
 `migrate/free-ips.sh` ≥ 40 free in z3.
 Offline: `scripts/test/cf-cli-fake` (knobs in its header) -- `PATH=<dir with cf -> cf-cli-fake>:$PATH CFCLI_STATE=... CF_HOME=<dir>`.
 
+## Provision ahead, the client's inventory, name-sync (decided 2026-10-18)
+
+```bash
+# 0 -- once per run dir: how the tool reaches Blacksmith's OWN Vault (secret/<guid>, on the broker VM).
+#      First live check, before anything else -- the read-back must print the current name:
+export SAFE_RUN="genesis @sbx-us:blacksmith bosh ssh blacksmith/0 -c"
+$SAFE_RUN "safe get secret/<a sim redis guid>:instance_name"
+printf 'SAFE_RUN="%s"\n' "$SAFE_RUN" > runs/sbx/vault.conf        # no file = name-sync 'skipped', commands queued
+
+# 1 -- 2-3 days ahead: the Valkeys, under the staged name <name>-valkey-staged (Redis and apps untouched)
+bash migrate/free-ips.sh --cloud-config ocfp-int-sbx-us-east-1.cf --network ocfp-int-sbx-us-east-1-ocf --plan runs/sbx/waves.tsv --out runs/sbx/free-ips.txt
+bash migrate/migrate.sh provision --waves 1-5 --run runs/sbx          # re-runnable; a vanished staged Valkey is created again
+bash migrate/migrate.sh status --wave 1 --run runs/sbx                # phase STAGED
+column -ts $'\t' runs/sbx/inventory.tsv                               # -> the client reviews this (names inside: stays in the env)
+#    columns: wave app app_guid redis_name redis_guid valkey_name valkey_guid plan state note
+#    state: not-provisioned | staged | cut-over | create-failed | drift (note says why; a client question answers itself)
+
+# 2 -- cutover day: preflight checks the staged Valkey is still there under its name and plan, and that no
+#      Redis is shared into another space (CF refuses to rename a shared instance); apply renames
+#      Redis -> <name>-redis-standby, staged Valkey -> <name>, syncs both names into Blacksmith, then the apps
+bash migrate/migrate.sh preflight --wave 1 --run runs/sbx
+bash migrate/migrate.sh dry-run --wave 1 --run runs/sbx               # shows the PATCH of the staged Valkey instead of a POST
+bash migrate/migrate.sh apply --wave 1 --run runs/sbx
+bash migrate/migrate.sh status --wave 1 --run runs/sbx                # footer "name-sync pending: N" until Blacksmith's copies are set
+
+# 3 -- after one reconciler cycle (or when the footer is not 0): re-read every renamed instance, set the drifted ones
+bash migrate/migrate.sh name-sync --waves 1-5 --run runs/sbx
+#    without vault.conf: run runs/sbx/name-sync-wave-N.sh inside `genesis @sbx-us:blacksmith ssh`
+```
+Blacksmith's UI/listings show the per-instance copy of the name; CF stays the system of record. A
+`name-sync` failure never stops a wave. Offline: `bash migrate/test/case-provision.sh` (cf-fake + safe-fake).
+
 ## Then the rest of the lifecycle — rollback (scenario 11), confirm, retire (scenario 12)
 
 ```bash

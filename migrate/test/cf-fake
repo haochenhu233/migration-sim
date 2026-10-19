@@ -10,12 +10,18 @@
 #   CFFAKE_INSTANCES=<guid>=N[,..]     instance count per app (default 1)
 #   CFFAKE_CREATE_POLLS=N              job polls before a create completes (default 2)
 #   CFFAKE_BIND_FAIL=<app guid>        binding create for that app FAILS (job)
+#   CFFAKE_SHARED=<svc guid>           that instance is shared into one other space (relationships/shared_spaces)
+# With SAFEFAKE_STATE set, seed and every create also write <dir>/<guid> = the instance name -- what the
+# broker stores as instance_name at provision time, read back by safe-fake (name-sync's pre-check).
 export CFFAKE_STATE="${CFFAKE_STATE:-/tmp/cffake.json}"
 python3 - "$@" <<'PY'
 import os, sys, json, csv, uuid, re, urllib.parse
 S=os.environ['CFFAKE_STATE']
 def load(): return json.load(open(S)) if os.path.exists(S) else None
 def save(st): json.dump(st, open(S,'w'), indent=1)
+def broker_stores(guid, name):   # Blacksmith writes instance_name into its own Vault at provision
+    d=os.environ.get('SAFEFAKE_STATE')
+    if d: os.makedirs(d, exist_ok=True); open(os.path.join(d, guid),'w').write(name+'\n')
 args=sys.argv[1:]
 if args and args[0]=='seed':
     rows=list(csv.DictReader(open(args[1]), delimiter='\t'))
@@ -25,7 +31,7 @@ if args and args[0]=='seed':
         st['spaces'][spg]={'name':r['service_space'],'org':r['service_org']}
         rp='plan-redis-'+r['valkey_plan']; vp='plan-valkey-'+r['valkey_plan']
         st['plans'][rp]={'name':r['valkey_plan'],'offering':'redis'}; st['plans'][vp]={'name':r['valkey_plan'],'offering':'valkey'}
-        st['si'].setdefault(r['service_guid'],{'name':r['service'],'space':spg,'plan':rp,'last_op':{'type':'create','state':'succeeded'}})
+        st['si'].setdefault(r['service_guid'],{'name':r['service'],'space':spg,'plan':rp,'last_op':{'type':'create','state':'succeeded'}}); broker_stores(r['service_guid'], r['service'])
         st['apps'].setdefault(r['app_guid'],{'name':r['app'],'space':spg,'state':'STARTED'})
         if 'no-binding' not in r['flags']:
             bg='b-'+r['app_guid'][:8]+'-'+r['service_guid'][:8]
@@ -83,9 +89,13 @@ elif p=='/v3/service_instances' and method=='POST':
     b=json.loads(body); name=b['name']; sp=b['relationships']['space']['data']['guid']; pl=b['relationships']['service_plan']['data']['guid']
     if any(s['name']==name and s['space']==sp for s in st['si'].values()): err(422,'CF-UnprocessableEntity',f"The service instance name is taken: {name}")
     else:
-        g=str(uuid.uuid4()); st['si'][g]={'name':name,'space':sp,'plan':pl,'last_op':{'type':'create','state':'in progress'}}
+        g=str(uuid.uuid4()); st['si'][g]={'name':name,'space':sp,'plan':pl,'last_op':{'type':'create','state':'in progress'}}; broker_stores(g, name)
         fail=f"Service broker error: provision failed for {name}" if os.environ.get('CFFAKE_FAIL_CREATE')==name else None
         accepted(job('create:'+g, int(os.environ.get('CFFAKE_CREATE_POLLS','2')), fail))
+elif p.startswith('/v3/service_instances/') and p.endswith('/relationships/shared_spaces'):
+    g=p.split('/')[3]
+    if g not in st['si']: err(404,'CF-ResourceNotFound','Service instance not found')
+    else: out={'data':([{'guid':'sp-other'}] if os.environ.get('CFFAKE_SHARED')==g else []),'links':{}}
 elif p.startswith('/v3/service_instances/'):
     g=p.split('/')[3]
     if g not in st['si']: err(404,'CF-ResourceNotFound','Service instance not found')

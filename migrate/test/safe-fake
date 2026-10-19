@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# safe-fake: stands in for SAFE_RUN (e.g. `genesis @env:blacksmith bosh ssh blacksmith/0 -c`) in tests.
+# Takes ONE argument -- the remote command string, like `bosh ssh -c` -- and understands
+#   safe set secret/<g> "instance_name=<n>"  [&& safe get secret/<g>:instance_name]
+#   safe get secret/<g>:instance_name
+# State: $SAFEFAKE_STATE/<g>. Output lines carry the bosh-ssh prefix "blacksmith/0: stdout | " plus
+# bosh's banner/trailer lines, so the tool's read-back has to find the value among noise.
+#   SAFEFAKE_FAIL=<g>   sets of that guid are lost (the read-back then shows the old value or nothing)
+# Unverified live: the exact prefix/banner of `bosh ssh -c`, and that safe on the broker VM is targeted
+# non-interactively -- the delta lists both as the first live check (vault.conf's SAFE_RUN is whatever works).
+S="${SAFEFAKE_STATE:-/tmp/safefake}"; mkdir -p "$S"; rc=0
+echo "Using deployment 'blacksmith'"; echo
+printf '%s\n' "$1" | sed 's/ && /\n/g' | while IFS= read -r c; do
+  if [[ "$c" =~ ^safe\ set\ secret/([^\ ]+)\ \"instance_name=(.*)\"$ ]]; then
+    g="${BASH_REMATCH[1]}"; v=$(printf '%s' "${BASH_REMATCH[2]}" | sed 's/\\\([\\"$`]\)/\1/g')
+    [ "${SAFEFAKE_FAIL:-}" = "$g" ] || printf '%s\n' "$v" > "$S/$g"
+  elif [[ "$c" =~ ^safe\ get\ secret/([^:\ ]+):instance_name$ ]]; then
+    g="${BASH_REMATCH[1]}"
+    if [ -f "$S/$g" ]; then printf 'blacksmith/0: stdout | %s\n' "$(cat "$S/$g")"; else printf 'blacksmith/0: stderr | !! no secret exists at secret/%s\n' "$g"; fi
+  else printf 'blacksmith/0: stderr | safe-fake: unsupported: %s\n' "$c"; fi
+done
+echo; echo "Succeeded"

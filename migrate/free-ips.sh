@@ -112,9 +112,10 @@ case "$FREE$POOL$USEDN" in *[!0-9]*|"") die "IP arithmetic produced non-numeric 
 echo "(BOSH knows $NINST instance(s) in $NDEP deployment(s); IPs outside this director -- its own VM, jumpbox, LBs, other directors -- count as free unless in 'reserved')"
 rc=0
 if [ -n "$PLAN" ]; then
-  # services still to create = plan services minus those whose create-valkey is ok in the run's ledger
+  # services still to create = plan services minus those whose LAST create-valkey event is ok in the run's
+  # ledger (same rule as migrate.sh ledger_done: a later fail -- provision's "staged valkey gone" -- voids an ok)
   LEDGER="$(dirname "$PLAN")/ledger.jsonl"; : > "$TMP/created.txt"
-  [ -s "$LEDGER" ] && jq -R -r 'fromjson? // empty | select(.step=="create-valkey" and .outcome=="ok" and .app=="") | .service' "$LEDGER" | sort -u > "$TMP/created.txt"
+  [ -s "$LEDGER" ] && jq -R -r 'fromjson? // empty | select(.step=="create-valkey" and .app=="")' "$LEDGER" | jq -rs 'group_by(.service) | map(last) | .[] | select(.outcome=="ok") | .service' | sort -u > "$TMP/created.txt"
   NSVC=$(wc -l < "$TMP/plansvc.txt" | tr -d ' ')
   if [ -s "$TMP/created.txt" ]; then TODO=$(grep -v -x -F -f "$TMP/created.txt" "$TMP/plansvc.txt" | wc -l | tr -d ' '); else TODO=$NSVC; fi
   NEED=$(( TODO * IPS_PER ))

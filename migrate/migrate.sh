@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # migrate.sh -- Redis->Valkey migration tool (operator layer). See DESIGN.md.
 #     migrate.sh status [--wave N] [--run <dir>]      (dashboard; wrap in: watch -n 3 -c ...)
-# Run dir holds waves.tsv (the plan) + ledger.jsonl (what happened) + commands.log + lock + STOP.
+# Run dir holds waves.tsv (the plan) + ledger.jsonl (what happened) + commands.log + lock + STOP,
+#   inventory.tsv (names/guids/state per app-Redis-Valkey line, for the client's review),
+#   vault.conf (optional: SAFE_RUN=... for name-sync), name-sync-wave-N.sh (the safe commands, always).
 set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
@@ -143,7 +145,7 @@ ledger_bad(){ [ -s "$LEDGER" ] || { echo 0; return; }; echo $(( $(grep -c . "$LE
 ledger_states(){
   [ -s "$LEDGER" ] || return 0
   ledger_lines | jq -rs --arg w "$WAVE" '
-    map(select($w=="" or (.wave|tostring)==$w))
+    map(select(($w=="" or (.wave|tostring)==$w) and .step!="name-sync"))   # name-sync is cosmetic (Blacksmith UI), never a phase
     | group_by([.service, .app]) | map(last)                      # last event per (service, app)
     | .[] | [ .service, .app,
               (if .outcome=="ok" then .step else (.step + ":" + .outcome) end),
@@ -201,11 +203,13 @@ cmd_status(){
         else if (ev=="confirm")           phase="STANDBY"
         else if (ev ~ /create-valkey:fail/) phase="CREATE-FAILED"
         else if (ev ~ /copy-data:fail/)   phase="COPY-FAILED"
+        else if (ev ~ /rename-valkey:fail/) phase="RENAME-FAILED"
         else if (failed[s]>0)             phase="ATTENTION"
         else if (rolled[s]>0 && switched[s]==0) phase="ROLLED-BACK"
         else if (verified[s]==apps[s]-team[s]) phase="VERIFIED"
         else if (switched[s]>0 || minrank[s]>=2) phase="MIGRATING"
-        else if (ev=="create-valkey")     phase="READY"
+        else if (ev=="create-valkey" && svc_note[s] ~ /\(staged/) phase="STAGED"   # provisioned ahead as <name>-valkey-staged
+        else if (ev=="create-valkey" || ev=="rename-valkey") phase="READY"
         else                              phase="PENDING"
         sb=(s in standby) ? standby[s] : "-"
         mark=""; if (phase ~ /FAILED|ATTENTION|ROLLED/) mark="  !!"
@@ -221,7 +225,22 @@ cmd_status(){
   # per-app detail for services needing attention
   awk -F'\t' 'NR>1 && $2!="" && ($3 ~ /fail|blocked|rollback/) {printf "   %-15s %-15s %-28s %s\n", $1, $2, $3, $5}' "$RUN/.states.tsv" | { IFS= read -r first && { echo; echo "attention:"; echo "$first"; cat; }; }
   rm -f "$RUN/.states.tsv"
+  local nsp; nsp=$(namesync_pending)
+  [ "$nsp" = 0 ] || { echo; echo "name-sync pending: $nsp instance name(s) not yet set in Blacksmith's Vault -- migrate.sh name-sync --wave N (needs $RUN/vault.conf), or run $RUN/name-sync-wave-N.sh on the broker VM"; }
 }
+# namesync_pending: renamed instances in the ledger (rename-standby ok -> the Redis guid; rename-valkey ok ->
+#   the Valkey guid from the last create-valkey note) whose LAST name-sync event (first word of the note =
+#   guid) is not ok -- a rename with no name-sync event at all (crash, or a wave applied before name-sync
+#   existed) counts as pending.
+namesync_pending(){ [ -s "$LEDGER" ] || { echo 0; return; }
+  ledger_lines | jq -rs --arg w "$WAVE" '
+    [.[] | select($w=="" or (.wave|tostring)==$w)] as $ev
+    | ($ev | map(select(.step=="rename-standby" and .outcome=="ok") | .service)) as $r
+    | ($ev | map(select(.step=="rename-valkey" and .outcome=="ok") | .service) | unique
+        | map(. as $s | $ev | map(select(.service==$s and .step=="create-valkey" and .outcome=="ok")) | last | .note // ""
+              | [scan("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")][0] // empty)) as $v
+    | ($ev | map(select(.step=="name-sync")) | group_by(.note|split(" ")[0]) | map(last) | map(select(.outcome=="ok") | .note|split(" ")[0])) as $okset
+    | (($r + $v) | unique) - $okset | length'; }
 
 
 # ============================================================================ cf helpers
@@ -238,11 +257,13 @@ wave_rows(){ awk -F'\t' -v w="$1" 'NR>1 && $1==w' "$PLAN"; }
 # ledger_done <service_guid> <app_guid|""> <step>: "ts" if the ledger has that step ok, else "".
 # Only events AFTER the pair's last rollback count: a rollback resets the pair, so a re-apply
 # redoes bind/unbind/restart/verify (service-level steps never have a rollback event).
+# The LAST event of that step decides: an ok followed by a later fail of the same step is void
+# (provision records `create-valkey fail` when a staged Valkey vanished, then creates again).
 ledger_done(){ [ -s "$LEDGER" ] || return 0
   ledger_lines | jq -rs --arg s "$1" --arg a "$2" --arg st "$3" '
     [ .[] | select(.service==$s and .app==$a) ]
     | (map(.step=="rollback") | rindex(true) // -1) as $i
-    | .[$i+1:] | map(select(.step==$st and .outcome=="ok")) | (last // empty) | .ts'; }
+    | .[$i+1:] | map(select(.step==$st)) | (last // empty) | select(.outcome=="ok") | .ts'; }
 
 # ============================================================================ dry-run
 # dry-run --wave N: the exact command sequence apply would run, in the rehearsed order:
@@ -270,8 +291,14 @@ cmd_dryrun(){
     local sg8; sg8=$(printf '%s' "$sg" | cut -c1-8)
     echo "== service $name ($sg8)  plan=$plan  org/space=$sorg/$ssp  flags=[$flags]"
     d=$(ledger_done "$sg" "" rename-standby); echo "   ${d:+DONE $d  }PATCH /v3/service_instances/$sg8  {name:\"$std\"}                       # cf rename-service $name $std   | rollback: rename back (only if abandoning)"
-    d=$(ledger_done "$sg" "" create-valkey);  echo "   ${d:+DONE $d  }POST  /v3/service_instances  {managed, name:\"$name\", space:<$name's space>, plan:valkey/$plan} -> job   # cf create-service valkey $plan $name   | rollback: DELETE the new instance"
-    echo "   ${d:+DONE          }assert: GET /v3/service_instances?names=$name&space_guids=<space> -> ONE instance, offering valkey, new guid;  GET /v3/service_instances/$sg8 -> name '$std'"
+    echo "   ${d:+DONE          }name-sync: safe set secret/$sg8 instance_name=$std  on the broker VM (Blacksmith's copy; via $RUN/vault.conf or name-sync-wave-$WAVE.sh)"
+    if [ -n "$(svc_staged "$sg")" ]; then local vk8; vk8=$(svc_note_guid "$sg" | cut -c1-8)
+      d=$(ledger_done "$sg" "" rename-valkey); echo "   ${d:+DONE $d  }PATCH /v3/service_instances/$vk8  {name:\"$name\"}                       # cf rename-service $(staged_name "$name") $name  (provisioned ahead)   | rollback: rename back"
+      echo "   ${d:+DONE          }assert: GET /v3/service_instances/$vk8 -> name '$name';  name-sync: safe set secret/$vk8 instance_name=$name"
+    else
+      d=$(ledger_done "$sg" "" create-valkey);  echo "   ${d:+DONE $d  }POST  /v3/service_instances  {managed, name:\"$name\", space:<$name's space>, plan:valkey/$plan} -> job   # cf create-service valkey $plan $name   | rollback: DELETE the new instance"
+      echo "   ${d:+DONE          }assert: GET /v3/service_instances?names=$name&space_guids=<space> -> ONE instance, offering valkey, new guid;  GET /v3/service_instances/$sg8 -> name '$std'"
+    fi
     case ",$flags," in *,datastore,*) d=$(ledger_done "$sg" "" copy-data); echo "   ${d:+DONE $d  }copy-data $std -> $name  (replication / MIGRATE / DUMP-RESTORE per SESSION-COMMANDS 8c)   # rollback: none needed";; esac
   done
   echo
@@ -330,10 +357,35 @@ cmd_preflight(){
     if [ -n "$ren" ]; then [ "$cur" = "${name}-redis-standby" ] && ok "service $name: already renamed to standby (ledger agrees)" || fail "service $name: ledger says renamed but CF name is '$cur' (drift)"
     else [ "$cur" = "$name" ] && ok "service $name: name matches guid $(printf '%s' "$sg" | cut -c1-8)" || fail "service $name: guid now named '$cur' (drift -- renamed by hand?)"; fi
     [ "$st" = succeeded ] && ok "service $name: last operation succeeded" || fail "service $name: last_operation=$st"
+    # shared instances: CF refuses to rename them (SharedServiceInstanceCannotBeRenamed) and the tool has no sharing flow (NP: 0 cross-space)
+    local shj; shj=$(cfcurl "/v3/service_instances/$sg/relationships/shared_spaces")
+    if cf_json_ok "$shj" && printf '%s' "$shj" | jq -e 'has("data")' >/dev/null 2>&1; then
+      local nsh; nsh=$(printf '%s' "$shj" | jq '.data|length')
+      [ "$nsh" = 0 ] && ok "service $name: not shared into other spaces" || fail "service $name: shared into $nsh other space(s) -- CF refuses to rename a shared instance; unshare it or migrate it by hand"
+    else fail "service $name: cannot read shared_spaces (API error) -- sharing cannot be ruled out"; fi
     # name collisions in the service's space
     local sp; sp=$(printf '%s' "$j" | jq -r '.relationships.space.data.guid')
     local cre; cre=$(ledger_done "$sg" "" create-valkey)
-    local lj
+    local lj stn; stn=$(staged_name "$name")
+    # staged Valkey (provision): the ledger's one must still be there under the staged name
+    if [ -n "$cre" ] && [ -n "$(svc_staged "$sg")" ]; then
+      local vk vj vn vp; vk=$(svc_note_guid "$sg"); vj=$(cfcurl "/v3/service_instances/$vk")
+      if ! cf_json_ok "$vj"; then fail "service $name: staged valkey $vk (ledger) not found in CF -- deleted by hand? run: provision --wave $WAVE (records the loss, creates again)"
+      else vn=$(printf '%s' "$vj" | jq -r .name); vp=$(printf '%s' "$vj" | jq -r '.relationships.service_plan.data.guid'); local vst; vst=$(printf '%s' "$vj" | jq -r '"\(.last_operation.type) \(.last_operation.state)"')
+        if [ "$vn" = "$name" ]; then ok "service $name: staged valkey $(printf '%s' "$vk" | cut -c1-8) already carries '$name' (renamed by a run that died before its ledger line; apply records it)"
+        elif [ "$vn" != "$stn" ]; then fail "service $name: staged valkey $vk is named '$vn', expected '$stn' (drift)"
+        elif [ "${vst#* }" != succeeded ]; then fail "service $name: staged valkey $vk last_operation=$vst -- not usable; delete it and run provision again"
+        elif lj=$(cflist "/v3/service_plans?names=$plan&service_offering_names=valkey&space_guids=$sp&available=true") && [ "$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty')" != "$vp" ]; then fail "service $name: staged valkey $vk has another plan than '$plan'"
+        else ok "service $name: staged valkey present ($(printf '%s' "$vk" | cut -c1-8), '$stn')"; fi
+      fi
+    elif [ -z "$cre" ]; then   # a staged instance the ledger does not know would be orphaned by a day-of create
+      if lj=$(cflist "/v3/service_instances?names=$stn&space_guids=$sp"); then
+        local og ost; og=$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty'); ost=$(printf '%s' "$lj" | jq -r '.resources[0] | "\(.last_operation.type) \(.last_operation.state)"' 2>/dev/null)
+        if [ -z "$og" ]; then :
+        elif [ "$ost" = "create failed" ]; then warn "service $name: a FAILED staged create ($og) carries '$stn' -- provision deletes it and creates again"
+        else fail "service $name: '$stn' exists ($og, $ost) but the ledger has no create-valkey -- run: provision --wave $WAVE (adopts it); apply alone would create a second Valkey"; fi
+      else fail "service $name: API error checking the staged name (cannot rule out an orphan)"; fi
+    fi
     if lj=$(cflist "/v3/service_instances?names=${name}-redis-standby&space_guids=$sp"); then
       if [ -z "$ren" ] && [ "$(printf '%s' "$lj" | jq -r '.resources|length')" != 0 ]; then fail "service $name: '${name}-redis-standby' already exists in the space"; fi
     else fail "service $name: API error checking the standby name (cannot rule out a collision)"; fi
@@ -382,11 +434,13 @@ cmd_preflight(){
       else ok "app $app: hazard flag but no pinned env var found now (fixed)"; fi;;
     esac
   done < <(printf '%s\n' "$rows" | awk -F'\t' '!seen[$9]++ {print $9"\t"$8"\t"$12}')
-  # 5 blast radius
-  local nsvc napp norg nsil nhz; nsvc=$(printf '%s\n' "$rows" | cut -f4 | sort -u | wc -l | tr -d ' '); napp=$(printf '%s\n' "$rows" | cut -f9 | sort -u | wc -l | tr -d ' ')
+  # 5 blast radius -- IPs are needed only for Valkeys not yet created (provisioned/staged ones already hold theirs)
+  local nsvc napp norg nsil nhz ncreate=0 s_; nsvc=$(printf '%s\n' "$rows" | cut -f4 | sort -u | wc -l | tr -d ' '); napp=$(printf '%s\n' "$rows" | cut -f9 | sort -u | wc -l | tr -d ' ')
   norg=$(printf '%s\n' "$rows" | cut -f10 | sort -u | wc -l | tr -d ' '); nhz=$(printf '%s\n' "$rows" | awk -F'\t' '$12 ~ /hazard/' | wc -l | tr -d ' ')
+  for s_ in $(printf '%s\n' "$rows" | cut -f4 | sort -u); do [ -n "$(ledger_done "$s_" "" create-valkey)" ] || ncreate=$((ncreate+1)); done
   echo
-  echo "BLAST RADIUS wave $WAVE: $nsvc service(s) -> $nsvc Valkey(s) to create (IPs needed: $nsvc), $napp app restart(s), $norg org(s); hazards in wave: $nhz"
+  echo "BLAST RADIUS wave $WAVE: $nsvc service(s) -> $ncreate Valkey(s) still to create (IPs needed: $ncreate; $((nsvc-ncreate)) already created/staged), $napp app restart(s), $norg org(s); hazards in wave: $nhz"
+  nsvc=$ncreate
   local fsrc=""
   if [ -z "${FREE_IPS:-}" ] && [ -s "$RUN/free-ips.txt" ]; then   # written by migrate/free-ips.sh
     local fn fts fep age since
@@ -420,7 +474,7 @@ cmd_summary(){
     FNR==1 { next }
     { w=$1; s=$4; a=$9; if (!(w in seenw)) { worder[++nw]=w; seenw[w]=1 }
       if (!(s in seens)) { seens[s]=1; wsvc[w]++; ev=svc_ev[s]
-        if (ev ~ /^(create-valkey|copy-data|confirm|retire)$/ || ev ~ /^copy-data:/) wcreated[w]++
+        if (ev ~ /^(create-valkey|rename-valkey|copy-data|confirm|retire)$/ || ev ~ /^copy-data:/) wcreated[w]++
         if (ev ~ /create-valkey:fail/) wcfail[w]++
         if (ev=="confirm") wstandby[w]++
         if (ev=="retire")  wretired[w]++ }
@@ -456,7 +510,8 @@ cmd_summary(){
 #   by the ledger (every step recorded; steps already ok are skipped => resumable). A range is a
 #   LANE: waves run back-to-back; a stopped wave ends the lane. Per-wave lock; STOP file and Ctrl-C
 #   stop at the next step boundary (the current step always completes and is recorded).
-#   Services phase: rename -> create (all creates issued, then waited) -> copy-data (datastore).
+#   Services phase: rename (+name-sync) -> staged Valkey renamed to <name> (+name-sync), else create
+#   (all creates issued, then waited) -> copy-data (datastore).
 #   Apps phase, ONE app at a time: bind every wave service -> unbind every standby -> one restart
 #   (STOPPED app: none) -> verify L1. verify/bind/unbind failure => auto-rollback of the SERVICE
 #   (every app of it), wave continues; 3 failures in a row => the wave stops.
@@ -531,6 +586,43 @@ svc_note_guid(){ ledger_lines | jq -r --arg s "$1" 'select(.service==$s and .app
 app_last(){ # app_last <svc> <app> -> last step[:outcome] for the pair ("" if none)
   ledger_lines | jq -r --arg s "$1" --arg a "$2" 'select(.service==$s and .app==$a) | if .outcome=="ok" then .step else .step+":"+.outcome end' | tail -1; }
 
+# ---- staged Valkeys (provision, DESIGN §6c): created days ahead as <name>-valkey-staged, renamed to
+# <name> by apply right after the Redis took the standby name. The ledger note of a staged create
+# carries "(staged"; rename-valkey ok ends the staged state.
+staged_name(){ printf '%s-valkey-staged' "$1"; }
+svc_staged(){ [ -s "$LEDGER" ] || return 0   # "1" while the last create-valkey/rename-valkey ok is a staged create
+  ledger_lines | jq -rs --arg s "$1" '[.[] | select(.service==$s and .app=="" and .outcome=="ok" and (.step=="create-valkey" or .step=="rename-valkey"))] | last
+    | if . != null and .step=="create-valkey" and (.note|test("\\(staged")) then "1" else "" end'; }
+wave_list(){ if [ -n "${WAVES:-}" ]; then seq "${WAVES%-*}" "${WAVES#*-}" | paste -sd' ' -; else printf '%s' "$WAVE"; fi; }
+
+# ---- Blacksmith's own copy of the instance name (DESIGN §6d). A CF rename never reaches the broker, so
+# after each rename the tool sets instance_name in Blacksmith's Vault (secret/<guid>, on the broker VM)
+# through SAFE_RUN from runs/<env>/vault.conf -- e.g. SAFE_RUN="genesis @sbx-us:blacksmith bosh ssh blacksmith/0 -c"
+# -- and reads it back: the read-back is the check, not the exit code. Without vault.conf the event is
+# 'skipped' and the command waits in runs/<env>/name-sync-wave-N.sh for a run inside `genesis @env:blacksmith ssh`.
+# Never fatal: the broker's copy is cosmetic (UI / listings), CF is the system of record for the name.
+safe_run_cmd(){ [ -s "$RUN/vault.conf" ] || return 1; local v; v=$(sed -n 's/^SAFE_RUN=//p' "$RUN/vault.conf" | tail -1 | sed "s/^[\"']\(.*\)[\"']\$/\1/"); [ -n "$v" ] || return 1; printf '%s' "$v"; }
+safe_esc(){ printf '%s' "$1" | sed 's/[\\"$`]/\\&/g'; }
+safe_out_value(){ tr -d '\r' | sed 's/^[^|]*| //' | grep -xF -- "$1" | head -1; }   # bosh ssh -c prefixes lines with "<instance>: stdout | "
+SAFE_TIMEOUT="${SAFE_TIMEOUT:-180}"; if command -v timeout >/dev/null 2>&1; then TMOS="timeout $SAFE_TIMEOUT"; else TMOS=""; fi
+safe_x(){ ( trap '' INT; exec $TMOS $1 "$2" ) 2>&1; }   # safe_x <SAFE_RUN prefix> <remote command>: bounded, INT-shielded like cfx
+# name_sync <svc_guid> <instance_guid> <new name> <old name>: R_SYNC = insync | set | fail | skipped; 0 unless fail.
+#   Known-object check first (checklist row 20): the broker's copy must currently read <old name> (or already
+#   <new name>) -- otherwise SAFE_RUN reaches the wrong Vault, or the guid is not this broker's; nothing is written.
+name_sync(){
+  local sg="$1" g="$2" n="$3" old="$4" t0 out got cmd sr ms; t0=$(date +%s)
+  cmd="safe set secret/$g \"instance_name=$(safe_esc "$n")\" && safe get secret/$g:instance_name"
+  printf '%s\n' "$cmd" >> "$RUN/name-sync-wave-$WAVE.sh"
+  if ! sr=$(safe_run_cmd); then R_SYNC=skipped; ledger_add "$WAVE" "$sg" "" name-sync skipped 0 "$g instance_name=$n -- no SAFE_RUN in $RUN/vault.conf; run name-sync-wave-$WAVE.sh on the broker VM"; say "   name-sync skipped (${g:0:8}): no vault.conf -- queued in name-sync-wave-$WAVE.sh"; return 0; fi
+  out=$(safe_x "$sr" "safe get secret/$g:instance_name"); cmdlog SAFE "get secret/$g instance_name" "$?"
+  if [ -n "$(printf '%s\n' "$out" | safe_out_value "$n")" ]; then R_SYNC=insync; ledger_add "$WAVE" "$sg" "" name-sync ok $(( ($(date +%s)-t0)*1000 )) "$g instance_name=$n (already set)"; say "   name-sync: ${g:0:8} already '$n'"; return 0; fi
+  if [ -z "$(printf '%s\n' "$out" | safe_out_value "$old")" ]; then R_SYNC=fail; ledger_add "$WAVE" "$sg" "" name-sync fail $(( ($(date +%s)-t0)*1000 )) "$g instance_name=$n -- pre-check: the broker's copy is not '$old' (wrong Vault behind SAFE_RUN? not this broker's instance?) -- nothing written: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"; say "   !! name-sync (${g:0:8}): Blacksmith's copy is not '$old' -- nothing written; check SAFE_RUN"; return 1; fi
+  out=$(safe_x "$sr" "$cmd"); cmdlog SAFE "set secret/$g instance_name=$n" "$?"
+  got=$(printf '%s\n' "$out" | safe_out_value "$n"); ms=$(( ($(date +%s)-t0)*1000 ))
+  if [ -n "$got" ]; then R_SYNC=set; ledger_add "$WAVE" "$sg" "" name-sync ok "$ms" "$g instance_name=$n (was '$old'; read back)"; say "   name-sync ok (${g:0:8}: '$old' -> '$n')"; return 0
+  else R_SYNC=fail; ledger_add "$WAVE" "$sg" "" name-sync fail "$ms" "$g instance_name=$n -- read-back did not return it: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"; say "   !! name-sync FAILED (${g:0:8}) -- not fatal; later: name-sync --wave $WAVE"; return 1; fi
+}
+
 # restart_app <app> <name> <instances> -> 0 when back to all RUNNING (+soak). R_NOTE = how.
 restart_app(){
   local ag="$1" app="$2" inst="$3" t0; t0=$(date +%s)
@@ -603,69 +695,205 @@ apply_wave(){
   wave_lock "$WAVE" || return 1
   ledger_add "$WAVE" "" "" wave-start ok 0 "$nsvc services, $napp apps"
   local rc=0; apply_services && apply_apps || rc=1
-  wave_unlock; return $rc
+  write_inventory; wave_unlock; return $rc
+}
+
+# ============================================================================ provision (days ahead)
+# provision --wave N | --waves A-B [--service X] [--yes]: create the wave's Valkeys NOW, under the staged
+#   name <name>-valkey-staged (same plan lookup, leftover rules and assert as a day-of create), so that
+#   the client can review runs/<env>/inventory.tsv 2-3 days before the cutover. Redis and apps are not
+#   touched; copy-data stays in apply (a copy made days ahead would be stale). apply then renames the
+#   staged Valkey to <name> right after the Redis took the standby name. Re-runnable: done services are
+#   skipped; a staged Valkey that vanished from CF is recorded (create-valkey fail = void) and created again.
+provision_wave(){
+  ROWS=$(wave_rows "$WAVE"); [ -n "$ROWS" ] || { echo "wave $WAVE: no rows in $PLAN"; return 1; }
+  if [ -n "${SVCF:-}" ]; then ROWS=$(printf '%s\n' "$ROWS" | awk -F'\t' -v f="$SVCF" '$3==f || index($4,f)==1'); [ -n "$ROWS" ] || { echo "wave $WAVE: no service matches --service $SVCF"; return 1; }; fi
+  local nsvc; nsvc=$(printf '%s\n' "$ROWS" | cut -f4 | sort -u | wc -l | tr -d ' ')
+  echo "PROVISION wave $WAVE: $nsvc service(s) -> Valkeys created now as <name>-valkey-staged; Redis and apps untouched  run=$RUN  operator=$OP"
+  local info; info=$(cfcurl "/v3/info"); cf_json_ok "$info" || { echo "!! cf curl /v3/info failed -- not logged in?"; return 1; }
+  if [ -z "${YES:-}" ]; then
+    if have_tty; then printf 'Provision wave %s now? type yes: ' "$WAVE"; read -r a </dev/tty; [ "$a" = yes ] || { echo "not confirmed"; return 1; }
+    else echo "!! not a terminal and no --yes: refusing"; return 1; fi
+  fi
+  wave_lock "$WAVE" || return 1
+  svc_arrays
+  local sg name sorg ssp plan flags j cur vk rc=0
+  while IFS=$'\t' read -r sg name sorg ssp plan flags; do
+    halt_check || { rc=1; break; }
+    j=$(cfx "/v3/service_instances/$sg" 2>/dev/null); cf_json_ok "$j" || { ledger_add "$WAVE" "$sg" "" drift fail 0 "GET service: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"; SKIP[$sg]=1; say "!! $name: cannot read instance $sg -- skipped"; continue; }
+    cur=$(printf '%s' "$j" | jq -r .name); local sp; sp=$(printf '%s' "$j" | jq -r '.relationships.space.data.guid')
+    local exp="$name"; [ -z "$(ledger_done "$sg" "" rename-standby)" ] || exp="${name}-redis-standby"
+    [ "$cur" = "$exp" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "expected name '$exp', CF has '$cur'"; SKIP[$sg]=1; say "!! $name: guid $sg is named '$cur' -- skipped"; continue; }
+    if [ -n "$(ledger_done "$sg" "" create-valkey)" ]; then
+      vk=$(svc_note_guid "$sg"); [ -n "$vk" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "create-valkey recorded but no guid in its note"; SKIP[$sg]=1; say "!! $name: create-valkey recorded without a guid -- skipped"; continue; }
+      if [ -z "$(svc_staged "$sg")" ]; then say "$name: valkey already created (${vk:0:8}), not staged -- nothing to do"; continue; fi
+      j=$(cfx "/v3/service_instances/$vk" 2>/dev/null)
+      if cf_json_ok "$j"; then
+        local vst; vst=$(printf '%s' "$j" | jq -r '"\(.last_operation.type) \(.last_operation.state)"')
+        case "$vst" in *" succeeded") say "$name: staged valkey already there (${vk:0:8}, '$(printf '%s' "$j" | jq -r .name)')";;
+          *) ledger_add "$WAVE" "$sg" "" drift fail 0 "staged valkey $vk last_operation=$vst -- not touched"; SKIP[$sg]=1; say "!! $name: staged valkey ${vk:0:8} last operation is '$vst' -- not touched; fix by hand (delete it, provision again)";; esac
+        continue
+      fi
+      ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "staged valkey $vk gone from CF ($(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)) -- creating again"; say "!! $name: staged valkey ${vk:0:8} gone from CF -- creating again"
+    fi
+    svc_create_issue "$sg" "$name" "$sp" "$plan" "$(staged_name "$name")"
+  done < <(printf '%s\n' "$ROWS" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
+  svc_create_wait
+  local nskip=0; for sg in "${!SKIP[@]}"; do nskip=$((nskip+1)); done
+  ledger_add "$WAVE" "" "" provision ok 0 "$nsvc services, $nskip failed/skipped"
+  write_inventory; wave_unlock
+  say "wave $WAVE provisioned ($nskip service(s) failed/skipped) -- review $RUN/inventory.tsv; status --wave $WAVE"
+  return $rc
+}
+cmd_provision(){
+  local list; list=$(wave_list); [ -n "$list" ] || { echo "usage: migrate.sh provision --wave N | --waves A-B [--service X] [--yes] [--run dir]"; exit 1; }
+  [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
+  STOP_REQ=0; trap 'STOP_REQ=1; echo; echo "!! Ctrl-C: the running step completes and is recorded, then provision stops"' INT
+  trap 'wave_unlock' EXIT
+  local w; for w in $list; do WAVE="$w"; provision_wave || { echo "!! stopped at wave $w"; return 1; }; done
+}
+
+# ============================================================================ inventory + name-sync
+# inventory.tsv: one line per (app, Redis, Valkey) with the names both carry NOW and the service's state
+#   (not-provisioned | staged | cut-over | create-failed) -- the file the client reviews after provision.
+#   Regenerated from plan + ledger by provision, apply and status. Names inside: it stays in the env.
+write_inventory(){
+  [ -s "$PLAN" ] || return 0
+  { [ -s "$LEDGER" ] && ledger_lines; true; } | jq -rs '
+    [.[] | select(.app=="" and .service!="")] | group_by(.service) | .[]
+    | { s: .[0].service,
+        ren: (map(select(.step=="rename-standby" and .outcome=="ok")) | length > 0),
+        rv:  (map(select(.step=="rename-valkey"  and .outcome=="ok")) | length > 0),
+        cv:  (map(select(.step=="create-valkey")) | last),
+        lastev: (map(select(.step!="name-sync")) | last) }
+    | [ .s, (.ren|tostring), (.rv|tostring),
+        (if .cv.outcome=="ok" then (.cv.note | [scan("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")][0] // "") else "" end),
+        (if .cv.outcome=="ok" then (.cv.note | test("\\(staged") | tostring) else "false" end),
+        (if .cv.outcome=="fail" then "create-failed" elif .lastev.step=="drift" then "drift" else "" end),
+        (if .cv.outcome=="fail" then .cv.note elif .lastev.step=="drift" then .lastev.note else "" end) ] | @tsv' > "$RUN/.svc.tsv"
+  awk -F'\t' -v OFS='\t' '
+    FILENAME==ARGV[1] { ren[$1]=$2; rv[$1]=$3; vk[$1]=$4; stg[$1]=$5; cf[$1]=$6; nt[$1]=$7; next }
+    FNR==1 { print "wave","app","app_guid","redis_name","redis_guid","valkey_name","valkey_guid","plan","state","note"; next }
+    { s=$4; n=$3; rn=(ren[s]=="true") ? n "-redis-standby" : n
+      if (vk[s]=="")                          { vn="-"; st=(cf[s]!="" ? cf[s] : "not-provisioned") }
+      else if (stg[s]=="true" && rv[s]!="true") { vn=n "-valkey-staged"; st=(cf[s]=="drift" ? "drift" : "staged") }
+      else                                    { vn=n; st="cut-over" }
+      print $1, $8, $9, rn, s, vn, (vk[s]=="" ? "-" : vk[s]), $7, st, nt[s] }' "$RUN/.svc.tsv" "$PLAN" > "$RUN/inventory.tsv"
+  rm -f "$RUN/.svc.tsv"
+}
+# name-sync --wave N | --waves A-B: for every rename the ledger holds (Redis -> standby, staged Valkey -> name)
+#   read Blacksmith's copy back through SAFE_RUN and set the ones that differ. The check-after-one-
+#   reconciler-cycle step (a set that lands mid-cycle can be overwritten; primer state-loops-vault).
+cmd_namesync(){
+  local list; list=$(wave_list); [ -n "$list" ] || { echo "usage: migrate.sh name-sync --wave N | --waves A-B [--run dir]   (needs $RUN/vault.conf with SAFE_RUN=...)"; exit 1; }
+  [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
+  local sr; sr=$(safe_run_cmd) || { echo "!! no SAFE_RUN in $RUN/vault.conf -- run the name-sync-wave-N.sh files on the broker VM instead"; exit 1; }
+  local w sg name insync=0 set=0 failed=0
+  for w in $list; do WAVE="$w"
+    while IFS=$'\t' read -r sg name; do
+      # old name = what Blacksmith stored at provision: <name> for the Redis, the staged name for a provisioned Valkey
+      if [ -n "$(ledger_done "$sg" "" rename-standby)" ]; then name_sync "$sg" "$sg" "${name}-redis-standby" "$name"
+        case "$R_SYNC" in insync) insync=$((insync+1));; set) set=$((set+1));; *) failed=$((failed+1));; esac; fi
+      if [ -n "$(ledger_done "$sg" "" rename-valkey)" ]; then name_sync "$sg" "$(svc_note_guid "$sg")" "$name" "$(staged_name "$name")"
+        case "$R_SYNC" in insync) insync=$((insync+1));; set) set=$((set+1));; *) failed=$((failed+1));; esac; fi
+    done < <(wave_rows "$w" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3}')
+  done
+  echo "name-sync: $insync in sync, $set set now, $failed failed; still pending: $(WAVE="" namesync_pending) -- status shows the footer until it is 0"
+  [ "$failed" = 0 ]
+}
+
+svc_arrays(){ unset VK SKIP JOBS PLANG SPACE CLEANED VNAME; declare -gA VK SKIP JOBS PLANG SPACE CLEANED VNAME; }   # per wave
+# svc_create_issue <sg> <name> <space> <plan> <vname>: plan lookup, leftover rules on <vname>, POST (waited by
+#   svc_create_wait). <vname> is <name> on cutover day or <name>-valkey-staged from provision (note: "(staged").
+#   Outcome: JOBS (issued) | VK (adopted, ledger ok) | SKIP (ledger create-valkey fail).
+svc_create_issue(){
+  local sg="$1" name="$2" sp="$3" plan="$4" vname="$5" lj n pg lg lst lpl tag
+  tag="plan $plan"; [ "$vname" = "$name" ] || tag="staged, plan $plan"
+  SPACE[$sg]=$sp; VNAME[$sg]=$vname
+  lj=$(cflist "/v3/service_plans?names=$plan&service_offering_names=valkey&space_guids=$sp&available=true") || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "API error listing valkey plan '$plan'"; SKIP[$sg]=1; say "!! $name: cannot list valkey plans"; return; }
+  n=$(printf '%s' "$lj" | jq -r '.resources|length'); pg=$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty')
+  [ "$n" = 1 ] || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "valkey plan '$plan': $n match(es) in the space"; SKIP[$sg]=1; say "!! $name: valkey plan '$plan' -> $n match(es) -- skipped"; return; }
+  PLANG[$sg]=$pg
+  # leftover under the target name? (a previous create failed, or completed after the process died)
+  lj=$(cflist "/v3/service_instances?names=$vname&space_guids=$sp") || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "API error listing instances named $vname"; SKIP[$sg]=1; return; }
+  lg=$(printf '%s' "$lj" | jq -r '.resources[]|select(.guid!="'"$sg"'")|.guid' | head -1)
+  if [ -n "$lg" ]; then
+    lst=$(printf '%s' "$lj" | jq -r '.resources[]|select(.guid=="'"$lg"'")|"\(.last_operation.type) \(.last_operation.state)"'); lpl=$(printf '%s' "$lj" | jq -r '.resources[]|select(.guid=="'"$lg"'")|.relationships.service_plan.data.guid')
+    if [ "$lst" = "create succeeded" ] && [ "$lpl" = "$pg" ]; then
+      VK[$sg]=$lg; ledger_add "$WAVE" "$sg" "" create-valkey ok 0 "valkey $lg as $vname ($tag; adopted: already existed)"; printf '%s\t%s\t%s\n' "$sg" "$lg" "$vname" >> "$RUN/wave-$WAVE.guids"; say "$name: valkey already exists as $vname (${lg:0:8}) -- adopted"; return
+    elif [ "$lst" = "create failed" ]; then
+      say "$name: deleting failed leftover ${lg:0:8} ($lst)"
+      if cfreq DELETE "/v3/service_instances/$lg" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then CLEANED[$sg]="deleted failed leftover $lg first"
+      else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "cannot delete failed leftover $lg: $R_ERR"; SKIP[$sg]=1; return; fi
+    else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "name $vname taken by $lg ($lst, plan $lpl) -- not ours to touch"; SKIP[$sg]=1; say "!! $name: name $vname taken by ${lg:0:8} ($lst) -- skipped"; return; fi
+  fi
+  if cfreq POST "/v3/service_instances" "{\"type\":\"managed\",\"name\":\"$vname\",\"relationships\":{\"space\":{\"data\":{\"guid\":\"$sp\"}},\"service_plan\":{\"data\":{\"guid\":\"$pg\"}}}}" && [ -n "$R_JOB" ]; then
+    JOBS[$sg]="$R_JOB $(date +%s)"; say "$name: valkey create issued as $vname ($tag) -> $R_JOB"
+  else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "${R_ERR:-no job in response}"; SKIP[$sg]=1; say "!! $name: create failed: ${R_ERR:-no job}"; fi
+}
+# svc_create_wait: wait for every issued create, then assert name<->guid<->plan. The Valkey's guid is
+#   the FIRST guid in the note (svc_note_guid); any cleanup text comes after it.
+svc_create_wait(){
+  local sg name vname job t1 lj n vg vp plan tag
+  for sg in "${!JOBS[@]}"; do
+    name=$(printf '%s\n' "$ROWS" | awk -F'\t' -v s="$sg" '$4==s {print $3; exit}'); plan=$(printf '%s\n' "$ROWS" | awk -F'\t' -v s="$sg" '$4==s {print $7; exit}')
+    vname="${VNAME[$sg]}"; job="${JOBS[$sg]% *}"; t1="${JOBS[$sg]#* }"; tag="plan $plan"; [ "$vname" = "$name" ] || tag="staged, plan $plan"
+    say "$name: waiting for valkey deploy ($job, up to ${CREATE_TIMEOUT}s)"
+    if job_wait "$job" "$CREATE_TIMEOUT"; then
+      lj=$(cflist "/v3/service_instances?names=$vname&space_guids=${SPACE[$sg]}")
+      n=$(printf '%s' "$lj" | jq -r '.resources|length' 2>/dev/null)
+      vg=$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty'); vp=$(printf '%s' "$lj" | jq -r '.resources[0].relationships.service_plan.data.guid // empty')
+      if [ "$n" = 1 ] && [ "$vg" != "$sg" ] && [ "$vp" = "${PLANG[$sg]}" ]; then
+        VK[$sg]=$vg; ledger_add "$WAVE" "$sg" "" create-valkey ok $(( ($(date +%s)-t1)*1000 )) "valkey $vg as $vname ($tag${CLEANED[$sg]:+; ${CLEANED[$sg]}})"
+        printf '%s\t%s\t%s\n' "$sg" "$vg" "$vname" >> "$RUN/wave-$WAVE.guids"; say "$name: valkey ready as $vname (${vg:0:8})"
+      else ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "job done but assert failed: $n instance(s) named $vname, guid ${vg:-none}, plan ${vp:-none}"; SKIP[$sg]=1; say "!! $name: post-create assert failed -- skipped"; fi
+    else ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "$R_ERR"; SKIP[$sg]=1; say "!! $name: valkey create FAILED: $R_ERR -- skipped${vname:+ }$([ "$vname" = "$name" ] && echo "(redis stays as $name-redis-standby; 'rollback --service' renames it back)")"; fi
+  done
+}
+# svc_rename_staged <sg> <name>: the staged Valkey (VK) takes the production name; 1 (+SKIP) when it cannot
+svc_rename_staged(){
+  local sg="$1" name="$2" vk="${VK[$sg]}" stn vj vn t0; stn=$(staged_name "$name")
+  vj=$(cfx "/v3/service_instances/$vk" 2>/dev/null); cf_json_ok "$vj" || { ledger_add "$WAVE" "$sg" "" drift fail 0 "GET staged valkey $vk: $(printf '%s' "$vj" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"; SKIP[$sg]=1; say "!! $name: staged valkey ${vk:0:8} unreadable -- skipped"; return 1; }
+  vn=$(printf '%s' "$vj" | jq -r .name)
+  if [ "$vn" = "$name" ]; then   # a run died after the PATCH and before its ledger line: record it, and sync the broker's copy now
+    [ -n "$(ledger_done "$sg" "" rename-valkey)" ] || { ledger_add "$WAVE" "$sg" "" rename-valkey ok 0 "$stn -> $name (found already renamed)"; name_sync "$sg" "$vk" "$name" "$stn"; }; return 0; fi
+  [ "$vn" = "$stn" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "staged valkey $vk is named '$vn', expected '$stn'"; SKIP[$sg]=1; say "!! $name: staged valkey is named '$vn' -- skipped"; return 1; }
+  local vst; vst=$(printf '%s' "$vj" | jq -r '.last_operation.state')
+  [ "$vst" = succeeded ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "staged valkey $vk last_operation=$(printf '%s' "$vj" | jq -r '.last_operation.type') $vst"; SKIP[$sg]=1; say "!! $name: staged valkey last operation is '$vst' -- skipped"; return 1; }
+  t0=$(date +%s)
+  if cfreq PATCH "/v3/service_instances/$vk" "{\"name\":\"$name\"}" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then
+    ledger_add "$WAVE" "$sg" "" rename-valkey ok $(( ($(date +%s)-t0)*1000 )) "$stn -> $name"; say "$name: staged valkey renamed -> $name (${vk:0:8})"; name_sync "$sg" "$vk" "$name" "$stn"; return 0
+  else ledger_add "$WAVE" "$sg" "" rename-valkey fail $(( ($(date +%s)-t0)*1000 )) "$R_ERR"; SKIP[$sg]=1; say "!! $name: staged valkey rename failed: $R_ERR -- skipped (redis is $name-redis-standby, valkey still $stn)"; return 1; fi
 }
 
 apply_services(){
-  unset VK SKIP JOBS PLANG SPACE CLEANED; declare -gA VK SKIP JOBS PLANG SPACE CLEANED   # per wave
-  local sg name sorg ssp plan flags std j cur st t0 sp pg lj n
+  svc_arrays
+  local sg name sorg ssp plan flags std j cur t0 sp
   while IFS=$'\t' read -r sg name sorg ssp plan flags; do
     halt_check || return 1
     std="${name}-redis-standby"
     j=$(cfx "/v3/service_instances/$sg" 2>/dev/null); cf_json_ok "$j" || { ledger_add "$WAVE" "$sg" "" drift fail 0 "GET service: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"; SKIP[$sg]=1; say "!! $name: cannot read instance $sg -- skipped"; continue; }
     cur=$(printf '%s' "$j" | jq -r .name); sp=$(printf '%s' "$j" | jq -r '.relationships.space.data.guid'); SPACE[$sg]=$sp
-    # -- rename-standby
+    # -- rename-standby (+ name-sync of Blacksmith's copy)
     if [ -n "$(ledger_done "$sg" "" rename-standby)" ]; then
       [ "$cur" = "$std" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "ledger: renamed; CF name is '$cur'"; SKIP[$sg]=1; say "!! $name: drift (CF name '$cur') -- skipped"; continue; }
     else
       [ "$cur" = "$name" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "expected name '$name', CF has '$cur'"; SKIP[$sg]=1; say "!! $name: guid $sg is named '$cur' -- skipped"; continue; }
       t0=$(date +%s)
       if cfreq PATCH "/v3/service_instances/$sg" "{\"name\":\"$std\"}" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then
-        ledger_add "$WAVE" "$sg" "" rename-standby ok $(( ($(date +%s)-t0)*1000 )) "$name -> $std"; say "$name: renamed -> $std"
+        ledger_add "$WAVE" "$sg" "" rename-standby ok $(( ($(date +%s)-t0)*1000 )) "$name -> $std"; say "$name: renamed -> $std"; name_sync "$sg" "$sg" "$std" "$name"
       else ledger_add "$WAVE" "$sg" "" rename-standby fail $(( ($(date +%s)-t0)*1000 )) "$R_ERR"; SKIP[$sg]=1; say "!! $name: rename failed: $R_ERR -- skipped"; continue; fi
     fi
-    # -- create-valkey (issue now, wait below)
+    # -- the Valkey: provisioned ahead (staged -> rename to <name>), already created, or create now (waited below)
     if [ -n "$(ledger_done "$sg" "" create-valkey)" ]; then
       VK[$sg]=$(svc_note_guid "$sg"); [ -n "${VK[$sg]}" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "create-valkey recorded but no guid in its note"; SKIP[$sg]=1; continue; }
-      say "$name: valkey already created (${VK[$sg]:0:8})"; continue
+      if [ -n "$(svc_staged "$sg")" ]; then svc_rename_staged "$sg" "$name" || continue
+      else say "$name: valkey already created (${VK[$sg]:0:8})"; fi
+      continue
     fi
-    lj=$(cflist "/v3/service_plans?names=$plan&service_offering_names=valkey&space_guids=$sp&available=true") || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "API error listing valkey plan '$plan'"; SKIP[$sg]=1; say "!! $name: cannot list valkey plans"; continue; }
-    n=$(printf '%s' "$lj" | jq -r '.resources|length'); pg=$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty')
-    [ "$n" = 1 ] || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "valkey plan '$plan': $n match(es) in the space"; SKIP[$sg]=1; say "!! $name: valkey plan '$plan' -> $n match(es) -- skipped"; continue; }
-    PLANG[$sg]=$pg
-    # leftover under the name? (a previous create failed, or completed after the process died)
-    lj=$(cflist "/v3/service_instances?names=$name&space_guids=$sp") || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "API error listing instances named $name"; SKIP[$sg]=1; continue; }
-    local lg lst lpl; lg=$(printf '%s' "$lj" | jq -r '.resources[]|select(.guid!="'"$sg"'")|.guid' | head -1)
-    if [ -n "$lg" ]; then
-      lst=$(printf '%s' "$lj" | jq -r '.resources[]|select(.guid=="'"$lg"'")|"\(.last_operation.type) \(.last_operation.state)"'); lpl=$(printf '%s' "$lj" | jq -r '.resources[]|select(.guid=="'"$lg"'")|.relationships.service_plan.data.guid')
-      if [ "$lst" = "create succeeded" ] && [ "$lpl" = "$pg" ]; then
-        VK[$sg]=$lg; ledger_add "$WAVE" "$sg" "" create-valkey ok 0 "valkey $lg as $name (adopted: already existed, plan $plan)"; printf '%s\t%s\t%s\n' "$sg" "$lg" "$name" >> "$RUN/wave-$WAVE.guids"; say "$name: valkey already exists (${lg:0:8}) -- adopted"; continue
-      elif [ "$lst" = "create failed" ]; then
-        say "$name: deleting failed leftover ${lg:0:8} ($lst)"
-        local cleaned=""
-        if cfreq DELETE "/v3/service_instances/$lg" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then cleaned="deleted failed leftover $lg; "; CLEANED[$sg]="$cleaned"
-        else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "cannot delete failed leftover $lg: $R_ERR"; SKIP[$sg]=1; continue; fi
-      else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "name $name taken by $lg ($lst, plan $lpl) -- not ours to touch"; SKIP[$sg]=1; say "!! $name: name taken by ${lg:0:8} ($lst) -- skipped"; continue; fi
-    fi
-    if cfreq POST "/v3/service_instances" "{\"type\":\"managed\",\"name\":\"$name\",\"relationships\":{\"space\":{\"data\":{\"guid\":\"$sp\"}},\"service_plan\":{\"data\":{\"guid\":\"$pg\"}}}}" && [ -n "$R_JOB" ]; then
-      JOBS[$sg]="$R_JOB $(date +%s)"; say "$name: valkey create issued (plan $plan) -> $R_JOB"
-    else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "${R_ERR:-no job in response}"; SKIP[$sg]=1; say "!! $name: create failed: ${R_ERR:-no job}"; fi
+    svc_create_issue "$sg" "$name" "$sp" "$plan" "$name"
   done < <(printf '%s\n' "$ROWS" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
-  # -- wait for every create, then assert names<->guids
-  local job t1
-  for sg in "${!JOBS[@]}"; do
-    name=$(printf '%s\n' "$ROWS" | awk -F'\t' -v s="$sg" '$4==s {print $3; exit}'); job="${JOBS[$sg]% *}"; t1="${JOBS[$sg]#* }"
-    say "$name: waiting for valkey deploy ($job, up to ${CREATE_TIMEOUT}s)"
-    if job_wait "$job" "$CREATE_TIMEOUT"; then
-      lj=$(cflist "/v3/service_instances?names=$name&space_guids=${SPACE[$sg]}")
-      n=$(printf '%s' "$lj" | jq -r '.resources|length' 2>/dev/null); local vg vp
-      vg=$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty'); vp=$(printf '%s' "$lj" | jq -r '.resources[0].relationships.service_plan.data.guid // empty')
-      if [ "$n" = 1 ] && [ "$vg" != "$sg" ] && [ "$vp" = "${PLANG[$sg]}" ]; then
-        VK[$sg]=$vg; ledger_add "$WAVE" "$sg" "" create-valkey ok $(( ($(date +%s)-t1)*1000 )) "${CLEANED[$sg]:-}valkey $vg as $name (plan $(printf '%s\n' "$ROWS" | awk -F'\t' -v s="$sg" '$4==s {print $7; exit}'))"
-        printf '%s\t%s\t%s\n' "$sg" "$vg" "$name" >> "$RUN/wave-$WAVE.guids"; say "$name: valkey ready (${vg:0:8})"
-      else ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "job done but assert failed: $n instance(s) named $name, guid ${vg:-none}, plan ${vp:-none}"; SKIP[$sg]=1; say "!! $name: post-create assert failed -- skipped"; fi
-    else ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "$R_ERR"; SKIP[$sg]=1; say "!! $name: valkey create FAILED: $R_ERR -- skipped (redis stays as $name-redis-standby; 'rollback --service' renames it back)"; fi
-  done
+  svc_create_wait
   # -- copy-data for datastore services
   while IFS=$'\t' read -r sg name flags; do
     [ -n "${SKIP[$sg]:-}" ] && continue; case ",$flags," in *,datastore,*) ;; *) continue;; esac
@@ -759,8 +987,7 @@ apply_apps(){
 }
 
 cmd_apply(){
-  local list=""
-  if [ -n "${WAVES:-}" ]; then list=$(seq "${WAVES%-*}" "${WAVES#*-}" | paste -sd' ' -); else list="$WAVE"; fi
+  local list; list=$(wave_list)
   [ -n "$list" ] || { echo "usage: migrate.sh apply --wave N | --waves A-B [--service X] [--yes] [--force] [--run dir]"; exit 1; }
   [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
   STOP_REQ=0; trap 'STOP_REQ=1; echo; echo "!! Ctrl-C: the running step completes and is recorded, then apply stops"' INT
@@ -861,13 +1088,15 @@ cmd_retire(){
 
 case "$SUB" in
   plan)      cmd_plan "$ARG" ;;
+  provision) cmd_provision ;;
   apply)     cmd_apply ;;
   dry-run)   cmd_dryrun ;;
   preflight) cmd_preflight ;;
-  status) if [ -n "$WAVE" ]; then cmd_status; else cmd_summary; fi ;;
+  status) if [ -n "$WAVE" ]; then cmd_status; else cmd_summary; write_inventory; fi ;;
+  name-sync) cmd_namesync ;;
   rollback)  cmd_rollback ;;
   confirm)   cmd_confirm ;;
   retire)    cmd_retire ;;
-  *) echo "usage: migrate.sh plan <report.csv> | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N]"
+  *) echo "usage: migrate.sh plan <report.csv> | provision --wave N|--waves A-B [--yes] | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N] | name-sync --wave N|--waves A-B"
      echo "       rollback --wave N --service Y [--app X] [--reason ..] | confirm --wave N --service Y --by <team> [--grace 336h] | retire --wave N --service Y [--no-census] [--force]   (all: --run <dir>)"; exit 1 ;;
 esac
