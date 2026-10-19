@@ -10,6 +10,8 @@ plans steered to z3 with raised `limit`; blacksmith redeployed; probe landed in 
 verified against the broker's Vault.
 
 All commands run on the bastion in `~/ocfp/migration-sim` unless the line says otherwise.
+The bastion logs idle sessions out: run anything longer than a few minutes inside `tmux`
+(`tmux new -s sim` … `tmux attach -t sim`), so `provision` and `apply` survive the disconnect.
 
 ---
 
@@ -203,7 +205,24 @@ Paste back: `scaled-summary.txt` and the two numbers lines.
 
 ---
 
+## 2b. If pushes fail at staging with `InsufficientResources` (done 2026-10-19: +2 cells)
+
+Diego places by *allocation* (every container's memory/disk limit), not by OS usage; a staging
+task reserves 1 GB + 4 GB disk on one cell. SBX's 5 cells (~8 GB each) had no such slot left.
+Temporary fix, in the cf env file (`~/deployments/cf/ocfp-int-sbx-us-east-1.yml`):
+
+```yaml
+params:
+  diego_cell_instances: 7       # temporary for the scaled rehearsal; was 5 -- SET BACK AT TEARDOWN (block 9)
+```
+
+`genesis @sbx-us:cf deploy` (diff: only `diego-cell instances 5 → 7`; each cell takes one `-ocf` IP).
+Then the same `populate.sh` line again (3-wide): empty app records are deleted and pushed again.
+
 ## 9. Teardown (when done; keeps the ledger and inventory as evidence)
+
+First the two temporary cells: `diego_cell_instances` back to 5 in the cf env file,
+`genesis @sbx-us:cf deploy` — BOSH drains and deletes them, two `-ocf` IPs come back.
 
 ```bash
 cp runs/sbx/ledger.jsonl runs/sbx/ledger-scaled-$(date +%F).jsonl
