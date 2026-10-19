@@ -29,4 +29,12 @@ if [ -z "$DEP" ]; then
   [ "$(printf '%s\n' "$deps" | wc -l | tr -d ' ')" = 1 ] || { echo "safe-run.sh: several blacksmith deployments: $(printf '%s' "$deps" | tr '\n' ' ') -- set BLACKSMITH_DEPLOYMENT" >&2; exit 2; }
   DEP="$deps"
 fi
-exec bosh -d "$DEP" ssh blacksmith/0 -c "export PATH=/var/vcap/packages/safe/bin:\$PATH VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=\$(sudo sed -n 's/.*\"root_token\" *: *\"\([^\"]*\)\".*/\1/p' /var/vcap/store/blacksmith/.vault/creds); $1"
+# the broker instance: BLACKSMITH_INSTANCE (group/uuid), or the deployment's single instance -- no assumption
+# about the group name or index (`blacksmith/0` did not match on a client director, 2026-10-18)
+INST="${BLACKSMITH_INSTANCE:-}"
+if [ -z "$INST" ]; then
+  insts=$(bosh -d "$DEP" instances --json | jq -r '.Tables[0].Rows[].instance' | grep .) || { echo "safe-run.sh: no instances listed for $DEP" >&2; exit 2; }
+  [ "$(printf '%s\n' "$insts" | wc -l | tr -d ' ')" = 1 ] || { echo "safe-run.sh: several instances in $DEP: $(printf '%s' "$insts" | tr '\n' ' ') -- set BLACKSMITH_INSTANCE=<group/uuid>" >&2; exit 2; }
+  INST="$insts"
+fi
+exec bosh -d "$DEP" ssh "$INST" -c "export PATH=/var/vcap/packages/safe/bin:\$PATH VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=\$(sudo sed -n 's/.*\"root_token\" *: *\"\([^\"]*\)\".*/\1/p' /var/vcap/store/blacksmith/.vault/creds); $1"
