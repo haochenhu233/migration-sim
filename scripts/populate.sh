@@ -129,14 +129,15 @@ if [ "$todo" -gt 0 ]; then
   # one `cf push -f chunk` per line, -P parallel, each in its own CF_HOME copy; -n1 + "$1" (BSD xargs -I is limited to 255 bytes)
   CFH="${CF_HOME:-$HOME/.cf}"; [ -d "$CFH" ] || die "CF_HOME $CFH not found"
   export CFH
-  xargs -P "$PAR" -n1 sh -c 'd="$1.cfhome"; rm -rf "$d"; cp -R "$CFH" "$d" && CF_HOME="$d" cf push -f "$1" > "$1.log" 2>&1; echo "$? $1"; rm -rf "$d"' _ < "$LOGD/chunks.txt" > "$LOGD/push-results.txt"
+  # the chunk's log always exists: a failing CF_HOME copy lands in it too (not only on the terminal)
+  xargs -P "$PAR" -n1 sh -c 'd="$1.cfhome"; rm -rf "$d"; { cp -R "$CFH" "$d" && CF_HOME="$d" cf push -f "$1"; } > "$1.log" 2>&1; echo "$? $1"; rm -rf "$d"' _ < "$LOGD/chunks.txt" > "$LOGD/push-results.txt"
   bad=$(awk '$1!=0' "$LOGD/push-results.txt" | wc -l | tr -d ' ')
   echo "   push chunks: $(wc -l < "$LOGD/chunks.txt" | tr -d ' '), failed chunks: $bad ($(elapsed))"
 fi
 # verify by listing, not by push exit codes alone (a chunk fails on its first bad app; the others in it never pushed)
 list_apps "$LOGD/apps-after.txt"
 missing=$(awk -F'\t' -v after="$LOGD/apps-after.txt" 'BEGIN { while ((getline l < after) > 0) have[l]=1 } NR>1 && !($1 in have) {print $1}' "$LAYOUT")
-if [ -n "$missing" ]; then echo "   !! apps missing after push: $(printf '%s\n' "$missing" | wc -l | tr -d ' ') -- see $LOGD/chunk-*.log; re-run to push only the missing ones"; printf '%s\n' "$missing" | head -5 | sed 's/^/      /'; fi
+if [ -n "$missing" ]; then echo "   !! apps missing after push: $(printf '%s\n' "$missing" | wc -l | tr -d ' ') -- see $LOGD/push-results.txt (exit code per chunk) and $LOGD/chunk-NNN.yml.log; re-run to push only the missing ones"; printf '%s\n' "$missing" | head -5 | sed 's/^/      /'; fi
 
 # ---- 4. the silent service's apps
 echo "== stopping the silent service's apps"
