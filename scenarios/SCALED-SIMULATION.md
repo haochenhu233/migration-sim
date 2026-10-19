@@ -106,7 +106,7 @@ bash migrate/migrate.sh plan ~/ocfp/redis-consumer-discovery/sbx-scale/merged_re
 cat runs/sbx/plan-summary.md
 ```
 
-Expected: 20 services, 120 apps, 2 orgs, 2 silent services, 12 multi-bound apps, 5–6 waves.
+Expected: 20 services, 120 apps, 2 orgs, 2 silent services, 16 multi-bound apps (8 per org, all started), 5–6 waves.
 Paste back: `plan-summary.md` (aggregates only — it contains no names).
 
 If an older `runs/sbx/ledger.jsonl` from the 6-service rehearsal is still there, move it aside

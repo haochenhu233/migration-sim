@@ -149,7 +149,7 @@ cf target -o "$POP_ORG_A" -s "$POP_SPACE_A"
 bash scripts/populate.sh --services 10 --apps 60 --run runs/sbx --org "$POP_ORG_A" --space "$POP_SPACE_A" --prefix scla [--parallel 8]
 cf target -o "$POP_ORG_B" -s "$POP_SPACE_B"
 bash scripts/populate.sh --services 10 --apps 60 --run runs/sbx --org "$POP_ORG_B" --space "$POP_SPACE_B" --prefix sclb [--parallel 8]
-#  layout -> runs/sbx/layout-<prefix>.tsv (round-robin; every 10th app multi-bound; every app of the LAST service
+#  layout -> runs/sbx/layout-<prefix>.tsv (round-robin; every 7th app multi-bound, pair neighbour; every app of the LAST service
 #  stopped = one truly silent service). Services --parallel at a time: ready only on 'create succeeded',
 #  'in progress' waited, 'failed' stops the run (delete it by hand; re-run skips the ready ones).
 #  Apps pushed in chunks of --parallel, concurrently, one CF_HOME copy per chunk. Re-run completes a half-pushed chunk.

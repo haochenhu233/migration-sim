@@ -6,9 +6,14 @@
 # One run = one population in ONE org/space. For a multi-org rehearsal run it once per org/space with a
 #   different --prefix each (scla, sclb); logs are kept apart in runs/<env>/populate-<prefix>/.
 # Layout (deterministic, written to runs/<env>/layout-<prefix>.tsv, same columns as scripts/layout.tsv):
-#   app i = <prefix>-app-NNN bound round-robin to service <prefix>-redis-NN; every 10th app is ALSO
-#   bound to a second service (multi-bound -> one restart per wave); every app of the LAST service is
-#   STOPPED, so that service is a truly silent one (rebind only, no restart) -- needs N >= 2.
+#   app i = <prefix>-app-NNN bound round-robin to service <prefix>-redis-NN; every 7th app is ALSO bound
+#   to a second service (multi-bound -> one restart per wave): 7 is coprime with 10 and 20, so those apps
+#   spread over the services, and the partner is the pair neighbour (01<->02, 03<->04, ...), never the last
+#   service, so the binding graph is made of 2-service components (a chain of 3-4 where the pair would hit
+#   the last service) -- the NP shape (chains of 2-4). Every app of the LAST service is STOPPED, so that service is a truly
+#   silent one (rebind only, no restart) -- needs N >= 2.
+#   (Before 2026-10-19 "every 10th app" was multi-bound; for N=10 those were exactly the last service's
+#   apps -- all stopped, and one 7-service component. --layout-only writes the layout and exits: offline test.)
 #   Apps are apps/sim-go (SIM_MODE=cache, /check contract), SIM_SERVICE_NAME = the first bound service.
 # Steps: services (--parallel at a time; an existing service counts as ready only when its last operation
 #   is 'create succeeded' -- 'in progress' is waited on, 'failed' stops the run: delete it by hand) ->
@@ -26,11 +31,11 @@
 #   -- it is never read as "nothing there". Prints counts only. The migration plan is still built from the
 #   discovery scan (--services "^<prefix>-redis-"). Needs a SpaceDeveloper login.
 set -uo pipefail
-N=""; M=""; RUN=""; ORG=""; SPACE=""; PREFIX=scl; OFFERING=redis; PLAN=cache-small; PAR=8; MEM=64M; TEARDOWN=0
+N=""; M=""; RUN=""; ORG=""; SPACE=""; PREFIX=scl; OFFERING=redis; PLAN=cache-small; PAR=8; MEM=64M; TEARDOWN=0; LAYOUT_ONLY=0
 while [ "${1:-}" ]; do case "$1" in
   --services) N="$2"; shift 2;; --apps) M="$2"; shift 2;; --run) RUN="$2"; shift 2;; --org) ORG="$2"; shift 2;; --space) SPACE="$2"; shift 2;; --prefix) PREFIX="$2"; shift 2;;
   --offering) OFFERING="$2"; shift 2;; --plan) PLAN="$2"; shift 2;; --parallel) PAR="$2"; shift 2;; --memory) MEM="$2"; shift 2;;
-  --teardown) TEARDOWN=1; shift;; *) echo "unknown arg $1"; exit 2;; esac; done
+  --teardown) TEARDOWN=1; shift;; --layout-only) LAYOUT_ONLY=1; shift;; *) echo "unknown arg $1"; exit 2;; esac; done
 usage(){ echo "usage: populate.sh --services N --apps M --run runs/<env> --org <org> --space <space> [--prefix scl] [--offering redis] [--plan cache-small] [--parallel 8] [--memory 64M] | --run runs/<env> --org <org> --space <space> [--prefix scl] --teardown"; exit 2; }
 [ -n "$RUN" ] && [ -n "$ORG" ] && [ -n "$SPACE" ] || usage
 case "$RUN" in *[[:space:]]*) echo "!! --run path must not contain whitespace"; exit 2;; esac
@@ -42,10 +47,12 @@ die(){ echo "!! $*" >&2; exit 1; }
 T0=$(date +%s); elapsed(){ echo "$(( $(date +%s) - T0 ))s"; }
 APP_RE="^$PREFIX-app-[0-9]{3}\$"; SVC_RE="^$PREFIX-redis-[0-9]{2}(-redis-standby)?\$"
 
-# ---- target: verified, not assumed
+# ---- target: verified, not assumed (--layout-only touches no cf)
+if [ "$LAYOUT_ONLY" != 1 ]; then
 cf target > "$LOGD/target.txt" 2>&1 || die "cf target failed -- not logged in? ($(tail -1 "$LOGD/target.txt"))"
 torg=$(sed -n 's/^org: *//p' "$LOGD/target.txt" | tr -d '[:space:]'); tspace=$(sed -n 's/^space: *//p' "$LOGD/target.txt" | tr -d '[:space:]')
 [ "$torg" = "$ORG" ] && [ "$tspace" = "$SPACE" ] || die "cf target is org/space '${torg:-<none>}/${tspace:-<none>}', expected '$ORG/$SPACE' (cf target -o $ORG -s $SPACE)"
+fi
 # ---- listings into files, exit status checked (a failing listing is an error, never "nothing there")
 list_apps(){ cf apps > "$LOGD/cf-apps.txt" 2>&1 || die "cf apps failed: $(tail -1 "$LOGD/cf-apps.txt")"
   awk -v re="$APP_RE" 'NR>3 && $1 ~ re {print $1}' "$LOGD/cf-apps.txt" > "$1"; }
@@ -87,10 +94,12 @@ case "$N$M$PAR" in *[!0-9]*) die "--services/--apps/--parallel must be integers"
 # ---- 1. layout
 awk -v n="$N" -v m="$M" -v p="$PREFIX" 'BEGIN { OFS="\t"; print "app","services","state","note"
   for (i=1; i<=m; i++) { j=((i-1)%n)+1; s=sprintf("%s-redis-%02d", p, j); note="round-robin"; st="started"
-    if (i%10==0) { k=((j + int(i/10) - 1) % n) + 1; if (k==j) k=(k%n)+1; s=s "," sprintf("%s-redis-%02d", p, k); note="multi-bound (2 services -> 1 restart per wave)" }
+    if (i%7==0) { k=(j%2==1) ? j+1 : j-1; if (k>=n) k=j-1      # pair neighbour; a started app never joins the last (silent) service
+      if (k>=1 && k!=j) { s=s "," sprintf("%s-redis-%02d", p, k); note="multi-bound (2 services -> 1 restart per wave)" } }
     if (j==n) { st="stopped"; note=note "; stopped: every app of the last service -> silent service, rebind only" }
     print sprintf("%s-app-%03d", p, i), s, st, note } }' > "$LAYOUT" || die "layout write failed"
-echo "== layout: $N services, $M apps -> $LAYOUT ($(awk -F'\t' 'NR>1 && $2 ~ /,/' "$LAYOUT" | wc -l | tr -d ' ') multi-bound, $(awk -F'\t' 'NR>1 && $3=="stopped"' "$LAYOUT" | wc -l | tr -d ' ') stopped = all apps of $PREFIX-redis-$(printf '%02d' "$N"), the silent service)"
+echo "== layout: $N services, $M apps -> $LAYOUT ($(awk -F'\t' 'NR>1 && $2 ~ /,/' "$LAYOUT" | wc -l | tr -d ' ') multi-bound, of them started $(awk -F'\t' 'NR>1 && $2 ~ /,/ && $3=="started"' "$LAYOUT" | wc -l | tr -d ' '); $(awk -F'\t' 'NR>1 && $3=="stopped"' "$LAYOUT" | wc -l | tr -d ' ') stopped = all apps of $PREFIX-redis-$(printf '%02d' "$N"), the silent service)"
+[ "$LAYOUT_ONLY" != 1 ] || exit 0
 
 # ---- 2. services, --parallel at a time; existing ones by STATE, not by name
 echo "== services ($OFFERING/$PLAN), $PAR at a time"
