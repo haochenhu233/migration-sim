@@ -7,6 +7,7 @@
 #   CFCLI_FAIL_PUSH=<app>      pushing that app fails (the rest of its manifest chunk is not pushed, like cf)
 #   CFCLI_SLOW=<name>          that service needs 2 polls before 'create succeeded'
 #   CFCLI_LISTFAIL=1           `cf apps` / `cf services` fail (expired token)
+#   CFCLI_ORG / CFCLI_SPACE    what `cf target` reports (default lab / scale)
 # A push whose manifest binds to a service that is not 'create succeeded' fails, like cf.
 # Unverified live: `cf create-service` on an existing name (modelled as exit 0 "already exists") -- the
 # script never calls it on an existing name, so no decision depends on it.
@@ -14,7 +15,7 @@ S="${CFCLI_STATE:-/tmp/cfcli-fake}"; mkdir -p "$S/svc" "$S/app"
 # a service file holds: offering state polls ; state creating->succeeded when polls reach 0
 svc_state(){ read -r off st polls < "$S/svc/$1"; if [ "$st" = creating ] && [ "${polls:-0}" -le 0 ]; then st=succeeded; fi; echo "$off $st ${polls:-0}"; }
 case "$1" in
-  target) printf 'API endpoint:   https://api.fake\nAPI version:    3.150.0\nuser:           admin\norg:            lab\nspace:          %s\n' "${CFCLI_SPACE:-scale}";;
+  target) printf 'API endpoint:   https://api.fake\nAPI version:    3.150.0\nuser:           admin\norg:            %s\nspace:          %s\n' "${CFCLI_ORG:-lab}" "${CFCLI_SPACE:-scale}";;
   apps) [ -z "${CFCLI_LISTFAIL:-}" ] || { echo "The token expired, was revoked, or the token ID is incorrect. Please log back in to re-authenticate."; exit 1; }
     printf 'Getting apps in org lab / space scale as admin...\n\nname  requested state  processes  routes\n'; for f in "$S"/app/*; do [ -e "$f" ] && [ "${f%.svc}" = "$f" ] || continue; printf '%s  %s  web:1/1  %s.apps.fake\n' "$(basename "$f")" "$(cat "$f")" "$(basename "$f")"; done;;
   services) [ -z "${CFCLI_LISTFAIL:-}" ] || { echo "The token expired, was revoked, or the token ID is incorrect. Please log back in to re-authenticate."; exit 1; }

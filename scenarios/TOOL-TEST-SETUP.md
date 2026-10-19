@@ -131,20 +131,39 @@ bash migrate/free-ips.sh --network ocfp-int-sbx-us-east-1-ocf --cloud-config ocf
 
 ## Scale population (SBX with the extra subnets, or our lab) — `scripts/populate.sh`
 
+Two populations in two orgs (decided 2026-10-18: the rehearsal spans orgs, no shared instances —
+NP has 0 cross-space services). Fill in the four names once; everything below uses them.
+
 ```bash
-cf target -o <org> -s <space>
-bash scripts/populate.sh --services 16 --apps 100 --run runs/sbx --space <space> [--parallel 8] [--prefix scl]
-#  layout -> runs/sbx/layout-scl.tsv (round-robin; every 10th app multi-bound; every app of the LAST service
+export POP_ORG_A=<existing sim org>   POP_SPACE_A=<existing sim space>     # prefix scla: 10 services, 60 apps
+export POP_ORG_B=<new org>            POP_SPACE_B=<new space>              # prefix sclb: 10 services, 60 apps
+
+# org B does not exist yet: create it, give yourself the role, open the marketplace for it
+cf create-org "$POP_ORG_B" && cf create-space "$POP_SPACE_B" -o "$POP_ORG_B"
+cf set-space-role "$(cf target | sed -n 's/^user: *//p')" "$POP_ORG_B" "$POP_SPACE_B" SpaceDeveloper
+cf enable-service-access redis -o "$POP_ORG_B"; cf enable-service-access valkey -o "$POP_ORG_B"
+cf marketplace -e valkey    # after `cf target -o $POP_ORG_B`: the standalone plan must be listed
+
+# one run per org/space; --org/--space are compared with `cf target`, logs in runs/sbx/populate-<prefix>/
+cf target -o "$POP_ORG_A" -s "$POP_SPACE_A"
+bash scripts/populate.sh --services 10 --apps 60 --run runs/sbx --org "$POP_ORG_A" --space "$POP_SPACE_A" --prefix scla [--parallel 8]
+cf target -o "$POP_ORG_B" -s "$POP_SPACE_B"
+bash scripts/populate.sh --services 10 --apps 60 --run runs/sbx --org "$POP_ORG_B" --space "$POP_SPACE_B" --prefix sclb [--parallel 8]
+#  layout -> runs/sbx/layout-<prefix>.tsv (round-robin; every 10th app multi-bound; every app of the LAST service
 #  stopped = one truly silent service). Services --parallel at a time: ready only on 'create succeeded',
 #  'in progress' waited, 'failed' stops the run (delete it by hand; re-run skips the ready ones).
 #  Apps pushed in chunks of --parallel, concurrently, one CF_HOME copy per chunk. Re-run completes a half-pushed chunk.
-#  --space is compared with `cf target`; a failing cf listing stops the run (never "nothing there").
-# then the plan from the scan, scoped to this population:
-#  ... plan <merged.csv> --services '^scl-redis-' ; migrate/free-ips.sh ; preflight
-bash scripts/populate.sh --run runs/sbx --space <space> --teardown    # scl-app-NNN apps, scl-redis-NN[-redis-standby] services (Redis + Valkey)
+#  A failing cf listing stops the run (never "nothing there").
+# then ONE plan from the scan over both orgs, scoped to both populations:
+#  ... plan <merged.csv> --services '^(scla|sclb)-redis-' ; migrate/free-ips.sh ; preflight
+
+# teardown, per org/space (scl?-app-NNN apps, scl?-redis-NN[-redis-standby] services: Redis AND the Valkey that took the name)
+cf target -o "$POP_ORG_A" -s "$POP_SPACE_A"; bash scripts/populate.sh --run runs/sbx --org "$POP_ORG_A" --space "$POP_SPACE_A" --prefix scla --teardown
+cf target -o "$POP_ORG_B" -s "$POP_SPACE_B"; bash scripts/populate.sh --run runs/sbx --org "$POP_ORG_B" --space "$POP_SPACE_B" --prefix sclb --teardown
 ```
-Before 16 pairs in SBX: `params.valkey_plans.standalone.limit` / `redis_plans` limit (kit default 7),
-cell memory (100 x 64M), and the three idle subnets added to the `-ocf` network (one per AZ).
+Before 20 pairs in SBX: `params.valkey_plans.standalone` and the Redis plan steered to z3 (`azs:`) with
+`limit` raised (kit default 7) — done 2026-10-18, probe landed in z3; cell memory (120 x 64M);
+`migrate/free-ips.sh` ≥ 40 free in z3.
 Offline: `scripts/test/cf-cli-fake` (knobs in its header) -- `PATH=<dir with cf -> cf-cli-fake>:$PATH CFCLI_STATE=... CF_HOME=<dir>`.
 
 ## Then the rest of the lifecycle — rollback (scenario 11), confirm, retire (scenario 12)

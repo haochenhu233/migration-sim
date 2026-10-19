@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # populate.sh -- generate and push a SCALE population for the migration rehearsal (lab / SBX).
-#   bash scripts/populate.sh --services N --apps M --run runs/<env> --space <name> [--prefix scl] [--offering redis]
-#                            [--plan cache-small] [--parallel 8] [--memory 64M]
-#   bash scripts/populate.sh --run runs/<env> --space <name> [--prefix scl] --teardown
+#   bash scripts/populate.sh --services N --apps M --run runs/<env> --org <org> --space <space> [--prefix scl]
+#                            [--offering redis] [--plan cache-small] [--parallel 8] [--memory 64M]
+#   bash scripts/populate.sh --run runs/<env> --org <org> --space <space> [--prefix scl] --teardown
+# One run = one population in ONE org/space. For a multi-org rehearsal run it once per org/space with a
+#   different --prefix each (scla, sclb); logs are kept apart in runs/<env>/populate-<prefix>/.
 # Layout (deterministic, written to runs/<env>/layout-<prefix>.tsv, same columns as scripts/layout.tsv):
 #   app i = <prefix>-app-NNN bound round-robin to service <prefix>-redis-NN; every 10th app is ALSO
 #   bound to a second service (multi-bound -> one restart per wave); every app of the LAST service is
@@ -15,33 +17,33 @@
 #   Idempotent: ready services and existing apps are skipped; a half-pushed chunk is completed on re-run.
 # --teardown deletes every <prefix>-app-NNN app and every <prefix>-redis-NN[-redis-standby] service
 #   (Redis AND the Valkey that took the name), waits, reports what is left.
-# Scope: strict name patterns, never 'sim-' (reset-population.sh's scope). --space is REQUIRED and
-#   compared with `cf target`: this is a lab-setup script that uses the current target (unlike the
+# Scope: strict name patterns, never 'sim-' (reset-population.sh's scope). --org and --space are REQUIRED
+#   and compared with `cf target`: this is a lab-setup script that uses the current target (unlike the
 #   migration tool, which is GUID-only), so the target is verified instead of assumed.
 # Every cf listing is checked: a failing `cf apps`/`cf services` (expired token, API error) stops the run
 #   -- it is never read as "nothing there". Prints counts only. The migration plan is still built from the
 #   discovery scan (--services "^<prefix>-redis-"). Needs a SpaceDeveloper login.
 set -uo pipefail
-N=""; M=""; RUN=""; SPACE=""; PREFIX=scl; OFFERING=redis; PLAN=cache-small; PAR=8; MEM=64M; TEARDOWN=0
+N=""; M=""; RUN=""; ORG=""; SPACE=""; PREFIX=scl; OFFERING=redis; PLAN=cache-small; PAR=8; MEM=64M; TEARDOWN=0
 while [ "${1:-}" ]; do case "$1" in
-  --services) N="$2"; shift 2;; --apps) M="$2"; shift 2;; --run) RUN="$2"; shift 2;; --space) SPACE="$2"; shift 2;; --prefix) PREFIX="$2"; shift 2;;
+  --services) N="$2"; shift 2;; --apps) M="$2"; shift 2;; --run) RUN="$2"; shift 2;; --org) ORG="$2"; shift 2;; --space) SPACE="$2"; shift 2;; --prefix) PREFIX="$2"; shift 2;;
   --offering) OFFERING="$2"; shift 2;; --plan) PLAN="$2"; shift 2;; --parallel) PAR="$2"; shift 2;; --memory) MEM="$2"; shift 2;;
   --teardown) TEARDOWN=1; shift;; *) echo "unknown arg $1"; exit 2;; esac; done
-usage(){ echo "usage: populate.sh --services N --apps M --run runs/<env> --space <name> [--prefix scl] [--offering redis] [--plan cache-small] [--parallel 8] [--memory 64M] | --run runs/<env> --space <name> [--prefix scl] --teardown"; exit 2; }
-[ -n "$RUN" ] && [ -n "$SPACE" ] || usage
+usage(){ echo "usage: populate.sh --services N --apps M --run runs/<env> --org <org> --space <space> [--prefix scl] [--offering redis] [--plan cache-small] [--parallel 8] [--memory 64M] | --run runs/<env> --org <org> --space <space> [--prefix scl] --teardown"; exit 2; }
+[ -n "$RUN" ] && [ -n "$ORG" ] && [ -n "$SPACE" ] || usage
 case "$RUN" in *[[:space:]]*) echo "!! --run path must not contain whitespace"; exit 2;; esac
 case "$PREFIX" in sim|sim-*) echo "!! prefix '$PREFIX' is the hand-laid SBX population's scope (reset-population.sh) -- use another"; exit 2;; esac
 printf '%s' "$PREFIX" | grep -qE '^[a-z][a-z0-9]{1,11}$' || { echo "!! prefix: lowercase letters/digits, 2-12 chars"; exit 2; }
 HERE="$(cd "$(dirname "$0")" && pwd)"; APPDIR="$HERE/../apps/sim-go"
-mkdir -p "$RUN/populate" || exit 2; LAYOUT="$RUN/layout-$PREFIX.tsv"; LOGD="$RUN/populate"
+LOGD="$RUN/populate-$PREFIX"; mkdir -p "$LOGD" || exit 2; LAYOUT="$RUN/layout-$PREFIX.tsv"
 die(){ echo "!! $*" >&2; exit 1; }
 T0=$(date +%s); elapsed(){ echo "$(( $(date +%s) - T0 ))s"; }
 APP_RE="^$PREFIX-app-[0-9]{3}\$"; SVC_RE="^$PREFIX-redis-[0-9]{2}(-redis-standby)?\$"
 
 # ---- target: verified, not assumed
 cf target > "$LOGD/target.txt" 2>&1 || die "cf target failed -- not logged in? ($(tail -1 "$LOGD/target.txt"))"
-tspace=$(sed -n 's/^space: *//p' "$LOGD/target.txt" | tr -d '[:space:]')
-[ "$tspace" = "$SPACE" ] || die "cf target is space '${tspace:-<none>}', expected '$SPACE' (cf target -s $SPACE)"
+torg=$(sed -n 's/^org: *//p' "$LOGD/target.txt" | tr -d '[:space:]'); tspace=$(sed -n 's/^space: *//p' "$LOGD/target.txt" | tr -d '[:space:]')
+[ "$torg" = "$ORG" ] && [ "$tspace" = "$SPACE" ] || die "cf target is org/space '${torg:-<none>}/${tspace:-<none>}', expected '$ORG/$SPACE' (cf target -o $ORG -s $SPACE)"
 # ---- listings into files, exit status checked (a failing listing is an error, never "nothing there")
 list_apps(){ cf apps > "$LOGD/cf-apps.txt" 2>&1 || die "cf apps failed: $(tail -1 "$LOGD/cf-apps.txt")"
   awk -v re="$APP_RE" 'NR>3 && $1 ~ re {print $1}' "$LOGD/cf-apps.txt" > "$1"; }
@@ -53,7 +55,7 @@ svc_status(){ cf service "$1" > "$LOGD/svc-$1.txt" 2>&1 || { echo ""; return; }
 svc_message(){ sed -n 's/^ *message: *//p' "$LOGD/svc-$1.txt" | head -1; }
 
 if [ "$TEARDOWN" = 1 ]; then
-  echo "== teardown of $PREFIX-app-NNN / $PREFIX-redis-NN in space $SPACE ($(sed -n 's/^org: *//p' "$LOGD/target.txt" | tr -d '[:space:]'))"
+  echo "== teardown of $PREFIX-app-NNN / $PREFIX-redis-NN in $ORG/$SPACE"
   list_apps "$LOGD/td-apps.txt"; n=0; f=0
   for a in $(cat "$LOGD/td-apps.txt"); do if cf delete "$a" -f -r > /dev/null 2>&1; then n=$((n+1)); else f=$((f+1)); echo "   !! delete app $a failed"; fi; done
   echo "   apps deleted: $n, failed: $f (bindings go with the apps)"
@@ -144,4 +146,4 @@ echo "   stopped: $ns"
 list_svcs "$LOGD/services-after.tsv"
 echo "== done in $(elapsed): services $(awk -F'\t' '$2!="valkey"' "$LOGD/services-after.tsv" | wc -l | tr -d ' ') Redis, apps $(wc -l < "$LOGD/apps-after.txt" | tr -d ' ') of $M"
 [ -z "$missing" ] || exit 1
-echo "next: discovery scan + plan with --services '^$PREFIX-redis-' ; then migrate/free-ips.sh and preflight"
+echo "next: discovery scan + plan with --services '^$PREFIX-redis-' (several populations: '^(scla|sclb)-redis-') ; then migrate/free-ips.sh and preflight"
