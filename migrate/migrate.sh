@@ -799,6 +799,7 @@ cmd_provstatus(){
   fi
   awk -F'\t' 'NR>1 && !seen[$7]++ { w=$1; if (!(w in ww)) { ww[w]=1; order[++n]=w }; c[w,$11]++; t[w]++; T[$11]++; N++ }
     END { printf "%-6s %9s %7s %9s %13s %16s %6s\n", "wave", "services", "staged", "cut-over", "create-failed", "not-provisioned", "drift"
+      for (i=1;i<=n;i++) for (j=i+1;j<=n;j++) if (order[j]+0 < order[i]+0) { x=order[i]; order[i]=order[j]; order[j]=x }   # waves in number order, not plan-file order
       for (i=1;i<=n;i++) { w=order[i]; printf "%-6s %9d %7d %9d %13d %16d %6d\n", w, t[w], c[w,"staged"], c[w,"cut-over"], c[w,"create-failed"], c[w,"not-provisioned"], c[w,"drift"] }
       printf "%-6s %9d %7d %9d %13d %16d %6d\n", "TOTAL", N, T["staged"], T["cut-over"], T["create-failed"], T["not-provisioned"], T["drift"]
       if (T["create-failed"]+T["not-provisioned"]+T["drift"] > 0) printf "%d service(s) still without a usable valkey -- provision --waves A-B again (a create-failed leftover is deleted and created again; wait while a create is in progress)\n", T["create-failed"]+T["not-provisioned"]+T["drift"]
