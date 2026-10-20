@@ -131,7 +131,7 @@ genesis @sbx-us:cf ocfp show network --reserved        # each TGW address must b
 bash migrate/free-ips.sh --network ocfp-int-sbx-us-east-1-ocf --cloud-config ocfp-int-sbx-us-east-1.cf \
      --plan runs/sbx/waves.tsv --out runs/sbx/free-ips.txt
 time bash migrate/migrate.sh provision --waves 1-6 --run runs/sbx          # adjust 6 to the last wave in plan-summary
-bash migrate/migrate.sh status --run runs/sbx
+bash migrate/migrate.sh provision-status --run runs/sbx                    # where provision stands (ledger view, per wave; --wave N per service)
 column -ts $'\t' runs/sbx/inventory.tsv | less -S
 bash migrate/migrate.sh provision-check --run runs/sbx                     # reads every Redis + Valkey back from CF
 ```
@@ -149,8 +149,7 @@ it adopts the finished ones (`adopted: already existed` in the ledger) and creat
 a create is still in progress refuses that service (`create-failed` in the inventory, "not ours to touch")
 and the next re-run adopts it; nothing is created twice.
 
-Paste back: `time` of provision, the `TOTAL` line of `status`, `cut -f11 runs/sbx/inventory.tsv | sort | uniq -c`,
-and the `PROVISION-CHECK:` line.
+Paste back: `time` of provision, the `TOTAL` line of `provision-status`, and the `PROVISION-CHECK:` line.
 
 Re-running `provision` is safe at any time: done services are skipped, a staged Valkey that
 vanished is created again.

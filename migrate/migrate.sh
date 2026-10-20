@@ -751,7 +751,7 @@ cmd_provision(){
   STOP_REQ=0; trap 'STOP_REQ=1; echo; echo "!! Ctrl-C: the running step completes and is recorded, then provision stops"' INT
   trap 'write_inventory; inventory_counts; wave_unlock' EXIT     # the inventory is current however provision ends
   local w; for w in $list; do WAVE="$w"; provision_wave || { echo "!! stopped at wave $w"; return 1; }; done
-  echo "next: migrate.sh provision-check --run $RUN   (reads every Redis and Valkey back from CF: same space/org, same plan, last operation)"
+  echo "next: migrate.sh provision-status --run $RUN (ledger view) ; provision-check --run $RUN (reads every Redis and Valkey back from CF: same space/org, same plan, last operation)"
 }
 
 # ============================================================================ inventory + name-sync
@@ -786,6 +786,24 @@ write_inventory(){
 #   provision ends, however it ends (EXIT trap), so a killed run still leaves the file and its summary.
 inventory_counts(){ [ -s "$RUN/inventory.tsv" ] || return 0
   awk -F'\t' 'NR>1 && !seen[$7]++ { n++; c[$11]++ } END { printf "inventory: %d services -- staged %d, cut-over %d, not-provisioned %d, create-failed %d, drift %d  (%s)\n", n, c["staged"], c["cut-over"], c["not-provisioned"], c["create-failed"], c["drift"], FILENAME }' "$RUN/inventory.tsv"; }
+
+# provision-status [--wave N]: where provision stands, from the ledger only (safe while provision runs; no CF
+#   calls): per wave services / staged / cut-over / create-failed / not-provisioned / drift, a TOTAL line; with
+#   --wave N one line per service (state, staged valkey guid, last note). provision-check is the live CF check.
+cmd_provstatus(){
+  [ -s "$PLAN" ] || { echo "no $PLAN -- run: migrate.sh plan <merged_report.csv>"; exit 1; }
+  write_inventory
+  if [ -n "$WAVE" ]; then
+    echo "PROVISION STATUS wave $WAVE  (ledger view; live check: provision-check --wave $WAVE)"
+    awk -F'\t' -v w="$WAVE" 'NR>1 && $1==w && !seen[$7]++ { printf "  %-10s %-40s %-8s %s\n", $11, $6, substr($9,1,8), $12 }' "$RUN/inventory.tsv"
+  fi
+  awk -F'\t' 'NR>1 && !seen[$7]++ { w=$1; if (!(w in ww)) { ww[w]=1; order[++n]=w }; c[w,$11]++; t[w]++; T[$11]++; N++ }
+    END { printf "%-6s %9s %7s %9s %13s %16s %6s\n", "wave", "services", "staged", "cut-over", "create-failed", "not-provisioned", "drift"
+      for (i=1;i<=n;i++) { w=order[i]; printf "%-6s %9d %7d %9d %13d %16d %6d\n", w, t[w], c[w,"staged"], c[w,"cut-over"], c[w,"create-failed"], c[w,"not-provisioned"], c[w,"drift"] }
+      printf "%-6s %9d %7d %9d %13d %16d %6d\n", "TOTAL", N, T["staged"], T["cut-over"], T["create-failed"], T["not-provisioned"], T["drift"]
+      if (T["create-failed"]+T["not-provisioned"]+T["drift"] > 0) printf "%d service(s) still without a usable valkey -- provision --waves A-B again (a create-failed leftover is deleted and created again; wait while a create is in progress)\n", T["create-failed"]+T["not-provisioned"]+T["drift"]
+      else printf "all %d services provisioned -- next: provision-check (live CF check)\n", N }' "$RUN/inventory.tsv"
+}
 
 # ============================================================================ provision-check (read-only)
 # provision-check [--wave N | --waves A-B]  (default: every wave in the plan): for every service of the plan,
@@ -1180,10 +1198,11 @@ case "$SUB" in
   preflight) cmd_preflight ;;
   status) if [ -n "$WAVE" ]; then cmd_status; else cmd_summary; write_inventory; fi ;;
   provision-check) cmd_provcheck ;;
+  provision-status) cmd_provstatus ;;
   name-sync) cmd_namesync ;;
   rollback)  cmd_rollback ;;
   confirm)   cmd_confirm ;;
   retire)    cmd_retire ;;
-  *) echo "usage: migrate.sh plan <report.csv> | provision --wave N|--waves A-B [--yes] | provision-check [--waves A-B] | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N] | name-sync --wave N|--waves A-B"
+  *) echo "usage: migrate.sh plan <report.csv> | provision --wave N|--waves A-B [--yes] | provision-status [--wave N] | provision-check [--waves A-B] | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N] | name-sync --wave N|--waves A-B"
      echo "       rollback --wave N --service Y [--app X] [--reason ..] | confirm --wave N --service Y --by <team> [--grace 336h] | retire --wave N --service Y [--no-census] [--force]   (all: --run <dir>)"; exit 1 ;;
 esac
