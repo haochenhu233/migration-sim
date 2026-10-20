@@ -117,6 +117,16 @@ but a clean ledger keeps `status` readable.
 
 ## 5. Day-ahead (2–3 days before the "window"): provision the Valkeys, review the inventory
 
+Before the first provision on a foundation: every subnet's non-BOSH addresses (Transit Gateway attachment,
+endpoints) must be in the cloud-config `reserved` list — `free-ips.sh` cannot see them (SBX 2026-10-19,
+knowledge `genesis-kits/ocfp-transit-gateway-ip-not-reserved.md`):
+
+```bash
+aws ec2 describe-network-interfaces --filters Name=interface-type,Values=transit_gateway \
+  --query 'NetworkInterfaces[].{ip:PrivateIpAddress,subnet:SubnetId}' --output table
+genesis @sbx-us:cf ocfp show network --reserved        # each TGW address must be inside a reserved range
+```
+
 ```bash
 bash migrate/free-ips.sh --network ocfp-int-sbx-us-east-1-ocf --cloud-config ocfp-int-sbx-us-east-1.cf \
      --plan runs/sbx/waves.tsv --out runs/sbx/free-ips.txt

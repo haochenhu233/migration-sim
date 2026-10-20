@@ -7,7 +7,9 @@
 #               free = pool - used
 #   Static ranges are excluded: Blacksmith allocates dynamically. IPs BOSH does not manage
 #   (director, jumpbox, load balancers, VMs of ANOTHER director on the same network) must be in
-#   `reserved` or they are counted as free. Compilation VMs are transient and not listed -> while a
+#   `reserved` or they are counted as free -- SBX 2026-10-19: a Transit Gateway attachment ENI (.85 of a
+#   new subnet) was not reserved and a Valkey create failed 'address already in use' (knowledge:
+#   genesis-kits/ocfp-transit-gateway-ip-not-reserved). Compilation VMs are transient and not listed -> while a
 #   deploy runs, a few IPs more are in use than reported.
 #   Director: the one Blacksmith deploys through (its bosh.address). With --plan the script refuses
 #   a director that runs none of the plan's Redis deployments (deployment names carry the SI guid).
