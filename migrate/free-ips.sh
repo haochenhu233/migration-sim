@@ -2,8 +2,10 @@
 # free-ips.sh --network <name> [--plan runs/<env>/waves.tsv] [--out runs/<env>/free-ips.txt] [--ips-per-service N]
 #   Free dynamic IPs on one BOSH network = what Blacksmith can still provision into.
 #   Per subnet: pool = range - network - broadcast - gateway - reserved - static
-#               used = IPs of every INSTANCE BOSH knows (all deployments, incl. hard-stopped ones
-#                      and failed creates: they keep their IP reservation) that fall in the pool
+#               used = IPs of every INSTANCE BOSH knows (all deployments, incl. hard-stopped ones)
+#                      that fall in the pool. A FAILED Blacksmith create does NOT hold its IP: the broker
+#                      deletes the failed deployment (cleanupFailedDeployment), so the address is free
+#                      again at once (SBX 2026-10-19: five waves in a row drew the same bad address)
 #               free = pool - used
 #   Static ranges are excluded: Blacksmith allocates dynamically. IPs BOSH does not manage
 #   (director, jumpbox, load balancers, VMs of ANOTHER director on the same network) must be in
