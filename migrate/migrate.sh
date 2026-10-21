@@ -121,6 +121,10 @@ cmd_plan(){
       printf "\n## Apps per service\n\n| apps bound | services |\n|---|---|\n" > h
       for (b in aps) printf "| %s | %d |\n", b, aps[b] > h
       printf "\nmost-shared service: %d apps (one restart each when its wave runs)\n", maxaps > h
+      # services per plan: the Valkey plan mirrors the Redis plan, so this is the VM/disk/quota input (asked 2026-10-21)
+      for (sg in svc) pc[splan[sg]]++
+      printf "\n## Services per plan (each gets a Valkey of the same plan -- vCPU / disk / quota input)\n\n| plan | services |\n|---|---|\n" > h
+      for (p in pc) printf "| %s | %d |\n", p, pc[p] > h
       # largest components by size, independent of wave ordering
       for (i=1;i<=nc;i++) big[i]=cl[i]
       for (i=2;i<=nc;i++){ v=big[i]; j=i-1; while (j>0 && (csvc[big[j]]<csvc[v] || (csvc[big[j]]==csvc[v] && capp[big[j]]<capp[v]))) { big[j+1]=big[j]; j-- } big[j+1]=v }
