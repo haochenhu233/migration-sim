@@ -283,6 +283,21 @@ plus a review document for the client, built from the binding graph:
   the real `deployments --json` shape through the wrapper is verified.** Knowledge:
   `knowledge/genesis/genesis-bosh-under-timeout-sigttou.md`.
 
+- **2026-10-21 — NP timeline and the second SBX pass (client decisions).** NP: Redis creation is
+  disabled in the NP envs; discovery scans Thursday and Friday, twice a day, so the plan comes
+  from the freshest merged report; Valkeys are created on the **Friday** (`provision` +
+  `provision-check` with BOSH), the migration runs on the **Sunday** — two days to look at the
+  Valkeys and the pairs. NP z1 headroom checked by the client: ~1500 free IPs for ~200 Redis in
+  the large env, ~200 free for tens of Redis in the small ones — no IP work needed. The hollow
+  Valkey is covered by `provision-check`; the vault session is kept valid by hand. SBX: **the
+  whole rehearsal is run once more** to rule out remaining issues (mirroring the NP shape:
+  provision, two idle days, apply), and SBX is recovered (teardown, cells back to 5) **after** the
+  NP upgrade. Known gap for the two-day window: `preflight`/`apply` work from the plan's app
+  list; an app bound to a Redis between the last scan and the window is not migrated by the
+  tool — it shows up at `verify` (drift) and `retire` refuses while the standby has a binding.
+  Mitigation: one more scan on the Sunday morning before `plan`, or a preflight check "live
+  bindings of each Redis ⊆ plan apps" (not built yet).
+
 ## Open questions
 
 - [ ] dominant client stacks — Java/Spring + .NET assumed; confirm (decides which real-stack apps matter)
