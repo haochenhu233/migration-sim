@@ -4,7 +4,7 @@
 # Every case prints PASS/FAIL; exit 1 if any FAIL.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; M="$HERE/../migrate.sh"; W="${1:-$(mktemp -d)}"; mkdir -p "$W"
-export CF_CMD="$HERE/cf-fake" JOB_POLL=0 SOAK=0 MIGRATE_OP=test
+export CF_CMD="$HERE/cf-fake" BOSH_CMD="$HERE/bosh-fake" JOB_POLL=0 SOAK=0 MIGRATE_OP=test
 fails=0; pass(){ echo "PASS  $1"; }; fail(){ echo "FAIL  $1"; fails=$((fails+1)); }
 check(){ if eval "$2"; then pass "$1"; else fail "$1 -- [$2]"; fi; }   # check <label> <shell condition>
 newrun(){ # newrun <name> -> fresh run dir + fake state, vault.conf pointing at safe-fake
@@ -103,13 +103,13 @@ check "H3 svc_note_guid picks the NEW valkey, not the deleted corpse" "[ \"$(jq 
 
 echo "== J: provision-check (read-only): same space/org, same plan name, last op; missing / mismatch / killed run"
 newrun J; bash "$M" provision --waves 1-2 --yes --run "$R" > /dev/null 2>&1
-bash "$M" provision-check --run "$R" > "$R/pc1.log" 2>&1; check "J1 all 12 OK, verdict OK, tsv: 12 lines with org/space, both plans cache-small, offering valkey" "[ $? = 0 ] && grep -q 'PROVISION-CHECK: OK (12 of 12 ok: 12 staged, 0 cut-over; 0 missing, 0 mismatched, 0 api-errors)' '$R/pc1.log' && [ $(awk -F'\t' 'NR>1 && $11=="OK" && $7=="cache-small" && $8=="cache-small" && $9=="valkey" && $5!="" && $6!=""' "$R/provision-check.tsv" | wc -l | tr -d ' ') = 12 ]"
-CFFAKE_WRONG=cache-0-valkey-staged:space bash "$M" provision-check --wave 1 --run "$R" > "$R/pc2.log" 2>&1; check "J2 valkey in another space -> MISMATCH, verdict FAIL, exit 1" "[ $? = 1 ] && grep -q '^MISMATCH wave 1 *cache-0 .*space differs' '$R/pc2.log' && grep -q 'PROVISION-CHECK: FAIL (3 of 4 ok, 0 missing, 1 mismatched, 0 api-errors)' '$R/pc2.log'"
+bash "$M" provision-check --run "$R" > "$R/pc1.log" 2>&1; check "J1 all 12 OK, verdict OK, tsv: 12 lines with org/space, both plans cache-small, offering valkey" "[ $? = 0 ] && grep -q 'PROVISION-CHECK: OK (12 of 12 ok: 12 staged, 0 cut-over; 0 missing, 0 mismatched, 0 hollow, 0 api-errors; bosh: 12 of 12 valkeys have a deployment)' '$R/pc1.log' && [ $(awk -F'\t' 'NR>1 && $11=="OK" && $7=="cache-small" && $8=="cache-small" && $9=="valkey" && $5!="" && $6!=""' "$R/provision-check.tsv" | wc -l | tr -d ' ') = 12 ]"
+CFFAKE_WRONG=cache-0-valkey-staged:space bash "$M" provision-check --wave 1 --run "$R" > "$R/pc2.log" 2>&1; check "J2 valkey in another space -> MISMATCH, verdict FAIL, exit 1" "[ $? = 1 ] && grep -q '^MISMATCH wave 1 *cache-0 .*space differs' '$R/pc2.log' && grep -q 'PROVISION-CHECK: FAIL (3 of 4 ok, 0 missing, 1 mismatched, 0 hollow, 0 api-errors; bosh: 4 of 4 valkeys have a deployment)' '$R/pc2.log'"
 CFFAKE_WRONG=cache-0-valkey-staged:plan bash "$M" provision-check --wave 1 --run "$R" > "$R/pc3.log" 2>&1; check "J3 valkey on another plan -> MISMATCH naming both plans" "[ $? = 1 ] && grep -q \"plan name 'cache-other' != redis plan 'cache-small'\" '$R/pc3.log'"
 check "J4 provision-check wrote nothing to the ledger" "[ $(nev create-valkey ok) = 12 ] && [ $(ledger 'select(.step=="drift")' | wc -l | tr -d ' ') = 0 ]"
 newrun J2; bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1
-bash "$M" provision-check --run "$R" > "$R/pc4.log" 2>&1; check "J5 wave 2 not provisioned -> 8 MISSING, verdict FAIL" "[ $? = 1 ] && [ $(grep -c '^MISSING  wave 2 ' "$R/pc4.log") = 8 ] && grep -q 'PROVISION-CHECK: FAIL (4 of 12 ok, 8 missing, 0 mismatched, 0 api-errors)' '$R/pc4.log'"
-CFFAKE_NO_INCLUDED=1 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc6.log" 2>&1; check "J7 plan GET without 'included' (shape not as assumed) -> 4 API-ERROR, never OK" "[ $? = 1 ] && [ $(grep -c '^API-ERROR' "$R/pc6.log") = 4 ] && grep -q 'FAIL (0 of 4 ok, 0 missing, 0 mismatched, 4 api-errors)' '$R/pc6.log'"
+bash "$M" provision-check --run "$R" > "$R/pc4.log" 2>&1; check "J5 wave 2 not provisioned -> 8 MISSING, verdict FAIL" "[ $? = 1 ] && [ $(grep -c '^MISSING  wave 2 ' "$R/pc4.log") = 8 ] && grep -q 'PROVISION-CHECK: FAIL (4 of 12 ok, 8 missing, 0 mismatched, 0 hollow, 0 api-errors; bosh: 4 of 4 valkeys have a deployment)' '$R/pc4.log'"
+CFFAKE_NO_INCLUDED=1 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc6.log" 2>&1; check "J7 plan GET without 'included' (shape not as assumed) -> 4 API-ERROR, never OK" "[ $? = 1 ] && [ $(grep -c '^API-ERROR' "$R/pc6.log") = 4 ] && grep -q 'FAIL (0 of 4 ok, 0 missing, 0 mismatched, 0 hollow, 4 api-errors; bosh: 0 of 0 valkeys have a deployment)' '$R/pc6.log'"
 python3 - "$CFFAKE_STATE" "$(ledger "select(.service==\"$G0\" and .step==\"create-valkey\" and .outcome==\"ok\") | .note" | tail -1 | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)" <<'PY'
 import json,sys; f,g=sys.argv[1:]; st=json.load(open(f)); del st['si'][g]; json.dump(st,open(f,'w'))
 PY
@@ -126,5 +126,36 @@ bash "$M" provision-check --wave 1 --run "$R" > "$R/pc9.log" 2>&1; check "J6b ri
 bash "$M" provision --wave 1 --yes --run "$R" > "$R/pc10.log" 2>&1; check "J6c re-run while still in progress: 4 create-valkey fail 'not ours to touch' (refused, not adopted)" "[ $(nev create-valkey fail '(.note|test("in progress"))') = 4 ]"
 CFFAKE_FINISH_JOBS=1 bash "$M" provision --wave 1 --yes --run "$R" > "$R/pc11.log" 2>&1; bash "$M" provision-check --wave 1 --run "$R" > "$R/pc12.log" 2>&1
 check "J6d re-run once the broker finished the creates: adopted ('already existed'), provision-check OK 4 of 4" "[ $? = 0 ] && grep -q 'OK (4 of 4 ok: 4 staged' '$R/pc12.log' && [ $(nev create-valkey ok '(.note|test("adopted"))') = 4 ]"
+
+echo "== S: creates reach the broker one at a time (each leaves 'initial' before the next POST); the builds still overlap"
+ov(){ jq -r '.overlap // 0' "$CFFAKE_STATE"; }   # POSTs made while another create was still 'initial' (what Blacksmith would see together)
+newrun S
+CFFAKE_INITIAL_POLLS=2 bash "$M" provision --wave 1 --yes --run "$R" > "$R/prov.log" 2>&1; rc=$?
+check "S1 4 created, exit 0, overlap 0, 4 'broker accepted' lines, the note carries the wait" "[ $rc = 0 ] && [ $(nev create-valkey ok) = 4 ] && [ $(ov) = 0 ] && [ $(grep -c 'broker accepted the create' "$R/prov.log") = 4 ] && [ $(nev create-valkey ok '(.note|test("broker accepted after"))') = 4 ]"
+newrun S2   # the broker never answers the first create: nothing else is issued in this RUN (wave 2 untouched); the issued one is still waited for
+CFFAKE_INITIAL_POLLS=99 ACCEPT_TIMEOUT=0 bash "$M" provision --waves 1-2 --yes --run "$R" > "$R/prov.log" 2>&1; rc=$?
+check "S2 first create not accepted in time: 1 created (its job waited for), 3 'not issued', wave 2 not started, exit 1, overlap 0, said out loud" "[ $rc = 1 ] && [ $(nev create-valkey ok) = 1 ] && [ $(nev create-valkey fail '(.note|test("not issued: create of .* still"))') = 3 ] && [ $(ledger 'select(.wave==2)' | wc -l | tr -d ' ') = 0 ] && [ $(ov) = 0 ] && grep -q 'no further create issued' '$R/prov.log' && grep -q 'stopped at wave 1' '$R/prov.log'"
+bash "$M" provision --waves 1-2 --yes --run "$R" > "$R/prov2.log" 2>&1; rc=$?
+check "S3 re-run creates the other 11: 12 staged, exit 0, overlap still 0" "[ $rc = 0 ] && [ $(nev create-valkey ok) = 12 ] && [ $(ov) = 0 ]"
+newrun S4   # a create the broker refuses does not hold the others back
+CFFAKE_FAIL_CREATE=cache-0-valkey-staged bash "$M" provision --wave 1 --yes --run "$R" > "$R/prov.log" 2>&1
+check "S4 one create fails: the other 3 still issued one after the other, 3 ok + 1 fail, overlap 0" "[ $(nev create-valkey ok) = 3 ] && [ $(nev create-valkey fail) = 1 ] && [ $(ov) = 0 ]"
+
+echo "== Q: provision-check's BOSH half: hollow valkey, bosh listing failure, no BOSH_CMD, bosh.conf, --no-bosh, empty director"
+newrun Q; bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1
+CFFAKE_HOLLOW=cache-0 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc.log" 2>&1; rc=$?
+check "Q1 CF says succeeded, BOSH has no deployment -> HOLLOW with the purge command, verdict FAIL 1 hollow, exit 1, tsv bosh=none" "[ $rc = 1 ] && grep -q '^HOLLOW   wave 1 *cache-0 .*purge=true' '$R/pc.log' && grep -q 'PROVISION-CHECK: FAIL (3 of 4 ok, 0 missing, 0 mismatched, 1 hollow, 0 api-errors; bosh: 3 of 4 valkeys have a deployment)' '$R/pc.log' && [ \"$(awk -F'\t' -v n=cache-0 'NR>1 && $2==n {print $13}' "$R/provision-check.tsv")\" = none ]"
+BOSHFAKE_BAD=1 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc2.log" 2>&1; rc=$?
+check "Q2 bosh listing fails -> said once, every service API-ERROR, verdict FAIL, never a pass" "[ $rc = 1 ] && grep -q '^!! bosh: .*failed' '$R/pc2.log' && [ $(grep -c '^API-ERROR wave 1 ' "$R/pc2.log") = 4 ] && grep -q 'bosh: listing FAILED)' '$R/pc2.log'"
+BOSH_CMD= bash "$M" provision-check --wave 1 --run "$R" > "$R/pc3.log" 2>&1; rc=$?
+check "Q3 no BOSH_CMD and no bosh.conf -> refused before the walk, exit 1" "[ $rc = 1 ] && grep -q 'provision-check needs BOSH' '$R/pc3.log' && ! grep -q '^OK ' '$R/pc3.log'"
+printf 'BOSH_CMD="%s"\n' "$BOSH_CMD" > "$R/bosh.conf"; BOSH_CMD= bash "$M" provision-check --wave 1 --run "$R" > "$R/pc4.log" 2>&1; rc=$?
+check "Q4 BOSH_CMD from bosh.conf -> OK 4 of 4, bosh 4 present" "[ $rc = 0 ] && grep -q 'OK (4 of 4 ok: 4 staged, 0 cut-over; 0 missing, 0 mismatched, 0 hollow, 0 api-errors; bosh: 4 of 4 valkeys have a deployment)' '$R/pc4.log'"
+rm "$R/bosh.conf"; BOSH_CMD= bash "$M" provision-check --wave 1 --no-bosh --run "$R" > "$R/pc5.log" 2>&1; rc=$?
+check "Q5 --no-bosh: CF only, verdict says NOT CHECKED, tsv bosh=skipped" "[ $rc = 0 ] && grep -q 'bosh: NOT CHECKED (--no-bosh))' '$R/pc5.log' && [ $(awk -F'\t' -v v=skipped 'NR>1 && $13==v' "$R/provision-check.tsv" | wc -l | tr -d ' ') = 4 ]"
+BOSHFAKE_EMPTY=1 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc6.log" 2>&1; rc=$?
+check "Q6 director lists no deployment at all -> refused as the wrong director, every service API-ERROR, FAIL" "[ $rc = 1 ] && grep -q 'wrong director' '$R/pc6.log' && [ $(grep -c '^API-ERROR wave 1 ' "$R/pc6.log") = 4 ]"
+BOSHFAKE_NOREDIS=1 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc7.log" 2>&1; rc=$?
+check "Q7 a non-empty listing without the plan's Redis (the env's own director) -> wrong director, API-ERROR, no HOLLOW, no purge advice" "[ $rc = 1 ] && grep -q 'none of the plan.s 4 Redis -- wrong director' '$R/pc7.log' && [ $(grep -c '^API-ERROR wave 1 ' "$R/pc7.log") = 4 ] && ! grep -q 'HOLLOW\|purge=true' '$R/pc7.log'"
 
 echo; [ "$fails" = 0 ] && echo "ALL PASS (workdir $W)" || { echo "$fails FAIL (workdir $W)"; exit 1; }

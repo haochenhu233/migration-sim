@@ -231,6 +231,30 @@ plus a review document for the client, built from the binding graph:
   reviewer: after `rollback --service 09`, an app at `rollback:fail` under 08 (restarted by 08's
   step, crashed because 09's name was stuck) is fixed only by a second `rollback --service 08`;
   the runbook says so (§6b), no automatic cross-service retry.
+- **2026-10-21 — `provision` serializes what Blacksmith sees; `provision-check` asks BOSH** (decisions 2+3
+  of 2026-10-20, asked by the client: "one by one, but don't wait for the last one to finish").
+  Verified in `blacksmith/internal/broker/broker.go` `Provision`: the index line is written in
+  `storeInstanceData` *before* the 202, and CF moves the instance from `initial` to `in progress`
+  on that 202 — so "poll until the state leaves `initial`, then the next POST" is exactly "one
+  Provision call at a time", while the BOSH builds still overlap (`svc_create_accept`, ACCEPT_TIMEOUT
+  120 s; past it, or after 3 listing errors, the rest of the wave is recorded `not issued` and a
+  re-run creates them; the issued ones are still waited for). `provision-check` reads
+  `bosh deployments --json` once through `BOSH_CMD` (env or `runs/<env>/bosh.conf`), requires a
+  deployment ending in each Valkey's guid; result `HOLLOW` (+ purge command) for a succeeded Valkey
+  without one; listing failure → API-ERROR for every service; empty listing refused (wrong
+  director); no BOSH_CMD → refused unless `--no-bosh` (verdict says NOT CHECKED). Fakes:
+  `CFFAKE_INITIAL_POLLS`, `st.overlap` (POSTs made while another create was `initial`; must be 0),
+  bosh-fake `deployments` from the cf-fake state. Cases S1–S4, Q1–Q6, R13, P3b. Not yet verified
+  live: the real `bosh deployments --json` shape through the genesis wrapper (`Tables[0].Rows[].name`,
+  as `free-ips.sh` reads `instances`) — a wrong shape shows as API-ERRORs, never as a pass.
+  Review round (fresh agent, 9 findings, all taken): a non-empty listing from the **wrong director**
+  would have read as "every Valkey hollow" with purge advice for healthy instances → the listing must
+  hold the plan's Redis deployments, else API-ERROR (Q7); `ISSUE_STOP` was per wave and the run
+  exited 0 → it is per run, `provision --waves A-B` stops at that wave with exit 1 (S2); a voided
+  create made `rollback_names` look up a gone Valkey guid → looked up only when the create is still
+  `done`; the gate sits after adoption and before any DELETE/POST; verdict says "n of m valkeys have
+  a deployment"; HOLLOW advice differs for a cut-over Valkey (rollback first); `bosh.conf` comments
+  stripped.
 
 ## Open questions
 

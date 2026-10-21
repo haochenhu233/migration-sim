@@ -5,7 +5,7 @@
 # svc-9's Valkey is HOLLOW (CF has it, the broker lost it). Usage: bash migrate/test/case-rollback.sh [workdir]
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; M="$HERE/../migrate.sh"; W="${1:-$(mktemp -d)}"; mkdir -p "$W"
-export CF_CMD="$HERE/cf-fake" JOB_POLL=0 SOAK=0 MIGRATE_OP=test RESTART_TIMEOUT=2
+export CF_CMD="$HERE/cf-fake" BOSH_CMD="$HERE/bosh-fake" JOB_POLL=0 SOAK=0 MIGRATE_OP=test RESTART_TIMEOUT=2
 fails=0; pass(){ echo "PASS  $1"; }; fail(){ echo "FAIL  $1"; fails=$((fails+1)); }
 check(){ if eval "$2"; then pass "$1"; else fail "$1 -- [$2]"; fi; }
 newrun(){ R="$W/$1"; rm -rf "$R"; mkdir -p "$R"; cp "$HERE/fixtures/waves-chain.tsv" "$R/waves.tsv"
@@ -43,12 +43,17 @@ check "R11 preflight after the undo: svc-9 name matches its guid again (no drift
 CFFAKE_HOLLOW=svc-9 CFFAKE_NAMED="$NAMED" bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply1b.log" 2>&1
 check "R12 apply again with the hollow still there: the failed binding is not read as 'already bound'; CF refuses a new one; names undone again" "[ $(nev bind-valkey ok ".app==\"$A9\" and (.note|test(\"already present\"))") = 0 ] && [ $(nev bind-valkey fail ".app==\"$A9\" and (.note|test(\"already bound\"))") = 1 ] && [ $(nev rename-standby undone ".service==\"$G9\"") = 2 ]"
 
+CFFAKE_HOLLOW=svc-9 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc.log" 2>&1; rc=$?
+check "R13 provision-check sees it: CF succeeded, no BOSH deployment -> HOLLOW with the purge command, FAIL; svc-7/8 OK with their deployments" "[ $rc = 1 ] && grep -q '^HOLLOW   wave 1 *svc-9 .*purge=true' '$R/pc.log' && grep -q 'FAIL (2 of 3 ok, 0 missing, 0 mismatched, 1 hollow, 0 api-errors; bosh: 2 of 3 valkeys have a deployment)' '$R/pc.log'"
+
 echo "== P: purge the hollow valkey, provision again, apply again -> svc-9 migrates"
 "$CF_CMD" curl -X DELETE "/v3/service_instances/$V9?purge=true" > /dev/null
 check "P1 purge: instance and its failed binding gone from CF" "[ \"$(siname $V9)\" = GONE ] && [ $(jq --arg a $A9 '[.bind[]|select(.app==$a)]|length' "$CFFAKE_STATE") = 1 ]"
 bash "$M" provision --wave 1 --yes --run "$R" > "$R/prov2.log" 2>&1
 check "P2 provision: svc-9 'gone from CF -- creating again', a new staged valkey; svc-7/8 untouched" "[ $(nev create-valkey fail ".service==\"$G9\" and (.note|test(\"gone from CF\"))") = 1 ] && [ $(nev create-valkey ok ".service==\"$G9\"") = 2 ] && [ $(nev create-valkey ok) = 4 ]"
 V9b=$(vkof $G9); check "P3 new staged valkey named svc-9-valkey-staged" "[ \"$(siname $V9b)\" = svc-9-valkey-staged ] && [ \"$V9b\" != \"$V9\" ]"
+bash "$M" provision-check --wave 1 --run "$R" > "$R/pc2.log" 2>&1; rc=$?
+check "P3b provision-check after the purge + re-create: OK 3 of 3, bosh 3 present" "[ $rc = 0 ] && grep -q 'OK (3 of 3 ok: 1 staged, 2 cut-over; 0 missing, 0 mismatched, 0 hollow, 0 api-errors; bosh: 3 of 3 valkeys have a deployment)' '$R/pc2.log'"
 CFFAKE_NAMED="$NAMED" bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply2.log" 2>&1; rc=$?
 check "P4 apply: svc-9 renamed again (3rd rename-standby ok), a-9 and a-49 verified on it; exit 0" "[ $rc = 0 ] && [ $(nev rename-standby ok ".service==\"$G9\"") = 3 ] && [ $(nev verify ok ".service==\"$G9\"") = 2 ]"
 bash "$M" status --wave 1 --run "$R" > "$R/status2.log" 2>&1; check "P5 status: 3 VERIFIED" "[ $(grep -c ' VERIFIED ' "$R/status2.log") = 3 ]"

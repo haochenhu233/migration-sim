@@ -84,6 +84,9 @@ for kv in os.environ.get('CFFAKE_NAMED','').split(','):
 def env_snapshot(ag): st.setdefault('env',{})[ag]=sorted({st['si'][b['si']]['name'] for b in st['bind'].values() if b['app']==ag and not b.get('failed') and b['si'] in st['si']})
 def si_obj(g):
     s=st['si'][g]; sp=s['space']; pl=s['plan']; w=os.environ.get('CFFAKE_WRONG','')
+    if s['last_op']['state']=='initial':   # the broker answers after CFFAKE_INITIAL_POLLS reads of the instance (default 1)
+        s['seen']=s.get('seen',0)+1
+        if s['seen']>=int(os.environ.get('CFFAKE_INITIAL_POLLS','1')): s['last_op']={'type':'create','state':'in progress'}
     if w==s['name']+':space': sp='sp-other'
     if w==s['name']+':plan': pl='plan-valkey-other'
     return {'guid':g,'name':s['name'],'last_operation':s['last_op'],'relationships':{'space':{'data':{'guid':sp}},'service_plan':{'data':{'guid':pl}}}}
@@ -133,7 +136,10 @@ elif p=='/v3/service_instances' and method=='POST':
     b=json.loads(body); name=b['name']; sp=b['relationships']['space']['data']['guid']; pl=b['relationships']['service_plan']['data']['guid']
     if any(s['name']==name and s['space']==sp for s in st['si'].values()): err(422,'CF-UnprocessableEntity',f"The service instance name is taken: {name}")
     else:
-        g=str(uuid.uuid4()); st['si'][g]={'name':name,'space':sp,'plan':pl,'last_op':{'type':'create','state':'in progress'}}; broker_stores(g, name)
+        # like CF: the instance is 'initial' until a job worker has called the broker; a POST while another create is
+        # still 'initial' is what reaches Blacksmith concurrently -> counted in st['overlap'] (must stay 0)
+        if any(s['last_op']['state']=='initial' for s in st['si'].values()): st['overlap']=st.get('overlap',0)+1
+        g=str(uuid.uuid4()); st['si'][g]={'name':name,'space':sp,'plan':pl,'last_op':{'type':'create','state':'initial'},'seen':0}; broker_stores(g, name)
         fail=f"Service broker error: provision failed for {name}" if os.environ.get('CFFAKE_FAIL_CREATE')==name else None
         accepted(job('create:'+g, int(os.environ.get('CFFAKE_CREATE_POLLS','2')), fail))
 elif p.startswith('/v3/service_instances/') and p.endswith('/relationships/shared_spaces'):

@@ -30,6 +30,8 @@ export BOSH_CMD="genesis @sbx-us b"
 cp -n migrate/example/safe-run.sh runs/sbx/safe-run.sh
 printf 'SAFE_RUN="bash runs/sbx/safe-run.sh"\n' > runs/sbx/vault.conf
 cat runs/sbx/vault.conf
+# provision-check's BOSH half reads the director's deployments through this (or the exported BOSH_CMD)
+printf 'BOSH_CMD="genesis @sbx-us b"\n' > runs/sbx/bosh.conf
 ```
 
 Expected: one line, `SAFE_RUN="bash runs/sbx/safe-run.sh"`.
@@ -208,10 +210,12 @@ neighbour's names were back, run `rollback --wave N --service <it>` once more af
 at `rollback:fail` (or one rolled back without a restart) is restarted again; an app that is up
 is left alone. After each rollback, `cf app <multi-bound app>` should show all instances running.
 
-Before the real migration: `provision` will create one service at a time as Blacksmith sees it and
-`provision-check` will ask BOSH for the deployment (next tool change); until then, after every
-provision run: `genesis @<env> b deployments > /tmp/deps.txt` and check every `valkey_guid` of
-`inventory.tsv` appears in it.
+Since 2026-10-21 the tool closes this hole on both sides: `provision` issues one create at a time as
+Blacksmith sees it (the next POST waits until the previous instance has left `initial`, i.e. the
+broker answered; the builds still overlap, so the wave takes about the same time), and
+`provision-check` reads `bosh deployments --json` through `BOSH_CMD` and reports a Valkey without
+its deployment as `HOLLOW` with the purge command. It needs `BOSH_CMD` (exported above, or a
+`BOSH_CMD=` line in `runs/sbx/bosh.conf`); without it the check refuses to run unless `--no-bosh`.
 
 If `name-sync pending` is not 0 after a wave (a `safe` call timed out):
 

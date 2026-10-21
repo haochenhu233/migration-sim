@@ -41,6 +41,23 @@ Y
     gateway: 10.20.0.1
 Y
   ;;
+  deployments) # for provision-check: one deployment <plan id>-<guid> per Valkey that cf-fake holds as succeeded, except a
+       # CFFAKE_HOLLOW one (CF has it, BOSH does not). BOSHFAKE_BAD / BOSHFAKE_EMPTY as for instances.
+       [ -n "${BOSHFAKE_BAD:-}" ] && { echo "Fetching deployments: Director responded with non-successful status code '401'" >&2; exit 1; }
+       banner
+       if [ -n "${BOSHFAKE_EMPTY:-}" ]; then echo '{"Tables":[{"Rows":[]}]}'; else
+       python3 - "${CFFAKE_STATE:-/nonexistent}" "${CFFAKE_HOLLOW:-}" "${BOSHFAKE_NOREDIS:-}" <<'PY'
+import json,sys,os; p,h,nored=sys.argv[1:]; rows=[{"name":"cf"},{"name":"blacksmith"},{"name":"bosh-dns"}]
+st=json.load(open(p)) if os.path.exists(p) else {'si':{}}
+for g,s in st['si'].items():   # every Blacksmith instance has a deployment <plan id>-<guid>: the Redis ones always, a Valkey once succeeded
+    if not s['plan'].startswith('plan-'): continue
+    if s['plan'].startswith('plan-valkey-'):
+        if s['last_op']['state']!='succeeded' or (h and s['name'] in (h, h+'-valkey-staged')): continue
+    elif nored: continue   # BOSHFAKE_NOREDIS: a listing without the plan's Redis = the wrong director
+    rows.append({"name":s['plan'][5:]+"-"+g,"release_s":"forge/1.0","stemcell_s":"bosh-aws-xen-hvm-ubuntu-jammy-go_agent/1.0","team_s":""})
+print(json.dumps({"Tables":[{"Content":"deployments","Rows":rows}]}))
+PY
+       fi ;;
   instances) [ -n "${BOSHFAKE_BAD:-}" ] && { echo "Fetching deployments: Director responded with non-successful status code '401'" >&2; exit 1; }
        banner
        if [ -n "${BOSHFAKE_EMPTY:-}" ]; then echo '{"Tables":[{"Rows":[]}]}'; else

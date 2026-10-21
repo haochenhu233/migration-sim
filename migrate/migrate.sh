@@ -3,13 +3,14 @@
 #     migrate.sh status [--wave N] [--run <dir>]      (dashboard; wrap in: watch -n 3 -c ...)
 # Run dir holds waves.tsv (the plan) + ledger.jsonl (what happened) + commands.log + lock + STOP,
 #   inventory.tsv (names/guids/state per app-Redis-Valkey line, for the client's review),
-#   vault.conf (optional: SAFE_RUN=... for name-sync), name-sync-wave-N.sh (the safe commands, always).
+#   vault.conf (optional: SAFE_RUN=... for name-sync), name-sync-wave-N.sh (the safe commands, always),
+#   bosh.conf (BOSH_CMD=... for provision-check's BOSH half, e.g. "genesis @sbx-us b"; or export BOSH_CMD).
 set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
 WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; SVCRE=""; ARG=""; WAVES=""; SVCF=""; YES=""; FORCE=""; NO_ROLLING=""
 APPF=""; REASON=""; BY=""; GRACE="336h"; NO_CENSUS=""
-while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --waves) WAVES="$2"; shift 2;; --service) SVCF="$2"; shift 2;; --yes) YES=1; shift;; --force) FORCE=1; shift;; --no-rolling) NO_ROLLING=1; shift;; --app) APPF="$2"; shift 2;; --reason) REASON="$2"; shift 2;; --by) BY="$2"; shift 2;; --grace) GRACE="$2"; shift 2;; --no-census) NO_CENSUS=1; shift;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
+while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --waves) WAVES="$2"; shift 2;; --service) SVCF="$2"; shift 2;; --yes) YES=1; shift;; --force) FORCE=1; shift;; --no-rolling) NO_ROLLING=1; shift;; --no-bosh) NO_BOSH=1; shift;; --app) APPF="$2"; shift 2;; --reason) REASON="$2"; shift 2;; --by) BY="$2"; shift 2;; --grace) GRACE="$2"; shift 2;; --no-census) NO_CENSUS=1; shift;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
 PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 
 
@@ -246,7 +247,7 @@ namesync_pending(){ [ -s "$LEDGER" ] || { echo 0; return; }
 
 # ============================================================================ cf helpers
 CF="${CF_CMD:-cf}"
-if command -v timeout >/dev/null 2>&1; then TMO="timeout 30"; else TMO=""; fi   # macOS has no timeout(1)
+if command -v timeout >/dev/null 2>&1; then TMO="timeout 30"; TMOB="timeout 180"; else TMO=""; TMOB=""; fi   # macOS has no timeout(1); TMOB bounds a bosh listing
 cfcurl(){ $TMO "$CF" curl "$1" 2>/dev/null; }                      # read-only CF API
 cf_json_ok(){ printf '%s' "$1" | jq -e 'type=="object" and (has("errors")|not)' >/dev/null 2>&1; }
 # cflist <path>: a LIST endpoint; prints the JSON only if it really has .resources -- an error
@@ -520,6 +521,7 @@ cmd_summary(){
 #                                     verify-hook.sh <app_guid> <app_name>   (exit 0 = healthy)
 OP="${MIGRATE_OP:-${USER:-operator}}"
 JOB_POLL="${JOB_POLL:-5}"; CREATE_TIMEOUT="${CREATE_TIMEOUT:-1500}"; BIND_TIMEOUT="${BIND_TIMEOUT:-300}"
+ACCEPT_TIMEOUT="${ACCEPT_TIMEOUT:-120}"   # a create's last_operation must leave 'initial' (the broker answered) before the next is issued
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-300}"; SOAK="${SOAK:-30}"; BREAKER="${BREAKER:-3}"
 now(){ date -u +%FT%TZ; }
 ledger_add(){ # wave service app step outcome ms note
@@ -665,7 +667,7 @@ restart_app(){
 #   (SBX wave 6, 2026-10-20). Returns 1 when something could not be undone (R_NAMES tells what).
 rollback_names(){
   local sg="$1" name="$2" vk="$3" std="${name}-redis-standby" stn t0 j cur; stn=$(staged_name "$name"); R_NAMES=""
-  [ -n "$vk" ] || vk=$(svc_note_guid "$sg")
+  [ -n "$vk" ] || { [ -z "$(ledger_done "$sg" "" create-valkey)" ] || vk=$(svc_note_guid "$sg"); }   # a voided create (fail after ok) has no valkey to rename: redis only
   if [ -n "$vk" ]; then
     j=$(cfx "/v3/service_instances/$vk" 2>/dev/null)
     if ! cf_json_ok "$j"; then R_NAMES="cannot read valkey $vk: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"
@@ -816,6 +818,7 @@ provision_wave(){
   ledger_add "$WAVE" "" "" provision ok 0 "$nsvc services, $nskip failed/skipped"
   write_inventory; wave_unlock
   say "wave $WAVE provisioned ($nskip service(s) failed/skipped) -- review $RUN/inventory.tsv; status --wave $WAVE"
+  [ -z "${ISSUE_STOP:-}" ] || { say "!! not every create of wave $WAVE was issued ($ISSUE_STOP) -- no later wave is started by this run"; rc=1; }
   return $rc
 }
 cmd_provision(){
@@ -823,7 +826,7 @@ cmd_provision(){
   [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
   STOP_REQ=0; trap 'STOP_REQ=1; echo; echo "!! Ctrl-C: the running step completes and is recorded, then provision stops"' INT
   trap 'write_inventory; inventory_counts; wave_unlock' EXIT     # the inventory is current however provision ends
-  local w; for w in $list; do WAVE="$w"; provision_wave || { echo "!! stopped at wave $w"; return 1; }; done
+  ISSUE_STOP=""; local w; for w in $list; do WAVE="$w"; provision_wave || { echo "!! stopped at wave $w"; return 1; }; done
   echo "next: migrate.sh provision-status --run $RUN (ledger view) ; provision-check --run $RUN (reads every Redis and Valkey back from CF: same space/org, same plan, last operation)"
 }
 
@@ -890,12 +893,42 @@ cmd_provstatus(){
 #   verdict line to paste out: PROVISION-CHECK: OK|FAIL (n of n staged, missing, mismatched, api-errors).
 #   Writes nothing to the ledger. The verdict is printed only after every service was walked (gate rule: a
 #   crash before it is a refusal, never a pass). Exit 1 on FAIL.
+# The BOSH half (added 2026-10-21 after the hollow Valkey): CF's "create succeeded" is the broker's word, and
+#   Blacksmith answers "succeeded" for an instance it has lost. So `bosh deployments --json` is read once
+#   through BOSH_CMD (env, or a BOSH_CMD=... line in $RUN/bosh.conf, e.g. "genesis @sbx-us b") and every
+#   Valkey must have a deployment ending in its guid (<plan id>-<guid>). Succeeded in CF + no deployment =
+#   HOLLOW (purge advice in the detail). No BOSH_CMD = refused unless --no-bosh; a failed listing = API-ERROR
+#   for every service with a Valkey, never a pass. Output goes to files, never through a pipe (the genesis
+#   wrapper hangs on a closed pipe); $RUN/.bosh-deployments (and .bosh-raw* on a failure) stay as evidence.
+#   Which director: the listing must hold the plan's REDIS deployments (they are Blacksmith's for sure);
+#   a listing without any of them is the wrong director (e.g. the env's own), not "everything hollow".
+bosh_cmd(){ local b="${BOSH_CMD:-}"
+  [ -n "$b" ] || { [ -s "$RUN/bosh.conf" ] && b=$(sed -n 's/^BOSH_CMD=//p' "$RUN/bosh.conf" | tail -1 | sed 's/[[:space:]]*#.*$//; s/[[:space:]]*$//' | sed "s/^[\"']\(.*\)[\"']\$/\1/"); }
+  [ -n "$b" ] || return 1; printf '%s' "$b"; }
+bosh_deployments(){ # bosh_deployments <out file>: deployment names one per line; R_ERR + 1 on any failure
+  local out="$1" b raw="$RUN/.bosh-raw"; b=$(bosh_cmd) || { R_ERR="no BOSH_CMD in the environment and no BOSH_CMD= line in $RUN/bosh.conf"; return 1; }
+  if ! ( trap '' INT; exec $TMOB $b deployments --json ) > "$raw" 2> "$raw.err"; then
+    R_ERR="'$b deployments --json' failed: $( { sed -n '/^{/,$p' "$raw" | jq -r '.Lines[]?' 2>/dev/null; grep -v '^$' "$raw.err"; } | tr '\n' ' ' | cut -c1-200)"; return 1; fi
+  sed "s/$(printf '\033')\[[0-9;]*m//g" "$raw" | sed -n '/^{/,$p' | jq -r '.Tables[0].Rows[].name' > "$out" 2>/dev/null \
+    || { R_ERR="'$b deployments --json': no JSON Tables in the output: $(head -c 120 "$raw" | tr '\n' ' ')"; return 1; }   # ESC via printf: BSD sed has no \x1b
+  [ -s "$out" ] || { R_ERR="'$b deployments --json' listed no deployment at all -- wrong director? (Blacksmith's director always has its own deployments)"; return 1; }
+  rm -f "$raw" "$raw.err"; }
 cmd_provcheck(){
   [ -s "$PLAN" ] || { echo "no $PLAN -- run: migrate.sh plan <merged_report.csv>"; exit 1; }
   local list; list=$(wave_list); [ -n "$list" ] || list=$(awk -F'\t' 'NR>1 {print $1}' "$PLAN" | sort -un | paste -sd' ' -)
   local info; info=$(cfcurl "/v3/info"); cf_json_ok "$info" || { echo "!! cf curl /v3/info failed -- not logged in?"; exit 1; }
+  local deps="$RUN/.bosh-deployments" bosh_mode bosh_err="" bosh_note
+  if [ -n "${NO_BOSH:-}" ]; then bosh_mode=skipped; bosh_note="NOT CHECKED (--no-bosh)"; echo "bosh: NOT CHECKED (--no-bosh) -- a Valkey CF calls succeeded may still have no BOSH deployment (hollow)"
+  elif ! bosh_cmd >/dev/null; then echo "!! provision-check needs BOSH: put BOSH_CMD=\"genesis @<env> b\" in $RUN/bosh.conf (or export BOSH_CMD), or pass --no-bosh to check CF only"; exit 1
+  elif bosh_deployments "$deps"; then bosh_mode=on
+    # right director? the plan's Redis deployments must be in the listing (a Valkey-free listing from the wrong director would read as "all hollow")
+    local nred=0 nredok=0 rg; for w in $list; do for rg in $(wave_rows "$w" | awk -F'\t' '!seen[$4]++ {print $4}'); do nred=$((nred+1)); grep -q -- "-$rg\$" "$deps" && nredok=$((nredok+1)); done; done
+    if [ "$nredok" = 0 ]; then bosh_mode=error; bosh_err="'$(bosh_cmd) deployments' lists $(wc -l < "$deps" | tr -d ' ') deployments but none of the plan's $nred Redis -- wrong director? (BOSH_CMD must reach the director Blacksmith deploys through)"
+      echo "!! bosh: $bosh_err -- every service with a valkey is API-ERROR below"
+    else echo "bosh: $(wc -l < "$deps" | tr -d ' ') deployments listed by '$(bosh_cmd)' ($nredok of $nred Redis of the plan found)"; fi
+  else bosh_mode=error; bosh_err="$R_ERR"; echo "!! bosh: $bosh_err -- every service with a valkey is API-ERROR below; fix BOSH_CMD (or --no-bosh to check CF only)"; fi
   local out="$RUN/provision-check.tsv"
-  printf 'wave\tservice\tredis_guid\tvalkey_guid\torg\tspace\tredis_plan\tvalkey_plan\tvalkey_offering\tvalkey_last_op\tresult\tdetail\n' > "$out"
+  printf 'wave\tservice\tredis_guid\tvalkey_guid\torg\tspace\tredis_plan\tvalkey_plan\tvalkey_offering\tvalkey_last_op\tresult\tdetail\tbosh\n' > "$out"
   declare -A PLN PLO SPN SPO ORN
   # plan_info <guid> -> PLN[g]=name PLO[g]=offering name (GET /v3/service_plans/<g>?include=service_offering); "" on error
   plan_info(){ [ -n "${1:-}" ] || return 1; [ -n "${PLN[$1]:-}" ] && return 0; local j; j=$(cfcurl "/v3/service_plans/$1?include=service_offering")
@@ -909,10 +942,10 @@ cmd_provcheck(){
     if [ -z "${ORN[$so]:-}" ]; then j=$(cfcurl "/v3/organizations/$so"); cf_json_ok "$j" || return 1
       local on; on=$(printf '%s' "$j" | jq -r '.name // empty'); [ -n "$on" ] || return 1; ORN[$so]="$on"; fi
     SPN[$1]="$sn"; SPO[$1]="$so"; }   # the cache entry is written only once space AND org are known (a failed org GET must not poison it)
-  local w sg name sorg ssp plan flags nsvc=0 nok=0 nmiss=0 nmis=0 nerr=0 nstg=0 ncut=0
+  local w sg name sorg ssp plan flags nsvc=0 nok=0 nmiss=0 nmis=0 nerr=0 nstg=0 ncut=0 nhol=0 nbosh=0 nbchk=0
   for w in $list; do
     while IFS=$'\t' read -r sg name sorg ssp plan flags; do [ -n "$sg" ] || continue
-      nsvc=$((nsvc+1)); local res detail="" vk="" vn="-" vpn="-" vpo="-" vlo="-" rpn="-" on="-" spn="-" j vj
+      nsvc=$((nsvc+1)); local res detail="" vk="" vn="-" vpn="-" vpo="-" vlo="-" rpn="-" on="-" spn="-" bdep="-" j vj
       j=$(cfcurl "/v3/service_instances/$sg")
       if ! cf_json_ok "$j"; then res=API-ERROR; detail="GET redis: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"
       else
@@ -946,19 +979,32 @@ cmd_provcheck(){
                 [ "${vlo#* }" = succeeded ] || { mm=1; detail="$detail; last operation '$vlo'"; }
                 if [ "$vn" = "$exp" ]; then :; elif [ "$exp" != "$name" ] && [ "$vn" = "$name" ]; then detail="$detail; already carries '$name' (renamed, ledger line missing -- apply records it)"; else mm=1; detail="$detail; named '$vn', expected '$exp'"; fi
                 detail="${detail#; }"; if [ "$mm" = 1 ]; then res=MISMATCH; else res=OK; detail="same space/org, plan '$vpn', $vlo${detail:+; $detail}"; fi
+                # the BOSH half: the deployment <plan id>-<guid> must exist for a Valkey CF calls succeeded
+                case "$bosh_mode" in
+                  on) nbchk=$((nbchk+1))
+                      if grep -q -- "-$vk\$" "$deps"; then bdep=present; nbosh=$((nbosh+1)); detail="$detail; bosh deployment present"
+                      elif [ "${vlo#* }" = succeeded ]; then bdep=none; res=HOLLOW
+                        local adv; if [ "$vn" = "$exp" ] && [ "$exp" != "$name" ]; then adv="purge it from CF without the broker: cf curl -X DELETE '/v3/service_instances/$vk?purge=true', then provision --wave $w creates it again"
+                        else adv="it is cut over: rollback --wave $w --service $name first (names and apps back; the unbind from it fails, expected), then purge it: cf curl -X DELETE '/v3/service_instances/$vk?purge=true', then provision --wave $w creates it again"; fi
+                        detail="CF says '$vlo' but BOSH has no deployment for $vk (the broker lost it) -- $adv${detail:+; $detail}"
+                      else bdep=none; detail="$detail; no bosh deployment (yet: $vlo)"; fi;;
+                  skipped) bdep=skipped;;
+                  *) bdep="?"; res=API-ERROR; detail="bosh listing failed ($bosh_err); CF side: $detail";;
+                esac
               fi
             fi
           fi
         fi
       fi
-      case "$res" in OK) nok=$((nok+1)); if [ "$vn" = "$name" ]; then ncut=$((ncut+1)); else nstg=$((nstg+1)); fi;; MISSING) nmiss=$((nmiss+1));; MISMATCH) nmis=$((nmis+1));; *) nerr=$((nerr+1));; esac
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$sg" "${vk:--}" "$on" "$spn" "$rpn" "$vpn" "$vpo" "$vlo" "$res" "$detail" >> "$out"
+      case "$res" in OK) nok=$((nok+1)); if [ "$vn" = "$name" ]; then ncut=$((ncut+1)); else nstg=$((nstg+1)); fi;; MISSING) nmiss=$((nmiss+1));; MISMATCH) nmis=$((nmis+1));; HOLLOW) nhol=$((nhol+1));; *) nerr=$((nerr+1));; esac
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$sg" "${vk:--}" "$on" "$spn" "$rpn" "$vpn" "$vpo" "$vlo" "$res" "$detail" "$bdep" >> "$out"
       printf '%-8s wave %-3s %-40s %s\n' "$res" "$w" "$name" "$detail"
     done < <(wave_rows "$w" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
   done
   echo "written: $out"
-  if [ "$nsvc" -gt 0 ] && [ "$nok" = "$nsvc" ]; then echo "PROVISION-CHECK: OK ($nok of $nsvc ok: $nstg staged, $ncut cut-over; 0 missing, 0 mismatched, 0 api-errors)"
-  else echo "PROVISION-CHECK: FAIL ($nok of $nsvc ok, $nmiss missing, $nmis mismatched, $nerr api-errors)"; exit 1; fi
+  case "$bosh_mode" in on) bosh_note="$nbosh of $nbchk valkeys have a deployment";; error) bosh_note="listing FAILED";; esac
+  if [ "$nsvc" -gt 0 ] && [ "$nok" = "$nsvc" ]; then echo "PROVISION-CHECK: OK ($nok of $nsvc ok: $nstg staged, $ncut cut-over; 0 missing, 0 mismatched, 0 hollow, 0 api-errors; bosh: $bosh_note)"
+  else echo "PROVISION-CHECK: FAIL ($nok of $nsvc ok, $nmiss missing, $nmis mismatched, $nhol hollow, $nerr api-errors; bosh: $bosh_note)"; exit 1; fi
 }
 # name-sync --wave N | --waves A-B: for every rename the ledger holds (Redis -> standby, staged Valkey -> name)
 #   read Blacksmith's copy back through SAFE_RUN and set the ones that differ. The check-after-one-
@@ -984,7 +1030,26 @@ cmd_namesync(){
   [ "$failed" = 0 ]
 }
 
-svc_arrays(){ unset VK SKIP JOBS PLANG SPACE CLEANED VNAME; declare -gA VK SKIP JOBS PLANG SPACE CLEANED VNAME; }   # per wave
+svc_arrays(){ unset VK SKIP JOBS PLANG SPACE CLEANED VNAME ACC; declare -gA VK SKIP JOBS PLANG SPACE CLEANED VNAME ACC; }   # per wave (ISSUE_STOP is per RUN: cmd_provision / cmd_apply reset it)
+# svc_create_accept <sg> <name> <vname> <space>: ONE CREATE AT A TIME AS BLACKSMITH SEES IT. CF answers the POST at
+#   once and calls the broker later from a job worker; the instance's last_operation.state stays 'initial' until the
+#   broker answered 202 -- and Blacksmith writes its index line inside Provision, before that 202 (SBX 2026-10-20:
+#   4 creates issued back-to-back reached the broker together, one index line was lost -> a hollow Valkey). So the
+#   next POST waits until this one's state has left 'initial' (seconds). The builds still overlap: nothing here
+#   waits for a deploy. Past ACCEPT_TIMEOUT (or 3 listing errors in a row) no further create is issued this run
+#   (ISSUE_STOP; the rest are recorded "not issued" and a re-run of provision creates them).
+svc_create_accept(){
+  local sg="$1" name="$2" vname="$3" sp="$4" start lj st bad=0; start=$(date +%s)
+  while :; do
+    if lj=$(cflist "/v3/service_instances?names=$vname&space_guids=$sp"); then bad=0
+      st=$(printf '%s' "$lj" | jq -r '[.resources[]|select(.guid!="'"$sg"'")][0].last_operation.state // empty')
+      case "$st" in initial|"") ;; *) ACC[$sg]=$(( $(date +%s)-start )); say "   broker accepted the create (${ACC[$sg]}s, now '$st')"; return 0;; esac
+    else bad=$((bad+1)); st="listing $vname failed ${bad}x"
+      [ "$bad" -ge 3 ] && { ISSUE_STOP="cannot tell whether the broker accepted $vname ($st) -- no further create issued; provision again later for the rest"; say "!! $name: $ISSUE_STOP"; return 1; }; fi
+    [ $(( $(date +%s)-start )) -ge "$ACCEPT_TIMEOUT" ] && { ISSUE_STOP="create of $vname still '${st:-initial}' after ${ACCEPT_TIMEOUT}s (CF has not called the broker) -- no further create issued; provision again later for the rest"; say "!! $name: $ISSUE_STOP"; return 1; }
+    sleep "$JOB_POLL"
+  done
+}
 # svc_create_issue <sg> <name> <space> <plan> <vname>: plan lookup, leftover rules on <vname>, POST (waited by
 #   svc_create_wait). <vname> is <name> on cutover day or <name>-valkey-staged from provision (note: "(staged").
 #   Outcome: JOBS (issued) | VK (adopted, ledger ok) | SKIP (ledger create-valkey fail).
@@ -992,6 +1057,9 @@ svc_create_issue(){
   local sg="$1" name="$2" sp="$3" plan="$4" vname="$5" lj n pg lg lst lpl tag
   tag="plan $plan"; [ "$vname" = "$name" ] || tag="staged, plan $plan"
   SPACE[$sg]=$sp; VNAME[$sg]=$vname
+  # after ISSUE_STOP nothing that reaches the broker is issued (no POST, and no leftover DELETE either: a deprovision
+  # racing the stuck create's Provision is the SBX trigger); an existing valkey is still adopted below
+  issue_blocked(){ [ -n "${ISSUE_STOP:-}" ] || return 1; ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "not issued: $ISSUE_STOP"; SKIP[$sg]=1; say "!! $name: create not issued -- ${ISSUE_STOP%% -- *}"; }
   lj=$(cflist "/v3/service_plans?names=$plan&service_offering_names=valkey&space_guids=$sp&available=true") || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "API error listing valkey plan '$plan'"; SKIP[$sg]=1; say "!! $name: cannot list valkey plans"; return; }
   n=$(printf '%s' "$lj" | jq -r '.resources|length'); pg=$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty')
   [ "$n" = 1 ] || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "valkey plan '$plan': $n match(es) in the space"; SKIP[$sg]=1; say "!! $name: valkey plan '$plan' -> $n match(es) -- skipped"; return; }
@@ -1004,13 +1072,16 @@ svc_create_issue(){
     if [ "$lst" = "create succeeded" ] && [ "$lpl" = "$pg" ]; then
       VK[$sg]=$lg; ledger_add "$WAVE" "$sg" "" create-valkey ok 0 "valkey $lg as $vname ($tag; adopted: already existed)"; printf '%s\t%s\t%s\n' "$sg" "$lg" "$vname" >> "$RUN/wave-$WAVE.guids"; say "$name: valkey already exists as $vname (${lg:0:8}) -- adopted"; return
     elif [ "$lst" = "create failed" ]; then
+      issue_blocked && return
       say "$name: deleting failed leftover ${lg:0:8} ($lst)"
       if cfreq DELETE "/v3/service_instances/$lg" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then CLEANED[$sg]="deleted failed leftover $lg first"
       else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "cannot delete failed leftover $lg: $R_ERR"; SKIP[$sg]=1; return; fi
     else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "name $vname taken by $lg ($lst, plan $lpl) -- not ours to touch"; SKIP[$sg]=1; say "!! $name: name $vname taken by ${lg:0:8} ($lst) -- skipped"; return; fi
   fi
+  issue_blocked && return
   if cfreq POST "/v3/service_instances" "{\"type\":\"managed\",\"name\":\"$vname\",\"relationships\":{\"space\":{\"data\":{\"guid\":\"$sp\"}},\"service_plan\":{\"data\":{\"guid\":\"$pg\"}}}}" && [ -n "$R_JOB" ]; then
     JOBS[$sg]="$R_JOB $(date +%s)"; say "$name: valkey create issued as $vname ($tag) -> $R_JOB"
+    svc_create_accept "$sg" "$name" "$vname" "$sp" || true   # the issued create is still waited for; only the NEXT ones are held back
   else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "${R_ERR:-no job in response}"; SKIP[$sg]=1; say "!! $name: create failed: ${R_ERR:-no job}"; fi
 }
 # svc_create_wait: wait for every issued create, then assert name<->guid<->plan. The Valkey's guid is
@@ -1026,7 +1097,7 @@ svc_create_wait(){
       n=$(printf '%s' "$lj" | jq -r '.resources|length' 2>/dev/null)
       vg=$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty'); vp=$(printf '%s' "$lj" | jq -r '.resources[0].relationships.service_plan.data.guid // empty')
       if [ "$n" = 1 ] && [ "$vg" != "$sg" ] && [ "$vp" = "${PLANG[$sg]}" ]; then
-        VK[$sg]=$vg; ledger_add "$WAVE" "$sg" "" create-valkey ok $(( ($(date +%s)-t1)*1000 )) "valkey $vg as $vname ($tag${CLEANED[$sg]:+; ${CLEANED[$sg]}})"
+        VK[$sg]=$vg; ledger_add "$WAVE" "$sg" "" create-valkey ok $(( ($(date +%s)-t1)*1000 )) "valkey $vg as $vname ($tag${ACC[$sg]:+; broker accepted after ${ACC[$sg]}s}${CLEANED[$sg]:+; ${CLEANED[$sg]}})"
         printf '%s\t%s\t%s\n' "$sg" "$vg" "$vname" >> "$RUN/wave-$WAVE.guids"; say "$name: valkey ready as $vname (${vg:0:8})"
       else ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "job done but assert failed: $n instance(s) named $vname, guid ${vg:-none}, plan ${vp:-none}"; SKIP[$sg]=1; say "!! $name: post-create assert failed -- skipped"; fi
     else ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "$R_ERR"; SKIP[$sg]=1; say "!! $name: valkey create FAILED: $R_ERR -- skipped${vname:+ }$([ "$vname" = "$name" ] && echo "(the redis gets its name back at the end of this step)")"; fi
@@ -1188,7 +1259,7 @@ cmd_apply(){
   [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
   STOP_REQ=0; trap 'STOP_REQ=1; echo; echo "!! Ctrl-C: the running step completes and is recorded, then apply stops"' INT
   trap 'wave_unlock' EXIT
-  local w; for w in $list; do WAVE="$w"; apply_wave || { echo "!! lane stopped at wave $w"; return 1; }; done
+  ISSUE_STOP=""; local w; for w in $list; do WAVE="$w"; apply_wave || { echo "!! lane stopped at wave $w"; return 1; }; done   # a day-of create not accepted in time holds back every later create of this run
 }
 
 # ---- rollback / confirm / retire (DESIGN §3, §4) -------------------------------------------
@@ -1297,6 +1368,6 @@ case "$SUB" in
   rollback)  cmd_rollback ;;
   confirm)   cmd_confirm ;;
   retire)    cmd_retire ;;
-  *) echo "usage: migrate.sh plan <report.csv> | provision --wave N|--waves A-B [--yes] | provision-status [--wave N] | provision-check [--waves A-B] | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N] | name-sync --wave N|--waves A-B"
+  *) echo "usage: migrate.sh plan <report.csv> | provision --wave N|--waves A-B [--yes] | provision-status [--wave N] | provision-check [--waves A-B] [--no-bosh] | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N] | name-sync --wave N|--waves A-B"
      echo "       rollback --wave N --service Y [--app X] [--reason ..] | confirm --wave N --service Y --by <team> [--grace 336h] | retire --wave N --service Y [--no-census] [--force]   (all: --run <dir>)"; exit 1 ;;
 esac
