@@ -276,7 +276,11 @@ plus a review document for the client, built from the binding graph:
   login only with stdin AND stdout on a terminal (`Term.pm in_controlling_terminal`); the tool
   captures stdout, so it bails with its env-var method list. Remedy: `g32 @sbx-us b env` on the
   terminal first (stores the session), then the check; the tool now recognises the text and says
-  that (Q10, 74 of 74 under a pty, 73 plain). Knowledge:
+  that (Q10, 74 of 74 under a pty, 73 plain). **Third live run (13:49, after `g32 @sbx-us b env`):
+  `bosh: 71 deployments listed by 'g32 @sbx-us b' (20 of 20 Redis of the plan found)`, every
+  service `bosh deployment present`, `PROVISION-CHECK: OK (20 of 20 ok: 0 staged, 20 cut-over; 0
+  missing, 0 mismatched, 0 hollow, 0 api-errors; bosh: 20 of 20 valkeys have a deployment)` —
+  the real `deployments --json` shape through the wrapper is verified.** Knowledge:
   `knowledge/genesis/genesis-bosh-under-timeout-sigttou.md`.
 
 ## Open questions
