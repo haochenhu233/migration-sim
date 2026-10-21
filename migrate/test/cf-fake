@@ -3,6 +3,7 @@
 #   cf-fake seed <waves.tsv>     build the initial world from a plan: spaces, redis instances,
 #                                valkey plans, apps (STARTED, 1 instance), app<->redis bindings
 #   cf curl PATH [-i] [-X M] [-H h] [-d body]    v3 subset used by migrate.sh (GET/POST/PATCH/DELETE)
+#   CFFAKE_FAIL_GET=<path prefix> -> every GET under it is a 500 error document (API-error paths)
 # Failure injection (env):
 #   CFFAKE_FAIL_CREATE=<svc name>      the valkey create job FAILS
 #   CFFAKE_CRASH=<app guid>            after a restart that app reports CRASHED instances
@@ -95,7 +96,9 @@ PLANS=dict(st['plans']); PLANS['plan-valkey-other']={'name':'cache-other','offer
 INST={}
 for kv in os.environ.get('CFFAKE_INSTANCES','').split(','):
     if '=' in kv: g,n=kv.split('='); INST[g]=int(n)
-if p=='/v3/info': out={'name':'cf-fake'}
+fg=os.environ.get('CFFAKE_FAIL_GET','')   # CFFAKE_FAIL_GET=<path prefix>: every GET under it answers a 500 error document (API error path)
+if fg and method=='GET' and p.startswith(fg): err(500,'UnknownError','An unknown error occurred (fake CFFAKE_FAIL_GET)')
+elif p=='/v3/info': out={'name':'cf-fake'}
 elif p=='/v3/jobs/'+p[9:] and p.startswith('/v3/jobs/'):
     jg=p[9:]; j=st['jobs'].get(jg)
     if not j: err(404,'CF-ResourceNotFound','job')
