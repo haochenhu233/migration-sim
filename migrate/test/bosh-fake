@@ -53,6 +53,9 @@ Y
        # HANG: like the real wrapper, the hang sits in a CHILD whose command line carries the listing (genesis -> script -c
        # 'bosh deployments --json'); timeout kills only this process, so migrate.sh must end the child itself.
        [ -n "${BOSHFAKE_HANG:-}" ] && bash -c 'sleep 5; :' fake-script-wrapper deployments --json   # '; :' keeps bash (and its args) as the parent instead of exec'ing sleep
+       # BOSHFAKE_NOAUTH=1: what genesis prints (stderr, rc 1) when the safe session is invalid and it cannot prompt because
+       # stdout is not a terminal (lib/Service/Vault/Remote.pm authenticate -> bail); banner + deprecation warning in front like SBX.
+       [ -n "${BOSHFAKE_NOAUTH:-}" ] && { printf '[DEPRECATED] lifespan: current is deprecated; use lifespan: 1 instead (with default on_reuse: truncate for equivalent behavior)\nVerifying availability of vault '"'"'open-vault'"'"' (https)... ok\n\nCould not successfully authenticate against open-vault vault with safe.\n\nGenesis can automatically authenticate with safe in the following ways:\n        - AppRole, supplied by $VAULT_ROLE_ID and $VAULT_SECRET_ID\n        - Vault Token, supplied by $VAULT_AUTH_TOKEN\n        - Username/Password, supplied by $VAULT_USERNAME and $VAULT_PASSWORD\n        - Github Peronal Access Token, supplied by $VAULT_GITHUB_TOKEN\n' >&2; exit 1; }
        [ -n "${BOSHFAKE_BAD:-}" ] && { echo "Fetching deployments: Director responded with non-successful status code '401'" >&2; exit 1; }
        banner
        if [ -n "${BOSHFAKE_EMPTY:-}" ]; then echo '{"Tables":[{"Rows":[]}]}'; else

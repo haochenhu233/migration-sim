@@ -169,5 +169,7 @@ if command -v timeout >/dev/null 2>&1 && timeout --foreground 1 true 2>/dev/null
   bash "$M" provision-check --wave 1 --run "$R" > "$R/pc9.log" 2>&1; rc=$?
   check "Q9 under timeout(1) the listing still runs in the foreground process group -> OK 4 of 4 (foreground-group check $ttyarm)" "[ $rc = 0 ] && grep -q 'bosh: 4 of 4 valkeys have a deployment' '$R/pc9.log' && ! grep -q 'foreground process group' '$R/pc9.log'"
 else pass "Q8/Q9 skipped: no timeout(1) with --foreground on this box (macOS) -- the listing runs unbounded here"; fi
+BOSHFAKE_NOAUTH=1 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc10.log" 2>&1; rc=$?
+check "Q10 no valid vault session (genesis cannot prompt, stdout captured) -> said with the remedy, not the method list; every service API-ERROR, FAIL" "[ $rc = 1 ] && grep -q \"no valid vault session, and genesis cannot ask for the login while its output is captured -- run '.*bosh-fake env' once in this shell\" '$R/pc10.log' && ! grep -q 'VAULT_GITHUB_TOKEN' '$R/pc10.log' && [ $(grep -c '^API-ERROR wave 1 ' "$R/pc10.log") = 4 ]"
 
 echo; [ "$fails" = 0 ] && echo "ALL PASS (workdir $W)" || { echo "$fails FAIL (workdir $W)"; exit 1; }

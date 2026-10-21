@@ -926,6 +926,10 @@ bosh_deployments(){ # bosh_deployments <out file>: deployment names one per line
       # on their command line: end them, then put the terminal back (review, 2026-10-21).
       pkill -TERM -g "$(ps -o pgid= -p $$ | tr -d ' ')" -f 'deployments --json' 2>/dev/null; stty sane < /dev/tty 2>/dev/null
       R_ERR="'$b deployments --json' gave no answer within ${BOSH_TIMEOUT}s (wrapper killed, its bosh ended; BOSH_TIMEOUT=<s> to wait longer; see $raw.err)"
+    elif grep -q 'authenticate against .* vault\|vault session at .* has expired\|Genesis can automatically' "$raw.err"; then
+      # genesis asks for the vault login only when stdin AND stdout are a terminal (Term.pm in_controlling_terminal); here
+      # stdout is this file, so it bails with its list of env-var methods instead (SBX, 2026-10-21)
+      R_ERR="'$b deployments --json' failed (rc $rc): no valid vault session, and genesis cannot ask for the login while its output is captured -- run '$b env' once in this shell (it asks for the vault login and stores the session), then provision-check again"
     else   # bosh --json puts director errors in .Lines (stdout), genesis its banner/warnings on stderr: the tail of each
       R_ERR="'$b deployments --json' failed (rc $rc): $( { sed -n '/^{/,$p' "$raw" | jq -r '.Lines[]?' 2>/dev/null | tr '\n' ' ' | tail -c 120; grep -v '^$' "$raw.err" | tr '\n' ' ' | tail -c 120; } )"; fi
     return 1; fi

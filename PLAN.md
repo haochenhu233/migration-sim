@@ -271,7 +271,12 @@ plus a review document for the client, built from the binding graph:
   sane`; Q8 asserts none is left (the fake's hang is a child carrying the listing on its command
   line; the first version exec-optimized into a bare `sleep` and the assertion could not bite —
   caught by the negative check); error text tails stdout `.Lines` and stderr separately (bosh's
-  own director error is on stdout and would have been cut again); fake comment. Knowledge:
+  own director error is on stdout and would have been cut again); fake comment. **Second live run
+  (13:21): fails in seconds, rc 1, cause = no valid vault session** — genesis prompts for the
+  login only with stdin AND stdout on a terminal (`Term.pm in_controlling_terminal`); the tool
+  captures stdout, so it bails with its env-var method list. Remedy: `g32 @sbx-us b env` on the
+  terminal first (stores the session), then the check; the tool now recognises the text and says
+  that (Q10, 74 of 74 under a pty, 73 plain). Knowledge:
   `knowledge/genesis/genesis-bosh-under-timeout-sigttou.md`.
 
 ## Open questions
