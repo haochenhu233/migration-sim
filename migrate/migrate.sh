@@ -247,7 +247,14 @@ namesync_pending(){ [ -s "$LEDGER" ] || { echo 0; return; }
 
 # ============================================================================ cf helpers
 CF="${CF_CMD:-cf}"
-if command -v timeout >/dev/null 2>&1; then TMO="timeout 30"; TMOB="timeout 180"; else TMO=""; TMOB=""; fi   # macOS has no timeout(1); TMOB bounds a bosh listing
+BOSH_TIMEOUT="${BOSH_TIMEOUT:-180}"   # bound on one bosh listing (the genesis wrapper + director round trip)
+if command -v timeout >/dev/null 2>&1; then TMO="timeout 30"   # macOS has no timeout(1)
+  # The bosh listing MUST stay in the terminal's foreground process group: `genesis ... bosh` wraps bosh in script(1),
+  # which puts the terminal in raw mode, and a process timeout(1) has moved to its own group is STOPPED by the kernel
+  # (SIGTTOU) when it does that -- the check sat frozen for 180s in SBX (2026-10-21). --foreground is the documented
+  # remedy; a timeout(1) without it (pre-8.13 coreutils) is not used at all rather than used wrongly.
+  if timeout --foreground 1 true 2>/dev/null; then TMOB="timeout --foreground $BOSH_TIMEOUT"; else TMOB=""; fi
+else TMO=""; TMOB=""; fi
 cfcurl(){ $TMO "$CF" curl "$1" 2>/dev/null; }                      # read-only CF API
 cf_json_ok(){ printf '%s' "$1" | jq -e 'type=="object" and (has("errors")|not)' >/dev/null 2>&1; }
 # cflist <path>: a LIST endpoint; prints the JSON only if it really has .resources -- an error
@@ -899,7 +906,8 @@ cmd_provstatus(){
 #   Valkey must have a deployment ending in its guid (<plan id>-<guid>). Succeeded in CF + no deployment =
 #   HOLLOW (purge advice in the detail). No BOSH_CMD = refused unless --no-bosh; a failed listing = API-ERROR
 #   for every service with a Valkey, never a pass. Output goes to files, never through a pipe (the genesis
-#   wrapper hangs on a closed pipe); $RUN/.bosh-deployments (and .bosh-raw* on a failure) stay as evidence.
+#   wrapper hangs on a closed pipe), and the wrapper stays in the terminal's foreground process group (see TMOB:
+#   it wraps bosh in script(1)); $RUN/.bosh-deployments (and .bosh-raw* on a failure) stay as evidence.
 #   Which director: the listing must hold the plan's REDIS deployments (they are Blacksmith's for sure);
 #   a listing without any of them is the wrong director (e.g. the env's own), not "everything hollow".
 bosh_cmd(){ local b="${BOSH_CMD:-}"
@@ -907,8 +915,20 @@ bosh_cmd(){ local b="${BOSH_CMD:-}"
   [ -n "$b" ] || return 1; printf '%s' "$b"; }
 bosh_deployments(){ # bosh_deployments <out file>: deployment names one per line; R_ERR + 1 on any failure
   local out="$1" b raw="$RUN/.bosh-raw"; b=$(bosh_cmd) || { R_ERR="no BOSH_CMD in the environment and no BOSH_CMD= line in $RUN/bosh.conf"; return 1; }
-  if ! ( trap '' INT; exec $TMOB $b deployments --json ) > "$raw" 2> "$raw.err"; then
-    R_ERR="'$b deployments --json' failed: $( { sed -n '/^{/,$p' "$raw" | jq -r '.Lines[]?' 2>/dev/null; grep -v '^$' "$raw.err"; } | tr '\n' ' ' | cut -c1-200)"; return 1; fi
+  # No INT shield here (unlike cfx): the check is read-only, so Ctrl-C may kill the wrapper; stdin is left alone on
+  # purpose (script(1) wants the terminal). The error shown is the TAIL of stderr: genesis prints its banner and
+  # deprecation warnings first and the real cause last.
+  local rc=0; ( exec $TMOB $b deployments --json ) > "$raw" 2> "$raw.err" || rc=$?
+  if [ "$rc" != 0 ]; then
+    if [ "$rc" = 124 ]; then
+      # --foreground signals only the wrapper (perl), which bails without killing its script(1)+bosh child; those
+      # would keep the terminal in raw mode until bosh gives up. They are in our process group with the listing
+      # on their command line: end them, then put the terminal back (review, 2026-10-21).
+      pkill -TERM -g "$(ps -o pgid= -p $$ | tr -d ' ')" -f 'deployments --json' 2>/dev/null; stty sane < /dev/tty 2>/dev/null
+      R_ERR="'$b deployments --json' gave no answer within ${BOSH_TIMEOUT}s (wrapper killed, its bosh ended; BOSH_TIMEOUT=<s> to wait longer; see $raw.err)"
+    else   # bosh --json puts director errors in .Lines (stdout), genesis its banner/warnings on stderr: the tail of each
+      R_ERR="'$b deployments --json' failed (rc $rc): $( { sed -n '/^{/,$p' "$raw" | jq -r '.Lines[]?' 2>/dev/null | tr '\n' ' ' | tail -c 120; grep -v '^$' "$raw.err" | tr '\n' ' ' | tail -c 120; } )"; fi
+    return 1; fi
   sed "s/$(printf '\033')\[[0-9;]*m//g" "$raw" | sed -n '/^{/,$p' | jq -r '.Tables[0].Rows[].name' > "$out" 2>/dev/null \
     || { R_ERR="'$b deployments --json': no JSON Tables in the output: $(head -c 120 "$raw" | tr '\n' ' ')"; return 1; }   # ESC via printf: BSD sed has no \x1b
   [ -s "$out" ] || { R_ERR="'$b deployments --json' listed no deployment at all -- wrong director? (Blacksmith's director always has its own deployments)"; return 1; }

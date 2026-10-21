@@ -42,7 +42,17 @@ Y
 Y
   ;;
   deployments) # for provision-check: one deployment <plan id>-<guid> per Valkey that cf-fake holds as succeeded, except a
-       # CFFAKE_HOLLOW one (CF has it, BOSH does not). BOSHFAKE_BAD / BOSHFAKE_EMPTY as for instances.
+       # CFFAKE_HOLLOW one (CF has it, BOSH does not). BOSHFAKE_BAD / BOSHFAKE_EMPTY as for instances, BOSHFAKE_HANG=1 -> no answer for 5s.
+       # Foreground check: the real `genesis ... bosh` wraps bosh in script(1), which sets the terminal to raw mode; a process
+       # outside the terminal's foreground process group is STOPPED by the kernel (SIGTTOU) doing that -- what `timeout` without
+       # --foreground does to it (SBX, 2026-10-21). So this fake refuses (exit 97) in that situation instead of freezing.
+       # Skipped without a controlling terminal (tpgid empty/-1/0): run the harness under `script -q /dev/null bash ...` to arm it,
+       # and run it in the foreground (a backgrounded harness is outside the foreground group too and gets 97 for every case).
+       pg=$(ps -o pgid= -p $$ | tr -d ' '); tpg=$(ps -o tpgid= -p $$ | tr -d ' ')
+       case "$tpg" in ''|-1|0) ;; *) [ "$pg" = "$tpg" ] || { echo "bosh-fake: not in the terminal's foreground process group (pgid $pg, tpgid $tpg) -- the real genesis would be stopped by SIGTTOU here" >&2; exit 97; };; esac
+       # HANG: like the real wrapper, the hang sits in a CHILD whose command line carries the listing (genesis -> script -c
+       # 'bosh deployments --json'); timeout kills only this process, so migrate.sh must end the child itself.
+       [ -n "${BOSHFAKE_HANG:-}" ] && bash -c 'sleep 5; :' fake-script-wrapper deployments --json   # '; :' keeps bash (and its args) as the parent instead of exec'ing sleep
        [ -n "${BOSHFAKE_BAD:-}" ] && { echo "Fetching deployments: Director responded with non-successful status code '401'" >&2; exit 1; }
        banner
        if [ -n "${BOSHFAKE_EMPTY:-}" ]; then echo '{"Tables":[{"Rows":[]}]}'; else

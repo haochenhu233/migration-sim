@@ -255,6 +255,24 @@ plus a review document for the client, built from the binding graph:
   `done`; the gate sits after adoption and before any DELETE/POST; verdict says "n of m valkeys have
   a deployment"; HOLLOW advice differs for a cut-over Valkey (rollback first); `bosh.conf` comments
   stripped.
+  **First live run (SBX, 12:26 local): the BOSH listing froze for 180 s and then "failed".** Not the
+  director: `genesis … bosh` runs bosh inside `script(1)` (raw-mode tcsetattr), and GNU `timeout`
+  without `--foreground` moves the command out of the terminal's foreground process group, where
+  that call is *stopped* (SIGTTOU) until `timeout` kills it (rc 124). `cf curl` under `timeout 30`
+  never touched the terminal, `free-ips.sh` never used `timeout` — so only this call hit it. Fix:
+  `timeout --foreground $BOSH_TIMEOUT` (probed; none at all if unsupported), no INT shield on the
+  read-only listing, rc 124 said as "no answer within Ns", error text from the **tail** of stderr
+  (the 200-char head showed only the deprecation warning). bosh-fake exits 97 outside the foreground
+  group, so the harness reproduces the freeze under a pty (`script -q /dev/null bash …`): old code
+  11 FAIL, new code 73 of 73 (Q8 timeout message, Q9 foreground). Review round (fresh agent, 3
+  findings, all taken): `--foreground` signals only the perl wrapper, which bails without killing
+  its `script`/bosh child → the terminal would stay in raw mode after rc 124 — the tool now ends
+  every process of its group whose command line is the listing (`pkill -g … -f`) and runs `stty
+  sane`; Q8 asserts none is left (the fake's hang is a child carrying the listing on its command
+  line; the first version exec-optimized into a bare `sleep` and the assertion could not bite —
+  caught by the negative check); error text tails stdout `.Lines` and stderr separately (bosh's
+  own director error is on stdout and would have been cut again); fake comment. Knowledge:
+  `knowledge/genesis/genesis-bosh-under-timeout-sigttou.md`.
 
 ## Open questions
 

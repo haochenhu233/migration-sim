@@ -157,5 +157,17 @@ BOSHFAKE_EMPTY=1 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc6.log" 2>
 check "Q6 director lists no deployment at all -> refused as the wrong director, every service API-ERROR, FAIL" "[ $rc = 1 ] && grep -q 'wrong director' '$R/pc6.log' && [ $(grep -c '^API-ERROR wave 1 ' "$R/pc6.log") = 4 ]"
 BOSHFAKE_NOREDIS=1 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc7.log" 2>&1; rc=$?
 check "Q7 a non-empty listing without the plan's Redis (the env's own director) -> wrong director, API-ERROR, no HOLLOW, no purge advice" "[ $rc = 1 ] && grep -q 'none of the plan.s 4 Redis -- wrong director' '$R/pc7.log' && [ $(grep -c '^API-ERROR wave 1 ' "$R/pc7.log") = 4 ] && ! grep -q 'HOLLOW\|purge=true' '$R/pc7.log'"
+# Q8/Q9: the listing runs under timeout(1) on Linux. bosh-fake refuses (exit 97) when it is outside the terminal's
+# foreground process group -- where a timeout without --foreground puts it and where the real genesis (script(1) ->
+# raw mode) is STOPPED by SIGTTOU (SBX, 2026-10-21). That check only arms with a controlling terminal, so this
+# harness says whether it was armed; `script -q /dev/null bash migrate/test/case-provision.sh` arms it anywhere.
+tpg=$(ps -o tpgid= -p $$ | tr -d ' '); case "$tpg" in ''|-1|0) ttyarm="NOT armed (no controlling terminal)";; *) ttyarm=armed;; esac
+if command -v timeout >/dev/null 2>&1 && timeout --foreground 1 true 2>/dev/null; then
+  BOSHFAKE_HANG=1 BOSH_TIMEOUT=1 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc8.log" 2>&1; rc=$?
+  sleep 1; left=$(pgrep -g "$(ps -o pgid= -p $$ | tr -d ' ')" -f 'deployments --json' | wc -l | tr -d ' ')
+  check "Q8 director gives no answer -> wrapper killed after BOSH_TIMEOUT AND its hung child ended (none left in our process group), said as such, every service API-ERROR, FAIL (foreground-group check $ttyarm)" "[ $rc = 1 ] && grep -q 'gave no answer within 1s (wrapper killed' '$R/pc8.log' && [ $(grep -c '^API-ERROR wave 1 ' "$R/pc8.log") = 4 ] && [ $left = 0 ]"
+  bash "$M" provision-check --wave 1 --run "$R" > "$R/pc9.log" 2>&1; rc=$?
+  check "Q9 under timeout(1) the listing still runs in the foreground process group -> OK 4 of 4 (foreground-group check $ttyarm)" "[ $rc = 0 ] && grep -q 'bosh: 4 of 4 valkeys have a deployment' '$R/pc9.log' && ! grep -q 'foreground process group' '$R/pc9.log'"
+else pass "Q8/Q9 skipped: no timeout(1) with --foreground on this box (macOS) -- the listing runs unbounded here"; fi
 
 echo; [ "$fails" = 0 ] && echo "ALL PASS (workdir $W)" || { echo "$fails FAIL (workdir $W)"; exit 1; }
