@@ -191,6 +191,27 @@ plus a review document for the client, built from the binding graph:
 - 2026-09-28 — **auto-rollback per app is the default** (app stays working on Redis; incident recorded; wave continues; 3-in-a-row circuit breaker pauses the wave). Status has two levels (project summary / wave detail) + derived snapshot TSVs; ledger stays the only source of truth.
 - 2026-09-28 — **operator layer is the product**: ledger-driven CLI, terminal dashboard (`watch`), per-step rollback, accident drill — before any scale. No new UI.
 
+- **2026-10-20 (SBX waves 1–6, two lanes): a hollow Valkey and the rollback that broke its neighbours.**
+  Waves 1–5: 115 of 115 connections verified, 0 failed. Wave 6 (3 chained services 07–08–09): 09's
+  Valkey was *hollow* — CF said `create succeeded`, Blacksmith's index had no entry, BOSH had no
+  deployment, no BOSH task ever existed. Cause (verified in `blacksmith/internal/broker`):
+  `Vault.Index()` is an unlocked read-modify-write of the whole index; 4 concurrent creates right
+  after a leftover delete lost 09's line; `LastOperation()` answers "succeeded, instance deleted" for
+  an instance missing from the index (`broker.go:481`), so CF recorded a success. `provision-check`
+  asks CF only, so it passed. Bind then failed "deployment not found"; the tool rolled 09 back but
+  left the names swapped; app-049 (bound 09+08) was restarted by 08's step and crashed ("no
+  credentials found", by-name lookup); 08 rolled back the same way and broke app-028 (08+07); lane B
+  stopped after 3 failures. Decisions: (1) **rollback restores names** (`rollback_names`, ledger
+  outcome `undone`, failures under `rollback-names`, phase NAMES-STUCK; `apply` undoes a service it
+  gives up after the standby rename; `--app` override keeps names) — commit below; (2) **`provision`
+  must serialize what Blacksmith sees** (POST, wait until `last_operation.state` leaves `initial`,
+  next) and wait for a leftover's delete job; (3) **`provision-check` must ask BOSH** for the
+  deployment (`BOSH_RUN` like `SAFE_RUN`) — (2)+(3) are the next delta; (4) a hollow instance is
+  removed with `cf curl -X DELETE /v3/service_instances/<g>?purge=true` (no broker call), then
+  `provision --wave N` creates it again. Blacksmith backlog: lock the index write; never answer
+  "succeeded" for a create whose line is missing. Review round (fresh agent) found 11 items, all
+  addressed or recorded (finding 9, in-progress bindings count as present, left as is).
+
 ## Open questions
 
 - [ ] dominant client stacks — Java/Spring + .NET assumed; confirm (decides which real-stack apps matter)

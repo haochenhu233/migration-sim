@@ -145,7 +145,7 @@ ledger_bad(){ [ -s "$LEDGER" ] || { echo 0; return; }; echo $(( $(grep -c . "$LE
 ledger_states(){
   [ -s "$LEDGER" ] || return 0
   ledger_lines | jq -rs --arg w "$WAVE" '
-    map(select(($w=="" or (.wave|tostring)==$w) and .step!="name-sync"))   # name-sync is cosmetic (Blacksmith UI), never a phase
+    map(select(($w=="" or (.wave|tostring)==$w) and .step!="name-sync" and .outcome!="undone"))   # name-sync is cosmetic (Blacksmith UI), an undo line is bookkeeping: neither is a phase
     | group_by([.service, .app]) | map(last)                      # last event per (service, app)
     | .[] | [ .service, .app,
               (if .outcome=="ok" then .step else (.step + ":" + .outcome) end),
@@ -204,6 +204,7 @@ cmd_status(){
         else if (ev ~ /create-valkey:fail/) phase="CREATE-FAILED"
         else if (ev ~ /copy-data:fail/)   phase="COPY-FAILED"
         else if (ev ~ /rename-valkey:fail/) phase="RENAME-FAILED"
+        else if (ev ~ /rollback-names:fail/) phase="NAMES-STUCK"      # rollback could not put the names back: rollback --service again
         else if (failed[s]>0)             phase="ATTENTION"
         else if (rolled[s]>0 && switched[s]==0) phase="ROLLED-BACK"
         else if (verified[s]==apps[s]-team[s]) phase="VERIFIED"
@@ -212,7 +213,7 @@ cmd_status(){
         else if (ev=="create-valkey" || ev=="rename-valkey") phase="READY"
         else                              phase="PENDING"
         sb=(s in standby) ? standby[s] : "-"
-        mark=""; if (phase ~ /FAILED|ATTENTION|ROLLED/) mark="  !!"
+        mark=""; if (phase ~ /FAILED|ATTENTION|ROLLED|STUCK/) mark="  !!"
         n=apps[s]-team[s]; ac=(team[s]>0 ? n "+" team[s] : n)
         printf "%-28s %-12s %-14s %5s %9s %9s %-14s %s%s\n", disp[s], plan[s], phase, ac, switched[s]+0 "/" n, (verified[s]+0) "/" n, sb, (s in last_ts ? substr(last_ts[s],12,8) " " (last_app[s]==""?"":(last_app[s] in aname ? aname[last_app[s]] : substr(last_app[s],1,8)) " ") last_step[s] (last_note[s]!=""?" -- " substr(last_note[s],1,40):"") : "-"), mark
       }
@@ -566,8 +567,11 @@ job_wait(){
   done
 }
 # binding_guid <app> <si> -> guid of the app binding, "" if none; "ERR" on API error
+# binding_guid <app> <si> [any] -> guid of the app's binding to the instance; "" if none, ERR on API error. A binding
+#   whose last operation FAILED (CF keeps the record, e.g. a bind the broker refused) is not a binding -- unless
+#   <any> is given (rollback: it must be deleted too).
 binding_guid(){ local lj; lj=$(cflist "/v3/service_credential_bindings?type=app&app_guids=$1&service_instance_guids=$2") || { echo ERR; return; }
-  printf '%s' "$lj" | jq -r '.resources[0].guid // empty'; }
+  printf '%s' "$lj" | jq -r --arg any "${3:-}" '[.resources[] | select($any!="" or ((.last_operation.state // "succeeded") != "failed"))] | .[0].guid // empty'; }
 # app_stats <app> -> "running/total" ; "ERR" on API error
 app_stats(){ local j; j=$(cfx "/v3/apps/$1/processes/web/stats" 2>/dev/null); cf_json_ok "$j" || { echo ERR; return; }
   printf '%s' "$j" | jq -r '"\([.resources[]|select(.state=="RUNNING")]|length)/\(.resources|length)"'; }
@@ -590,9 +594,9 @@ app_last(){ # app_last <svc> <app> -> last step[:outcome] for the pair ("" if no
 # <name> by apply right after the Redis took the standby name. The ledger note of a staged create
 # carries "(staged"; rename-valkey ok ends the staged state.
 staged_name(){ printf '%s-valkey-staged' "$1"; }
-svc_staged(){ [ -s "$LEDGER" ] || return 0   # "1" while the last create-valkey/rename-valkey ok is a staged create
-  ledger_lines | jq -rs --arg s "$1" '[.[] | select(.service==$s and .app=="" and .outcome=="ok" and (.step=="create-valkey" or .step=="rename-valkey"))] | last
-    | if . != null and .step=="create-valkey" and (.note|test("\\(staged")) then "1" else "" end'; }
+svc_staged(){ [ -s "$LEDGER" ] || return 0   # "1" while the last create-valkey/rename-valkey ok is a staged create, or a rollback undid the rename (rename-valkey undone)
+  ledger_lines | jq -rs --arg s "$1" '[.[] | select(.service==$s and .app=="" and ((.outcome=="ok" and (.step=="create-valkey" or .step=="rename-valkey")) or (.step=="rename-valkey" and .outcome=="undone")))] | last
+    | if . != null and ((.step=="create-valkey" and (.note|test("\\(staged"))) or .outcome=="undone") then "1" else "" end'; }
 wave_list(){ if [ -n "${WAVES:-}" ]; then seq "${WAVES%-*}" "${WAVES#*-}" | paste -sd' ' -; else printf '%s' "$WAVE"; fi; }
 
 # ---- Blacksmith's own copy of the instance name (DESIGN §6d). A CF rename never reaches the broker, so
@@ -643,10 +647,51 @@ restart_app(){
   R_MS=$(( ($(date +%s) - t0) * 1000 )); return 0
 }
 
-# rollback_service <svc_guid> <name> <valkey_guid> <reason>: every app of the service back on Redis
+# rollback_names <svc_guid> <name> <valkey_guid>: the service's names back to where apply found them -- Valkey
+#   <name> -> <name>-valkey-staged FIRST (frees the name; a CF rename never reaches the broker, so it works for a
+#   Valkey the broker has lost too), then Redis <name>-redis-standby -> <name>, then Blacksmith's copies. Gated on the
+#   LIVE CF names, not on the ledger. Each undo is a ledger line 'rename-valkey|rename-standby undone' (not ok =>
+#   ledger_done reads the rename as not done and the next apply renames again; svc_staged reads the Valkey as staged
+#   again). A failure is recorded as 'rollback-names fail' -- its own step, so the rename lines keep saying what CF
+#   has (review 2026-10-20 finding 1: a 'rename-standby fail' here would have left the tool unable to ever undo it).
+#   Needed because apps resolve their service BY NAME in VCAP_SERVICES: a rolled-back service that kept the swapped
+#   names crashes every app that restarts later -- and a multi-bound app is restarted by its OTHER service's step
+#   (SBX wave 6, 2026-10-20). Returns 1 when something could not be undone (R_NAMES tells what).
+rollback_names(){
+  local sg="$1" name="$2" vk="$3" std="${name}-redis-standby" stn t0 j cur; stn=$(staged_name "$name"); R_NAMES=""
+  [ -n "$vk" ] || vk=$(svc_note_guid "$sg")
+  if [ -n "$vk" ]; then
+    j=$(cfx "/v3/service_instances/$vk" 2>/dev/null)
+    if ! cf_json_ok "$j"; then R_NAMES="cannot read valkey $vk: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"
+      ledger_add "$WAVE" "$sg" "" rollback-names fail 0 "$R_NAMES -- names left as they are"; say "   !! rollback: $R_NAMES -- names left as they are"; return 1; fi   # unknown whether <name> is free: stop
+    cur=$(printf '%s' "$j" | jq -r .name); t0=$(date +%s)
+    if [ "$cur" = "$stn" ]; then [ -z "$(ledger_done "$sg" "" rename-valkey)" ] || ledger_add "$WAVE" "$sg" "" rename-valkey undone 0 "$name -> $stn (found already renamed back)"; say "   valkey already named $stn"
+    elif [ "$cur" = "$name" ]; then
+      if cfreq PATCH "/v3/service_instances/$vk" "{\"name\":\"$stn\"}" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then
+        ledger_add "$WAVE" "$sg" "" rename-valkey undone $(( ($(date +%s)-t0)*1000 )) "$name -> $stn (rollback)"; say "   valkey renamed back -> $stn (${vk:0:8})"; name_sync "$sg" "$vk" "$stn" "$name"
+      else R_NAMES="valkey $vk rename back to $stn failed: $R_ERR"; ledger_add "$WAVE" "$sg" "" rollback-names fail $(( ($(date +%s)-t0)*1000 )) "$R_NAMES -- redis left as $std"; say "   !! rollback: $R_NAMES -- redis left as $std"; return 1; fi   # <name> may still be taken
+    else R_NAMES="valkey $vk is named '$cur' (expected '$name' or '$stn') -- not renamed"; ledger_add "$WAVE" "$sg" "" rollback-names fail 0 "$R_NAMES"; say "   !! rollback: $R_NAMES"; fi   # <name> is free: the redis can still go back
+  fi
+  j=$(cfx "/v3/service_instances/$sg" 2>/dev/null)
+  if ! cf_json_ok "$j"; then R_NAMES="${R_NAMES:+$R_NAMES; }cannot read redis $sg: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"; ledger_add "$WAVE" "$sg" "" rollback-names fail 0 "$R_NAMES"; say "   !! rollback: cannot read redis ${sg:0:8} -- left as it is"; return 1; fi
+  cur=$(printf '%s' "$j" | jq -r .name); t0=$(date +%s)
+  if [ "$cur" = "$name" ]; then [ -z "$(ledger_done "$sg" "" rename-standby)" ] || ledger_add "$WAVE" "$sg" "" rename-standby undone 0 "$std -> $name (found already renamed back)"; say "   redis already named $name"
+  elif [ "$cur" = "$std" ]; then
+    if cfreq PATCH "/v3/service_instances/$sg" "{\"name\":\"$name\"}" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then
+      ledger_add "$WAVE" "$sg" "" rename-standby undone $(( ($(date +%s)-t0)*1000 )) "$std -> $name (rollback)"; say "   redis renamed back -> $name (${sg:0:8})"; name_sync "$sg" "$sg" "$name" "$std"
+    else R_NAMES="${R_NAMES:+$R_NAMES; }redis $sg rename back to $name failed: $R_ERR"; ledger_add "$WAVE" "$sg" "" rollback-names fail $(( ($(date +%s)-t0)*1000 )) "$R_NAMES"; say "   !! rollback: redis rename back failed: $R_ERR -- apps that look their service up by name will not find it; rollback --service again"; return 1; fi
+  else R_NAMES="${R_NAMES:+$R_NAMES; }redis $sg is named '$cur' (expected '$name' or '$std') -- not renamed"; ledger_add "$WAVE" "$sg" "" rollback-names fail 0 "$R_NAMES"; say "   !! rollback: redis ${sg:0:8} is named '$cur' -- left as it is"; return 1; fi
+  [ -z "$R_NAMES" ]
+}
+
+# rollback_service <svc_guid> <name> <valkey_guid> <reason>: names back first (rollback_names), then every app of
+#   the service back on Redis. An app whose last event is rollback:fail is retried: an app that crashed on the
+#   earlier rollback restart (names still swapped) is restarted again now that the names are back.
 rollback_service(){
-  local sg="$1" name="$2" vk="$3" why="$4" ag app aflags last t0 ok bg inst st
+  local sg="$1" name="$2" vk="$3" why="$4" ag app aflags last t0 ok bg inst st s
   say "!! ROLLBACK service $name ($(printf '%s' "$sg" | cut -c1-8)): $why"
+  if [ -n "${APPF:-}" ]; then say "   (--app override: other apps stay on the valkey, names stay as they are)"
+  else rollback_names "$sg" "$name" "$vk" || NAMES_FAILED="${NAMES_FAILED:+$NAMES_FAILED }$sg"; fi
   while IFS=$'\t' read -r ag app aflags; do
     case ",$aflags," in *,no-binding:*) continue;; esac
     last=$(app_last "$sg" "$ag"); case "$last" in ""|rollback|team-action) continue;; esac
@@ -659,17 +704,24 @@ rollback_service(){
          && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then did="rebind redis"; else ok=""; fi
     fi
     # 2) Valkey binding away
-    if [ -n "$ok" ] && [ -n "$vk" ]; then bg=$(binding_guid "$ag" "$vk")
+    if [ -n "$ok" ] && [ -n "$vk" ]; then bg=$(binding_guid "$ag" "$vk" any)
       if [ "$bg" = ERR ]; then ok=""; R_ERR="cannot list bindings"
       elif [ -n "$bg" ]; then
-        if cfreq DELETE "/v3/service_credential_bindings/$bg" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then did="${did:+$did + }unbind valkey"; else ok=""; fi
+        if cfreq DELETE "/v3/service_credential_bindings/$bg" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then did="${did:+$did + }unbind valkey"
+        else ok=""
+          case "$R_ERR" in *"deployment not found"*)   # the broker has lost this Valkey: CF cannot unbind through it
+            R_ERR="$R_ERR -- the broker no longer knows valkey $vk (hollow); purge it from CF (binding included) without the broker: cf curl -X DELETE '/v3/service_instances/$vk?purge=true', then provision --wave $WAVE creates it again";; esac
+        fi
       fi
     fi
-    # 3) restart only if the app was restarted onto the Valkey (and is not stopped)
-    if [ -n "$ok" ]; then case "$last" in restart|verify|verify:fail)
-      st=$(cfx "/v3/apps/$ag" 2>/dev/null | jq -r '.state // "?"')
-      if [ "$st" = STARTED ]; then inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // 1')
-        if restart_app "$ag" "$app" "$inst"; then did="${did:+$did + }restart"; else ok=""; fi; fi;; esac; fi
+    # 3) restart if the app was restarted onto the Valkey, or crashed on an earlier rollback restart (names were
+    #    still swapped then) -- never a STOPPED app
+    if [ -n "$ok" ]; then local again=""
+      case "$last" in restart|verify|verify:fail) again=1;;
+        rollback:fail) s=$(app_stats "$ag"); [ "$s" != ERR ] && [ "${s%/*}" != "${s#*/}" ] && again=1;; esac   # some instance not RUNNING
+      if [ -n "$again" ]; then st=$(cfx "/v3/apps/$ag" 2>/dev/null | jq -r '.state // "?"')
+        if [ "$st" = STARTED ]; then inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // 1')
+          if restart_app "$ag" "$app" "$inst"; then did="${did:+$did + }restart"; else ok=""; fi; fi; fi; fi
     if [ -n "$ok" ]; then ledger_add "$WAVE" "$sg" "$ag" rollback ok $(( ($(date +%s)-t0)*1000 )) "cause: $why; $did"; say "   rolled back $app: ${did:-nothing to undo}"
     else ledger_add "$WAVE" "$sg" "$ag" rollback fail $(( ($(date +%s)-t0)*1000 )) "cause: $why; FAILED: $R_ERR"; say "   !! rollback of $app FAILED: $R_ERR -- fix by hand, then 'status --wave $WAVE'"; fi
   done < <(printf '%s\n' "$ROWS" | awk -F'\t' -v s="$sg" '$4==s && !seen[$9]++ {print $9"\t"$8"\t"$12}')
@@ -763,17 +815,18 @@ write_inventory(){
   { [ -s "$LEDGER" ] && ledger_lines; true; } | jq -rs '
     [.[] | select(.app=="" and .service!="")] | group_by(.service) | .[]
     | { s: .[0].service,
-        ren: (map(select(.step=="rename-standby" and .outcome=="ok")) | length > 0),
-        rv:  (map(select(.step=="rename-valkey"  and .outcome=="ok")) | length > 0),
+        ren: ((map(select(.step=="rename-standby" and (.outcome=="ok" or .outcome=="undone"))) | last) as $x | $x != null and $x.outcome=="ok"),   # undone by a rollback = not renamed
+        rv:  ((map(select(.step=="rename-valkey"  and (.outcome=="ok" or .outcome=="undone"))) | last) as $x | $x != null and $x.outcome=="ok"),
+        rvu: ((map(select(.step=="rename-valkey"  and (.outcome=="ok" or .outcome=="undone"))) | last) as $x | $x != null and $x.outcome=="undone"),
         cv:  (map(select(.step=="create-valkey")) | last),
         lastev: (map(select(.step!="name-sync")) | last) }
-    | [ .s, (.ren|tostring), (.rv|tostring),
+    | [ .s, (.ren|tostring), (.rv|tostring), (.rvu|tostring),
         (if .cv.outcome=="ok" then (.cv.note | [scan("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")][0] // "") else "" end),
         (if .cv.outcome=="ok" then (.cv.note | test("\\(staged") | tostring) else "false" end),
         (if .cv.outcome=="fail" then "create-failed" elif .lastev.step=="drift" then "drift" else "" end),
         (if .cv.outcome=="fail" then .cv.note elif .lastev.step=="drift" then .lastev.note else "" end) ] | @tsv' > "$RUN/.svc.tsv"
   awk -F'\t' -v OFS='\t' '
-    FILENAME==ARGV[1] { ren[$1]=$2; rv[$1]=$3; vk[$1]=$4; stg[$1]=$5; cf[$1]=$6; nt[$1]=$7; next }
+    FILENAME==ARGV[1] { ren[$1]=$2; rv[$1]=$3; vk[$1]=$5; stg[$1]=($6=="true" || $4=="true") ? "true" : "false"; cf[$1]=$7; nt[$1]=$8; next }   # $4: renamed back by a rollback = staged again
     FNR==1 { print "wave","app","app_guid","org","space","redis_name","redis_guid","valkey_name","valkey_guid","plan","state","note"; next }
     { s=$4; n=$3; rn=(ren[s]=="true") ? n "-redis-standby" : n
       if (vk[s]=="")                          { vn="-"; st=(cf[s]!="" ? cf[s] : "not-provisioned") }
@@ -889,6 +942,8 @@ cmd_provcheck(){
 # name-sync --wave N | --waves A-B: for every rename the ledger holds (Redis -> standby, staged Valkey -> name)
 #   read Blacksmith's copy back through SAFE_RUN and set the ones that differ. The check-after-one-
 #   reconciler-cycle step (a set that lands mid-cycle can be overwritten; primer state-loops-vault).
+ledger_last_rename(){ [ -s "$LEDGER" ] || return 0   # ledger_last_rename <svc> <rename-standby|rename-valkey> -> ok | undone | ""
+  ledger_lines | jq -r --arg s "$1" --arg st "$2" 'select(.service==$s and .app=="" and .step==$st and (.outcome=="ok" or .outcome=="undone")) | .outcome' | tail -1; }
 cmd_namesync(){
   local list; list=$(wave_list); [ -n "$list" ] || { echo "usage: migrate.sh name-sync --wave N | --waves A-B [--run dir]   (needs $RUN/vault.conf with SAFE_RUN=...)"; exit 1; }
   [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
@@ -897,10 +952,11 @@ cmd_namesync(){
   for w in $list; do WAVE="$w"
     while IFS=$'\t' read -r sg name; do
       # old name = what Blacksmith stored at provision: <name> for the Redis, the staged name for a provisioned Valkey
-      if [ -n "$(ledger_done "$sg" "" rename-standby)" ]; then name_sync "$sg" "$sg" "${name}-redis-standby" "$name"
-        case "$R_SYNC" in insync) insync=$((insync+1));; set) set=$((set+1));; *) failed=$((failed+1));; esac; fi
-      if [ -n "$(ledger_done "$sg" "" rename-valkey)" ]; then name_sync "$sg" "$(svc_note_guid "$sg")" "$name" "$(staged_name "$name")"
-        case "$R_SYNC" in insync) insync=$((insync+1));; set) set=$((set+1));; *) failed=$((failed+1));; esac; fi
+      local lr lv; lr=$(ledger_last_rename "$sg" rename-standby); lv=$(ledger_last_rename "$sg" rename-valkey)   # ok = renamed, undone = renamed back, "" = never
+      case "$lr" in ok) name_sync "$sg" "$sg" "${name}-redis-standby" "$name";; undone) name_sync "$sg" "$sg" "$name" "${name}-redis-standby";; esac
+      [ -z "$lr" ] || case "$R_SYNC" in insync) insync=$((insync+1));; set) set=$((set+1));; *) failed=$((failed+1));; esac
+      case "$lv" in ok) name_sync "$sg" "$(svc_note_guid "$sg")" "$name" "$(staged_name "$name")";; undone) name_sync "$sg" "$(svc_note_guid "$sg")" "$(staged_name "$name")" "$name";; esac
+      [ -z "$lv" ] || case "$R_SYNC" in insync) insync=$((insync+1));; set) set=$((set+1));; *) failed=$((failed+1));; esac
     done < <(wave_rows "$w" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3}')
   done
   echo "name-sync: $insync in sync, $set set now, $failed failed; still pending: $(WAVE="" namesync_pending) -- status shows the footer until it is 0"
@@ -952,7 +1008,7 @@ svc_create_wait(){
         VK[$sg]=$vg; ledger_add "$WAVE" "$sg" "" create-valkey ok $(( ($(date +%s)-t1)*1000 )) "valkey $vg as $vname ($tag${CLEANED[$sg]:+; ${CLEANED[$sg]}})"
         printf '%s\t%s\t%s\n' "$sg" "$vg" "$vname" >> "$RUN/wave-$WAVE.guids"; say "$name: valkey ready as $vname (${vg:0:8})"
       else ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "job done but assert failed: $n instance(s) named $vname, guid ${vg:-none}, plan ${vp:-none}"; SKIP[$sg]=1; say "!! $name: post-create assert failed -- skipped"; fi
-    else ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "$R_ERR"; SKIP[$sg]=1; say "!! $name: valkey create FAILED: $R_ERR -- skipped${vname:+ }$([ "$vname" = "$name" ] && echo "(redis stays as $name-redis-standby; 'rollback --service' renames it back)")"; fi
+    else ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "$R_ERR"; SKIP[$sg]=1; say "!! $name: valkey create FAILED: $R_ERR -- skipped${vname:+ }$([ "$vname" = "$name" ] && echo "(the redis gets its name back at the end of this step)")"; fi
   done
 }
 # svc_rename_staged <sg> <name>: the staged Valkey (VK) takes the production name; 1 (+SKIP) when it cannot
@@ -993,7 +1049,13 @@ apply_services(){
     if [ -n "$(ledger_done "$sg" "" create-valkey)" ]; then
       VK[$sg]=$(svc_note_guid "$sg"); [ -n "${VK[$sg]}" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "create-valkey recorded but no guid in its note"; SKIP[$sg]=1; continue; }
       if [ -n "$(svc_staged "$sg")" ]; then svc_rename_staged "$sg" "$name" || continue
-      else say "$name: valkey already created (${VK[$sg]:0:8})"; fi
+      else local vj vn; vj=$(cfx "/v3/service_instances/${VK[$sg]}" 2>/dev/null); cf_json_ok "$vj" || { ledger_add "$WAVE" "$sg" "" drift fail 0 "GET valkey ${VK[$sg]}: $(printf '%s' "$vj" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"; SKIP[$sg]=1; say "!! $name: valkey ${VK[$sg]:0:8} unreadable -- skipped"; continue; }
+        vn=$(printf '%s' "$vj" | jq -r .name)
+        if [ "$vn" = "$(staged_name "$name")" ]; then   # renamed back by a rollback whose ledger line is missing (killed, or a rename that finished after its timeout)
+          ledger_add "$WAVE" "$sg" "" rename-valkey undone 0 "$name -> $vn (found renamed back, ledger line missing)"; svc_rename_staged "$sg" "$name" || continue
+        elif [ "$vn" != "$name" ]; then ledger_add "$WAVE" "$sg" "" drift fail 0 "valkey ${VK[$sg]} is named '$vn', expected '$name'"; SKIP[$sg]=1; say "!! $name: valkey is named '$vn' -- skipped"; continue
+        else say "$name: valkey already created (${VK[$sg]:0:8})"; fi
+      fi
       continue
     fi
     svc_create_issue "$sg" "$name" "$sp" "$plan" "$name"
@@ -1015,6 +1077,12 @@ apply_services(){
       else ledger_add "$WAVE" "$sg" "" copy-data blocked 0 "operator deferred"; SKIP[$sg]=1; fi
     else ledger_add "$WAVE" "$sg" "" copy-data blocked 0 "no copy-data.sh hook and no terminal"; SKIP[$sg]=1; say "!! $name: copy-data needs a hook or a terminal -- skipped"; fi
   done < <(printf '%s\n' "$ROWS" | awk -F'\t' '{ if ($12 ~ /datastore/) ds[$4]=1; n[$4]=$3 } END { for (s in ds) print s"\t"n[s]"\t"(ds[s]?"datastore":"") }')
+  # -- a service given up on (drift, failed rename/create/copy) after its Redis took the standby name: names back,
+  #    or every app of it that restarts later (a multi-bound app: by its OTHER service's step) fails to find it
+  while IFS=$'\t' read -r sg name; do
+    [ -n "${SKIP[$sg]:-}" ] && [ -n "$(ledger_done "$sg" "" rename-standby)" ] || continue
+    say "!! $name: skipped after the rename -- names back"; rollback_names "$sg" "$name" "${VK[$sg]:-}" || true   # vk looked up from the ledger when unset
+  done < <(printf '%s\n' "$ROWS" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3}')
   return 0
 }
 
@@ -1029,8 +1097,9 @@ apply_apps(){
     st=$(cfx "/v3/apps/$ag" 2>/dev/null | jq -r '.state // empty' 2>/dev/null)
     [ -n "$st" ] || { say "!! $app: cannot read app $ag -- skipped"; while IFS=$'\t' read -r sg name; do ledger_add "$WAVE" "$sg" "$ag" drift fail 0 "GET app failed"; done <<< "$svcs"; continue; }
     inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // 1' 2>/dev/null)
-    local sgf; sgf=$(printf '%s\n' "$svcs" | head -1 | cut -f1)
-    if [ -n "$(ledger_done "$sgf" "$ag" verify)" ] && [ "$(app_last "$sgf" "$ag")" = verify ]; then say "== $app (${ag:0:8}) already verified (ledger) -- skipped"; continue; fi
+    local allv=1 sgx; while IFS=$'\t' read -r sgx _; do [ -n "${SKIP[$sgx]:-}" ] && continue   # verified on EVERY wave service of the app (a neighbour may have been rolled back since)
+      { [ -n "$(ledger_done "$sgx" "$ag" verify)" ] && [ "$(app_last "$sgx" "$ag")" = verify ]; } || allv=""; done <<< "$svcs"
+    if [ -n "$allv" ]; then say "== $app (${ag:0:8}) already verified (ledger) -- skipped"; continue; fi
     say "== $app (${ag:0:8}) state=$st instances=$inst"
     local svc_ok=""; did=""
     # bind every wave service's valkey
@@ -1060,8 +1129,8 @@ apply_apps(){
     [ -n "$svc_ok2" ] || { [ "$fails" -ge "$BREAKER" ] && { say "!! $fails failures in a row -- wave stopped (circuit breaker)"; return 1; }; continue; }
     halt_check || return 1
     # ONE restart (recorded under every service of the app in this wave)
-    local sg1="${svc_ok2# }"; sg1="${sg1%% *}"
-    if [ -z "$(ledger_done "$sg1" "$ag" restart)" ]; then
+    local need=""; for sg in $svc_ok2; do [ -n "$(ledger_done "$sg" "$ag" restart)" ] || need=1; done   # any wave service of the app still without its restart (a neighbour rolled back since)
+    if [ -n "$need" ]; then
       if [ "$st" = STOPPED ]; then for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" restart ok 0 "skipped: app STOPPED (rebind only)"; done; say "   restart skipped (app STOPPED)"
       else
         if restart_app "$ag" "$app" "$inst"; then for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" restart ok "$R_MS" "$R_NOTE"; done; say "   restarted ($R_NOTE)"
@@ -1071,7 +1140,8 @@ apply_apps(){
       fi
     fi
     # verify L1 (+ optional hook)
-    if [ -z "$(ledger_done "$sg1" "$ag" verify)" ]; then
+    need=""; for sg in $svc_ok2; do [ -n "$(ledger_done "$sg" "$ag" verify)" ] || need=1; done
+    if [ -n "$need" ]; then
       t0=$(date +%s); local vfail=""
       if [ "$st" != STOPPED ]; then local s; s=$(app_stats "$ag"); [ "$s" != ERR ] && [ "${s%/*}" = "${s#*/}" ] && [ "${s%/*}" != 0 ] || vfail="instances $s"; fi
       for sg in $svc_ok2; do vk="${VK[$sg]}"
@@ -1118,16 +1188,18 @@ confirm_or_die(){ # confirm_or_die <prompt> <expected>
 cmd_rollback(){
   svc_select || return 1
   [ "$SVC_EV" = retire ] && { echo "!! $NAME: standby already RETIRED -- rollback impossible (DESIGN §3)"; return 1; }
-  [ -n "$VK" ] || { echo "$NAME: no valkey was created for it -- nothing to roll back"; return 1; }
+  [ -n "$VK" ] || [ -n "$(ledger_done "$SG" "" rename-standby)" ] || { echo "$NAME: no valkey was created and the redis was not renamed -- nothing to roll back"; return 1; }
   if [ -n "${APPF:-}" ]; then ROWS=$(printf '%s\n' "$ROWS" | awk -F'\t' -v f="$APPF" '$8==f || index($9,f)==1'); [ -n "$ROWS" ] || { echo "no app matches --app $APPF"; return 1; }; fi
   local why="operator ${REASON:-no reason given}"; [ -n "${APPF:-}" ] && why="$why (app-level override --app $APPF)"
   local n; n=$(printf '%s\n' "$ROWS" | cut -f9 | sort -u | wc -l | tr -d ' ')
-  echo "ROLLBACK wave $WAVE service $NAME ($(printf '%s' "$SG" | cut -c1-8)): $n app(s) back to ${NAME}-redis-standby; the valkey ($(printf '%s' "$VK" | cut -c1-8)) is kept"
+  if [ -n "${APPF:-}" ]; then echo "ROLLBACK wave $WAVE service $NAME ($(printf '%s' "$SG" | cut -c1-8)), --app $APPF only: $n app(s) back on ${NAME}-redis-standby; names stay (the other apps keep the valkey as $NAME)"
+  else echo "ROLLBACK wave $WAVE service $NAME ($(printf '%s' "$SG" | cut -c1-8)): names back (redis -> $NAME, valkey ${VK:+$(printf '%s' "$VK" | cut -c1-8) }-> $(staged_name "$NAME"), kept), then $n app(s) back on the redis"; fi
   [ "$SVC_EV" = confirm ] && echo "   note: service was CONFIRMED -- writes made to the valkey since cutover are lost for it"
   confirm_or_die "type yes to roll back: " yes || return 1
   wave_lock "$WAVE" || return 1; trap 'wave_unlock' EXIT
-  rollback_service "$SG" "$NAME" "$VK" "$why"
+  NAMES_FAILED=""; rollback_service "$SG" "$NAME" "$VK" "$why"
   wave_unlock
+  [ -z "$NAMES_FAILED" ] || { echo "!! names not restored ($R_NAMES) -- fix, then rollback --wave $WAVE --service $NAME again; status --wave $WAVE"; return 1; }
   [ "$(app_last_any_fail "$SG")" = 0 ] || { echo "!! some apps did not roll back -- status --wave $WAVE"; return 1; }
   echo "rolled back -- status --wave $WAVE; re-migrate later with: apply --wave $WAVE --service $NAME"
 }

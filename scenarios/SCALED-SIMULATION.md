@@ -181,6 +181,31 @@ bind / unbind / one restart / verify; phase `VERIFIED`; footer `name-sync pendin
 A verify failure rolls the whole service back and the wave continues; three in a row stop the wave
 (`!! lane stopped at wave N`) — then `status --wave N`, fix, `apply --wave N` again.
 
+A rollback puts the names back first (Valkey → `<name>-valkey-staged`, Redis → `<name>`) and then
+the bindings: apps find their service by name, and a multi-bound app is restarted by its *other*
+service's step (SBX wave 6, 2026-10-20: a rollback that kept the names crashed two neighbouring
+services). Phase `NAMES-STUCK` = a rename-back failed: `rollback --wave N --service X` again.
+
+### 6b. A bind fails "deployment not found" — the Valkey is hollow (SBX wave 6)
+
+CF says the instance exists and its create succeeded; Blacksmith's UI does not list it; BOSH has no
+deployment `<plan>-<guid>` and no task for it. Blacksmith lost the instance's index line (unlocked
+index write, concurrent creates) and then told CF "succeeded, deleted". Repair, per service in
+`ATTENTION`/`ROLLED-BACK` (SBX names are fine to paste):
+
+```bash
+bash migrate/migrate.sh rollback --wave 6 --service <name> --reason "hollow valkey / names back" --run runs/sbx   # each affected service
+cf curl -X DELETE '/v3/service_instances/<hollow valkey guid>?purge=true'       # instance + dead binding out of CF, broker not asked
+bash migrate/migrate.sh provision --wave 6 --run runs/sbx                        # "gone from CF -- creating again" for that one
+bash migrate/migrate.sh provision-check --run runs/sbx
+bash migrate/migrate.sh apply --wave 6 --run runs/sbx
+```
+
+Before the real migration: `provision` will create one service at a time as Blacksmith sees it and
+`provision-check` will ask BOSH for the deployment (next tool change); until then, after every
+provision run: `genesis @<env> b deployments > /tmp/deps.txt` and check every `valkey_guid` of
+`inventory.tsv` appears in it.
+
 If `name-sync pending` is not 0 after a wave (a `safe` call timed out):
 
 ```bash

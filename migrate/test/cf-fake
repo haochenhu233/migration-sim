@@ -15,6 +15,14 @@
 #   CFFAKE_FINISH_JOBS=1               "time passed": every pending job completes before this call (a job of a killed
 #                                      run is never polled again, but the real broker finishes the create anyway)
 #   CFFAKE_WRONG=<si name>:space|plan  GET of that instance reports another space (sp-other) or another plan
+#   CFFAKE_HOLLOW=<service name>       the valkey for that service (named <name> or <name>-valkey-staged) is HOLLOW: CF has
+#                                      it, the broker lost it (SBX 2026-10-20) -- rename works (CF only); bind creates a
+#                                      binding in state 'create failed' and the job fails "deployment not found"; unbind
+#                                      of such a binding fails the same way. DELETE ...?purge=true removes it + bindings.
+#   CFFAKE_RENAME_FAIL=<si guid>:<name> PATCH of that instance TO that name is accepted but its job FAILS (name unchanged)
+#   CFFAKE_NAMED=<app guid>:<name>[,..] that app resolves its service BY NAME from the VCAP_SERVICES it read at its LAST
+#                                      restart (st['env'][app] = names bound then): CRASHED while that snapshot lacks
+#                                      <name>; a later rename does not help until the app is restarted again
 #                                      (plan-valkey-other) -- what provision-check must catch
 # With SAFEFAKE_STATE set, seed and every create also write <dir>/<guid> = the instance name -- what the
 # broker stores as instance_name at provision time, read back by safe-fake (name-sync's pre-check).
@@ -67,6 +75,12 @@ def job(kind, polls=1, fail=None):
     jg='job-'+uuid.uuid4().hex[:8]; st['jobs'][jg]={'kind':kind,'polls':polls,'n':0,'fail':fail}; return jg
 def accepted(jg): global code; code=202; hdr['Location']='https://api.fake/v3/jobs/'+jg
 def listing(res): return {'pagination':{'total_results':len(res),'next':None},'resources':res}
+H=os.environ.get('CFFAKE_HOLLOW','')
+def hollow(g): return bool(H) and g in st['si'] and st['si'][g]['plan'].startswith('plan-valkey-') and st['si'][g]['name'] in (H, H+'-valkey-staged')
+NAMED={}
+for kv in os.environ.get('CFFAKE_NAMED','').split(','):
+    if ':' in kv: g,n=kv.split(':',1); NAMED[g]=n
+def env_snapshot(ag): st.setdefault('env',{})[ag]=sorted({st['si'][b['si']]['name'] for b in st['bind'].values() if b['app']==ag and not b.get('failed') and b['si'] in st['si']})
 def si_obj(g):
     s=st['si'][g]; sp=s['space']; pl=s['plan']; w=os.environ.get('CFFAKE_WRONG','')
     if w==s['name']+':space': sp='sp-other'
@@ -131,14 +145,20 @@ elif p.startswith('/v3/service_instances/'):
     elif method=='GET': out=si_obj(g)
     elif method=='PATCH':
         b=json.loads(body)
-        if 'name' in b: st['si'][g]['name']=b['name']
-        accepted(job('update:'+g))
-    elif method=='DELETE': del st['si'][g]; accepted(job('delete'))
+        if os.environ.get('CFFAKE_RENAME_FAIL')==g+':'+b.get('name',''): accepted(job('update:'+g, 1, 'Service broker error: rename refused (fake)'))
+        else:
+            if 'name' in b: st['si'][g]['name']=b['name']
+            accepted(job('update:'+g))
+    elif method=='DELETE':
+        if q.get('purge',[''])[0]=='true':   # CF removes the instance and its bindings without calling the broker
+            for bg in [k for k,b in st['bind'].items() if b['si']==g]: del st['bind'][bg]
+            del st['si'][g]; code=204
+        else: del st['si'][g]; accepted(job('delete'))
 elif p=='/v3/service_credential_bindings' and method=='GET':
     bad=[k for k in q if k not in ('app_guids','service_instance_guids','type','names','guids','per_page','page')]
     if bad: err(400,'CF-BadQueryParameter',f"Unknown query parameter(s): '{','.join(bad)}'")
     else:
-        res=[{'guid':g,'type':'app','relationships':{'app':{'data':{'guid':b['app']}},'service_instance':{'data':{'guid':b['si']}}}} for g,b in st['bind'].items()
+        res=[{'guid':g,'type':'app','last_operation':{'type':'create','state':('failed' if b.get('failed') else 'succeeded')},'relationships':{'app':{'data':{'guid':b['app']}},'service_instance':{'data':{'guid':b['si']}}}} for g,b in st['bind'].items()
              if (not q.get('app_guids') or b['app'] in q['app_guids'][0].split(',')) and (not q.get('service_instance_guids') or b['si'] in q['service_instance_guids'][0].split(','))]
         out=listing(res)
 elif p=='/v3/service_credential_bindings' and method=='POST':
@@ -146,25 +166,30 @@ elif p=='/v3/service_credential_bindings' and method=='POST':
     if ag not in st['apps'] or sg not in st['si']: err(422,'CF-UnprocessableEntity','app or service instance not found')
     elif any(x['app']==ag and x['si']==sg for x in st['bind'].values()): err(422,'CF-UnprocessableEntity','The app is already bound to the service instance')
     elif os.environ.get('CFFAKE_BIND_FAIL')==ag: accepted(job('bind', 1, 'Service broker error: bind refused'))
+    elif hollow(sg):   # the binding record stays, in state create failed
+        bg='b-'+uuid.uuid4().hex[:8]; st['bind'][bg]={'app':ag,'si':sg,'failed':True}
+        accepted(job('bind', 1, f"bind could not be completed: Service broker error: failed to retrieve credentials: failed to get deployment VMs: deployment not found: valkey-cache-small-{sg}"))
     else:
         bg='b-'+uuid.uuid4().hex[:8]; st['bind'][bg]={'app':ag,'si':sg}; accepted(job('bind'))
 elif p.startswith('/v3/service_credential_bindings/') and method=='DELETE':
     g=p.split('/')[3]
     if g not in st['bind']: err(404,'CF-ResourceNotFound','binding not found')
+    elif hollow(st['bind'][g]['si']): accepted(job('unbind', 1, f"unbind could not be completed: Service broker failed to delete service binding for instance {st['si'][st['bind'][g]['si']]['name']}: Service broker error: failed to get Valkey credentials: failed to get deployment VMs: deployment not found: valkey-cache-small-{st['bind'][g]['si']}"))
     else: del st['bind'][g]; accepted(job('unbind'))
 elif p=='/v3/deployments' and method=='POST':
     ag=json.loads(body)['relationships']['app']['data']['guid']; dg='dep-'+uuid.uuid4().hex[:6]
-    st['dep'][dg]={'app':ag,'n':0}; st['restarts'][ag]=st['restarts'].get(ag,0)+1; out={'guid':dg,'status':{'value':'ACTIVE','reason':'DEPLOYING'}}
+    st['dep'][dg]={'app':ag,'n':0}; st['restarts'][ag]=st['restarts'].get(ag,0)+1; env_snapshot(ag); out={'guid':dg,'status':{'value':'ACTIVE','reason':'DEPLOYING'}}
 elif p.startswith('/v3/deployments/'):
     d=st['dep'].get(p.split('/')[3]); d['n']+=1; out={'guid':p.split('/')[3],'status':{'value':'FINALIZED' if d['n']>=1 else 'ACTIVE','reason':'DEPLOYED' if d['n']>=1 else 'DEPLOYING'}}
 elif p.startswith('/v3/apps/'):
     parts=p.split('/'); g=parts[3]; a=st['apps'].get(g)
     if not a: err(404,'CF-ResourceNotFound','App not found')
     elif len(parts)==4: out={'guid':g,'name':a['name'],'state':a['state'],'relationships':{'space':{'data':{'guid':a['space']}}}}
-    elif p.endswith('/actions/restart'): st['restarts'][g]=st['restarts'].get(g,0)+1; out={'guid':g,'state':'STARTED'}
+    elif p.endswith('/actions/restart'): st['restarts'][g]=st['restarts'].get(g,0)+1; env_snapshot(g); out={'guid':g,'state':'STARTED'}
     elif p.endswith('/processes/web'): out={'guid':g,'instances':INST.get(g,1)}
     elif p.endswith('/processes/web/stats'):
         n=INST.get(g,1); crashed = os.environ.get('CFFAKE_CRASH')==g and st['restarts'].get(g,0)>0
+        if g in NAMED and g in st.get('env',{}) and NAMED[g] not in st['env'][g]: crashed=True   # "no credentials found (SIM_SERVICE_NAME=...)"
         out=listing([{'index':i,'state':('CRASHED' if crashed and i==0 else 'RUNNING') if a['state']=='STARTED' else 'DOWN'} for i in range(n)])
     elif p.endswith('/environment_variables'): out={'var':{}}
     else: err(404,'CF-NotFound','fake: unhandled '+p)

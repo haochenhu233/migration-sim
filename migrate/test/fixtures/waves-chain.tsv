@@ -1,0 +1,9 @@
+wave	component	service	service_guid	service_org	service_space	valkey_plan	app	app_guid	app_org	app_space	flags
+1	c1	svc-9	2bd2f594-d863-5f1b-8fd6-7ef66f006e5f	org-b	space-b	cache-small	a-9	59e78dba-0ead-51a3-89ad-025963e2b75e	org-b	space-b	
+1	c1	svc-9	2bd2f594-d863-5f1b-8fd6-7ef66f006e5f	org-b	space-b	cache-small	a-49	b9394f71-478b-5bf8-a7ca-38836735a72c	org-b	space-b	
+1	c1	svc-8	81b5df7b-0956-52fd-abae-489a4a3cf5fb	org-b	space-b	cache-small	a-8	b3755176-489d-5a39-8894-a31bf2478b17	org-b	space-b	
+1	c1	svc-8	81b5df7b-0956-52fd-abae-489a4a3cf5fb	org-b	space-b	cache-small	a-28	92bf25f7-ae91-5364-aa6b-4107f958fa90	org-b	space-b	
+1	c1	svc-8	81b5df7b-0956-52fd-abae-489a4a3cf5fb	org-b	space-b	cache-small	a-49	b9394f71-478b-5bf8-a7ca-38836735a72c	org-b	space-b	
+1	c1	svc-7	d3acf6c9-f3e7-55b7-a03d-85a31138daed	org-b	space-b	cache-small	a-7	7d747e4d-a281-591b-80e4-aec211d5196f	org-b	space-b	
+1	c1	svc-7	d3acf6c9-f3e7-55b7-a03d-85a31138daed	org-b	space-b	cache-small	a-28	92bf25f7-ae91-5364-aa6b-4107f958fa90	org-b	space-b	
+1	c1	svc-7	d3acf6c9-f3e7-55b7-a03d-85a31138daed	org-b	space-b	cache-small	a-57	171732b1-7fdc-57fd-a61e-c2d9a8cedd67	org-b	space-b	

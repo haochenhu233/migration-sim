@@ -141,6 +141,15 @@ until `confirm`, and rollback happens before `confirm` by construction).
 | data copied | nothing — the copy is additive; Redis stays authoritative until `confirm` | none |
 | STANDBY | rebind Redis + restart (Redis still running) | same as above |
 | **RETIRED** | **impossible** | — the reason `retire` needs `confirm` + grace + a second prompt |
+| *(service)* names | **before** the app rows: Valkey `<name>` → `<name>-valkey-staged`, then Redis `<name>-redis-standby` → `<name>`, Blacksmith copies synced back; ledger `rename-valkey undone` / `rename-standby undone` (a failure: `rollback-names fail`, phase NAMES-STUCK, `rollback --service` again) | none — CF renames reach no broker |
+
+**Names are restored on every full-service rollback (decided 2026-10-20, SBX wave 6).** Apps
+resolve their service by name in `VCAP_SERVICES`; a rolled-back service that keeps the swapped
+names crashes every app of it that restarts later — and a multi-bound app is restarted by its
+*other* service's step ("no credentials found"). The same undo runs when `apply` gives a service
+up after its Redis took the standby name (drift, failed create/rename/copy). Only the `--app`
+override keeps the names (the other apps still use the Valkey under `<name>`): an app rolled back
+that way sits on `<name>-redis-standby`, so it must resolve its service by tag/offering, not name.
 
 `dry-run` and `status` print the current row for every app, so "can we still go back?" always
 has a factual answer.
@@ -247,9 +256,9 @@ Suggested tmux layout: status (top) · `tail -f commands.log` (bottom-left) · s
   bind `<name>` / unbind `<name>-redis-standby` / restart → verify → standby → retire. Apps,
   manifests, pipelines and name-selecting code never see a different name; a stale `cf push`
   during the window lands on the Valkey (early, harmless for cache apps; data-store services
-  are copied before any binding). Full-service rollback leaves names crossed (apps on the
-  standby, Valkey holding the real name) — the tool records it; swapping back is only for
-  abandoning the service's migration. The earlier alternatives (create as `-valkey` + swap at
+  are copied before any binding). A full-service rollback puts the names back (Valkey →
+  `-valkey-staged`, Redis → `<name>`; revised 2026-10-20 after SBX wave 6 — see §3): apps find
+  their service by name, so crossed names break the next restart. The earlier alternatives (create as `-valkey` + swap at
   the end; substituted names) are superseded.
 - **Provisioned ahead (decided 2026-10-18): the staged name.** `provision` creates the Valkey
   days before the window as `<name>-valkey-staged` (ledger note `(staged`); on cutover day
