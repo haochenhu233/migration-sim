@@ -211,6 +211,16 @@ plus a review document for the client, built from the binding graph:
   `provision --wave N` creates it again. Blacksmith backlog: lock the index write; never answer
   "succeeded" for a create whose line is missing. Review round (fresh agent) found 11 items, all
   addressed or recorded (finding 9, in-progress bindings count as present, left as is).
+  **Repair run 2026-10-21 01:56–02:50 UTC, through the tool after `b4715f8`:** `case-rollback.sh`
+  ALL PASS on the bastion; `rollback --wave 6 --service` 07, 08, 09 in that order — each restored
+  both names + synced Blacksmith's copies, restarted only the apps whose last recorded step was on
+  the Valkey (07: 3 of 7, 08: 1 of 8); 09's run reported the one expected failure (app-019's
+  binding to the hollow Valkey, "deployment not found") with the purge command. Purge, `provision
+  --wave 6` (one create, alone), BOSH deployment grep by guid (present), `provision-check`, `apply
+  --wave 6` → **TOTAL 136 of 136 verified, 20 of 20 services, 0 rolled-back.** App-028 (the
+  crash-looping multi-bound app, 08+07) was still `0/1 crashed` after 08's rollback and needed a
+  manual `cf restart`; the rollback's restart rule did not pick it — **to investigate** (which
+  ledger line the rule keyed on) before the next delta is closed.
 
 ## Open questions
 
