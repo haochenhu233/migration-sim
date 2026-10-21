@@ -6,6 +6,7 @@
 # Failure injection (env):
 #   CFFAKE_FAIL_CREATE=<svc name>      the valkey create job FAILS
 #   CFFAKE_CRASH=<app guid>            after a restart that app reports CRASHED instances
+#   CFFAKE_STATS_FAIL=<app guid>       that app's /processes/web/stats answers an error document (404)
 #   CFFAKE_STOPPED=<app guid[,..]>     those apps are STOPPED
 #   CFFAKE_INSTANCES=<guid>=N[,..]     instance count per app (default 1)
 #   CFFAKE_CREATE_POLLS=N              job polls before a create completes (default 2)
@@ -188,9 +189,11 @@ elif p.startswith('/v3/apps/'):
     elif p.endswith('/actions/restart'): st['restarts'][g]=st['restarts'].get(g,0)+1; env_snapshot(g); out={'guid':g,'state':'STARTED'}
     elif p.endswith('/processes/web'): out={'guid':g,'instances':INST.get(g,1)}
     elif p.endswith('/processes/web/stats'):
-        n=INST.get(g,1); crashed = os.environ.get('CFFAKE_CRASH')==g and st['restarts'].get(g,0)>0
-        if g in NAMED and g in st.get('env',{}) and NAMED[g] not in st['env'][g]: crashed=True   # "no credentials found (SIM_SERVICE_NAME=...)"
-        out=listing([{'index':i,'state':('CRASHED' if crashed and i==0 else 'RUNNING') if a['state']=='STARTED' else 'DOWN'} for i in range(n)])
+        if os.environ.get('CFFAKE_STATS_FAIL')==g: err(404,'CF-ResourceNotFound','fake: stats unavailable')
+        else:
+            n=INST.get(g,1); crashed = os.environ.get('CFFAKE_CRASH')==g and st['restarts'].get(g,0)>0
+            if g in NAMED and g in st.get('env',{}) and NAMED[g] not in st['env'][g]: crashed=True   # "no credentials found (SIM_SERVICE_NAME=...)"
+            out=listing([{'index':i,'state':('CRASHED' if crashed and i==0 else 'RUNNING') if a['state']=='STARTED' else 'DOWN'} for i in range(n)])
     elif p.endswith('/environment_variables'): out={'var':{}}
     else: err(404,'CF-NotFound','fake: unhandled '+p)
 else: err(404,'CF-NotFound','fake: unhandled '+method+' '+p)

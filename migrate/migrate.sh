@@ -589,6 +589,12 @@ wave_unlock(){ [ -n "${LOCKF:-}" ] && rm -f "$LOCKF"; LOCKF=""; }
 svc_note_guid(){ ledger_lines | jq -r --arg s "$1" 'select(.service==$s and .app=="" and .step=="create-valkey" and .outcome=="ok") | .note' | tail -1 | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1; }
 app_last(){ # app_last <svc> <app> -> last step[:outcome] for the pair ("" if none)
   ledger_lines | jq -r --arg s "$1" --arg a "$2" 'select(.service==$s and .app==$a) | if .outcome=="ok" then .step else .step+":"+.outcome end' | tail -1; }
+rollback_skipped_restart(){ # <svc> <app>, pair's last line is rollback ok: "true" when that rollback did NOT restart the app
+  # although the app had been (or failed to be) restarted onto the Valkey since the rollback before it -- its process
+  # still runs on the Valkey env (a crash-restart keeps the env of the last start). The note is "cause: <why>; <did>".
+  ledger_lines | jq -rs --arg s "$1" --arg a "$2" '[.[]|select(.service==$s and .app==$a)] | .[-1] as $l | .[:-1] as $p
+    | if ($l.note|split("; ")|last|test("restart")) then false
+      else (($p|map(.step=="rollback")|rindex(true)) as $i | $p[(if $i==null then 0 else $i+1 end):] | any(.step=="restart" or .step=="verify")) end'; }
 
 # ---- staged Valkeys (provision, DESIGN §6c): created days ahead as <name>-valkey-staged, renamed to
 # <name> by apply right after the Redis took the standby name. The ledger note of a staged create
@@ -685,8 +691,10 @@ rollback_names(){
 }
 
 # rollback_service <svc_guid> <name> <valkey_guid> <reason>: names back first (rollback_names), then every app of
-#   the service back on Redis. An app whose last event is rollback:fail is retried: an app that crashed on the
-#   earlier rollback restart (names still swapped) is restarted again now that the names are back.
+#   the service back on Redis. An app whose last event is rollback:fail is retried, and one at rollback(ok) that
+#   is not fully up gets another restart: its last start saw the swapped names (SBX 2026-10-20, app-028), or
+#   the earlier rollback never restarted it (restart:fail was not retried then). A failed restart onto the
+#   Valkey (restart:fail) is restarted here like a successful one: the rebind only helps after a new start.
 rollback_service(){
   local sg="$1" name="$2" vk="$3" why="$4" ag app aflags last t0 ok bg inst st s
   say "!! ROLLBACK service $name ($(printf '%s' "$sg" | cut -c1-8)): $why"
@@ -694,7 +702,15 @@ rollback_service(){
   else rollback_names "$sg" "$name" "$vk" || NAMES_FAILED="${NAMES_FAILED:+$NAMES_FAILED }$sg"; fi
   while IFS=$'\t' read -r ag app aflags; do
     case ",$aflags," in *,no-binding:*) continue;; esac
-    last=$(app_last "$sg" "$ag"); case "$last" in ""|rollback|team-action) continue;; esac
+    last=$(app_last "$sg" "$ag"); case "$last" in ""|team-action) continue;; esac
+    local relook=""
+    if [ "$last" = rollback ]; then   # rolled back before: looked at again only if its process may still be on the Valkey
+      s=$(app_stats "$ag"); case "$s" in */*) ;; *) s=ERR;; esac
+      if [ "$s" = ERR ]; then ledger_add "$WAVE" "$sg" "$ag" rollback fail 0 "cause: $why; FAILED: rolled back before, cannot read its instances"; say "   !! $app: rolled back before, cannot read its instances -- check by hand, then 'status --wave $WAVE'"; continue; fi
+      if [ "$(rollback_skipped_restart "$sg" "$ag")" = true ]; then relook="its last start was for the valkey and the earlier rollback did not restart it"   # RUNNING proves nothing here
+      elif [ "${s%/*}" != "${s#*/}" ]; then relook="only $s instance(s) running"
+      else continue; fi
+    fi
     t0=$(date +%s); ok=1; local did=""
     # 1) Redis binding back (if it was removed)
     bg=$(binding_guid "$ag" "$sg")
@@ -714,15 +730,20 @@ rollback_service(){
         fi
       fi
     fi
-    # 3) restart if the app was restarted onto the Valkey, or crashed on an earlier rollback restart (names were
-    #    still swapped then) -- never a STOPPED app
+    # 3) restart if the app was (or failed to be) restarted onto the Valkey, or is not fully up after an earlier
+    #    rollback (names were still swapped then, or that rollback skipped the restart) -- never a STOPPED app
     if [ -n "$ok" ]; then local again=""
-      case "$last" in restart|verify|verify:fail) again=1;;
+      case "$last" in restart|restart:fail|verify|verify:fail|rollback) again=1;;
         rollback:fail) s=$(app_stats "$ag"); [ "$s" != ERR ] && [ "${s%/*}" != "${s#*/}" ] && again=1;; esac   # some instance not RUNNING
-      if [ -n "$again" ]; then st=$(cfx "/v3/apps/$ag" 2>/dev/null | jq -r '.state // "?"')
-        if [ "$st" = STARTED ]; then inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // 1')
-          if restart_app "$ag" "$app" "$inst"; then did="${did:+$did + }restart"; else ok=""; fi; fi; fi; fi
-    if [ -n "$ok" ]; then ledger_add "$WAVE" "$sg" "$ag" rollback ok $(( ($(date +%s)-t0)*1000 )) "cause: $why; $did"; say "   rolled back $app: ${did:-nothing to undo}"
+      if [ -n "$again" ]; then st=$(cfx "/v3/apps/$ag" 2>/dev/null | jq -r '.state // empty' 2>/dev/null)
+        case "$st" in STARTED|STOPPED) ;; *) ok=""; R_ERR="cannot read app state (${st:-no answer})";; esac   # an API error is not "not started"
+        if [ "$st" = STARTED ]; then inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // empty' 2>/dev/null)
+          case "$inst" in ''|*[!0-9]*) ok=""; R_ERR="cannot read instance count (${inst:-no answer})";; esac   # never guess 1: a multi-instance app would lose its rolling restart
+          if [ -n "$ok" ]; then [ -z "$relook" ] || say "   $app: rolled back before, $relook -- restarting it$( [ -n "${APPF:-}" ] && printf ' (names stay as they are)' || printf ' now that the names are back')"
+            if restart_app "$ag" "$app" "$inst"; then did="${did:+$did + }restart"; else ok=""; fi; fi; fi; fi; fi
+    if [ -n "$ok" ]; then
+      if [ "$last" = rollback ] && [ -z "$did" ]; then continue; fi   # looked at again, nothing to do (e.g. STOPPED): no new line
+      ledger_add "$WAVE" "$sg" "$ag" rollback ok $(( ($(date +%s)-t0)*1000 )) "cause: $why; $did"; say "   rolled back $app: ${did:-nothing to undo}"
     else ledger_add "$WAVE" "$sg" "$ag" rollback fail $(( ($(date +%s)-t0)*1000 )) "cause: $why; FAILED: $R_ERR"; say "   !! rollback of $app FAILED: $R_ERR -- fix by hand, then 'status --wave $WAVE'"; fi
   done < <(printf '%s\n' "$ROWS" | awk -F'\t' -v s="$sg" '$4==s && !seen[$9]++ {print $9"\t"$8"\t"$12}')
 }

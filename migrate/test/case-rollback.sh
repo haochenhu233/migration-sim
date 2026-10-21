@@ -91,7 +91,7 @@ CFFAKE_HOLLOW=svc-9 CFFAKE_NAMED="$NAMED" CFFAKE_RENAME_FAIL=$G9:svc-9 bash "$M"
 check "S1 valkey undone, redis PATCH back failed: rollback-names fail, rename-standby still 'ok' for ledger_done, CF redis still standby" "[ $(nev rename-valkey undone ".service==\"$G9\"") = 1 ] && [ $(nev rollback-names fail ".service==\"$G9\" and (.note|test(\"rename back to svc-9 failed\"))") = 1 ] && [ $(nev rename-standby fail) = 0 ] && [ \"$(siname $G9)\" = svc-9-redis-standby ]"
 bash "$M" status --wave 1 --run "$R" > "$R/status.log" 2>&1
 check "S2 status: svc-9 NAMES-STUCK with !!" "grep -q 'svc-9 .* NAMES-STUCK .*!!' '$R/status.log'"
-check "S3 a-49 (restarted by svc-8's step) crashed: svc-9 missing from its env -> svc-8 rolled back (names back) -- the SBX chain, now with the stuck redis as the cause" "[ $(nev rollback ok ".service==\"$G8\"") -ge 1 ] && [ \"$(siname $G8)\" = svc-8 ]"
+check "S3 a-49 (restarted by svc-8's step) crashed: svc-9 missing from its env -> svc-8 rolled back (names back); a-49 restarted again, still down -> rollback FAIL, not a misleading ok" "[ $(nev rollback fail ".service==\"$G8\" and .app==\"$A49\" and (.note|test(\"instances\"))") = 1 ] && [ $(nev rollback ok ".service==\"$G8\" and .app==\"$A49\"") = 0 ] && [ \"$(siname $G8)\" = svc-8 ]"
 CFFAKE_NAMED="$NAMED" bash "$M" rollback --wave 1 --service svc-9 --yes --reason retry --run "$R" > "$R/rb.log" 2>&1; rc=$?
 check "S4 rollback again (no fake failure): redis back to svc-9, rename-standby undone; exit reflects the dead binding only" "[ \"$(siname $G9)\" = svc-9 ] && [ $(nev rename-standby undone ".service==\"$G9\"") = 1 ] && grep -q 'valkey already named svc-9-valkey-staged' '$R/rb.log'"
 bash "$M" apply --wave 1 --service svc-7 --yes --force --run "$R" > "$R/apply7.log" 2>&1
@@ -114,5 +114,49 @@ check "E1 svc-9 create failed -> rename-standby undone, redis named svc-9" "[ $(
 bash "$M" status --wave 1 --run "$R" > "$R/status.log" 2>&1; bash "$M" status --run "$R" > "$R/ov.log" 2>&1
 check "E2 status: svc-9 CREATE-FAILED (undo lines are not a phase); overview created 2, c-fail 1" "grep -q 'svc-9 .* CREATE-FAILED' '$R/status.log' && grep -qE '^1 +3 +2 +1 ' '$R/ov.log'"
 check "E3 inventory: svc-9 not-provisioned/create-failed under its own name; svc-8 cut-over" "[ \"$(awk -F'\t' -v s=$G9 'NR>1 && $7==s && !d++ {print $6, $11}' "$R/inventory.tsv")\" = 'svc-9 create-failed' ]"
+
+echo "== K: apps rolled back before ('rollback ok'): restarted when that rollback skipped the restart (ledger) or the app is down (stats); left alone otherwise (SBX app-028)"
+newrun K; bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1; V7=$(vkof $G7)
+CFFAKE_NAMED="$NAMED" bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1; check "K0 all 3 migrated" "[ $(nev verify ok) = 8 ]"
+# svc-7 as the old tool left it: names still swapped, every app's bindings back on redis. a-57: restart failed, rollback
+# WITHOUT restart, crashed (its last start saw 'svc-7-redis-standby'). a-7: same history but RUNNING -- its process still
+# holds the valkey env (came up after the 300 s timeout). a-28: rollback WITH restart, running -> nothing to do.
+python3 - "$CFFAKE_STATE" $G7 $V7 $A57 $A7 $A28 <<'EOP'
+import json,sys; p,g,v,a57,a7,a28=sys.argv[1:]; st=json.load(open(p))
+for a,env in ((a57,['svc-7-redis-standby']),(a7,['svc-7']),(a28,['svc-8','svc-7'])):
+    for k in [k for k,b in st['bind'].items() if b['app']==a and b['si']==v]: del st['bind'][k]
+    st['bind']['b-old-'+a[:8]]={'app':a,'si':g}; st.setdefault('env',{})[a]=env
+json.dump(st,open(p,'w'))
+EOP
+for a in $A57 $A7 $A28; do did="rebind redis + unbind valkey"; [ $a = $A28 ] && did="$did + restart"
+  jq -nc --arg s $G7 --arg a $a '{ts:"2026-10-20T16:10:01Z",wave:1,service:$s,app:$a,step:"restart",outcome:"fail",ms:0,op:"old",note:"instances 0/1 after 300s"}' >> "$R/ledger.jsonl"
+  jq -nc --arg s $G7 --arg a $a --arg d "$did" '{ts:"2026-10-20T16:25:48Z",wave:1,service:$s,app:$a,step:"rollback",outcome:"ok",ms:0,op:"old",note:("cause: restart of the app failed; "+$d)}' >> "$R/ledger.jsonl"
+done
+stat(){ CFFAKE_NAMED=$NAMED $CF_CMD curl /v3/apps/$1/processes/web/stats | jq -r '.resources[0].state'; }
+check "K1 setup: a-57 CRASHED, a-7 and a-28 RUNNING, all three at 'rollback ok'" "[ \"$(stat $A57)\" = CRASHED ] && [ \"$(stat $A7)\" = RUNNING ] && [ \"$(stat $A28)\" = RUNNING ]"
+r57=$(restarts $A57); r7=$(restarts $A7); r28=$(restarts $A28)
+CFFAKE_NAMED="$NAMED" bash "$M" rollback --wave 1 --service svc-7 --yes --reason "sbx repair" --run "$R" > "$R/rb.log" 2>&1; rc=$?
+check "K2 rollback exits 0, names back" "[ $rc = 0 ] && [ \"$(siname $G7)\" = svc-7 ] && [ \"$(siname $V7)\" = svc-7-valkey-staged ]"
+check "K3 a-57 (crashed) restarted once more, now RUNNING, 'rollback ok; restart' recorded" "[ $(restarts $A57) = $((r57+1)) ] && [ $(nev rollback ok ".app==\"$A57\" and .op==\"test\" and (.note|test(\"; restart\"))") = 1 ] && [ \"$(stat $A57)\" = RUNNING ]"
+check "K4 a-7 (RUNNING, but the earlier rollback never restarted it) restarted too -- the ledger decides, not the stats" "[ $(restarts $A7) = $((r7+1)) ] && [ $(nev rollback ok ".app==\"$A7\" and .op==\"test\" and (.note|test(\"; restart\"))") = 1 ] && grep -q 'a-7: rolled back before, its last start was for the valkey' '$R/rb.log'"
+check "K5 a-28 (earlier rollback DID restart it, running) left alone: no restart, no new line, not in the output" "[ $(restarts $A28) = $r28 ] && [ $(nev rollback ok ".app==\"$A28\" and .op==\"test\"") = 0 ] && ! grep -q 'a-28' '$R/rb.log'"
+bash "$M" status --wave 1 --run "$R" > "$R/status.log" 2>&1; check "K6 status: svc-7 ROLLED-BACK" "grep -q 'svc-7 .* ROLLED-BACK' '$R/status.log'"
+# K7: a STOPPED app at 'rollback ok' (stats 0/1) is looked at and left alone -- no restart, no new line
+python3 - "$CFFAKE_STATE" $A57 <<'EOP'
+import json,sys; p,a=sys.argv[1:]; st=json.load(open(p)); st['apps'][a]['state']='STOPPED'; json.dump(st,open(p,'w'))
+EOP
+r57=$(restarts $A57); n57=$(nev rollback ok ".app==\"$A57\"")
+CFFAKE_NAMED="$NAMED" bash "$M" rollback --wave 1 --service svc-7 --yes --reason "again" --run "$R" > "$R/rb2.log" 2>&1; rc=$?
+check "K7 rollback again with a-57 STOPPED: exit 0, no restart, no new ledger line, nothing said about restarting it" "[ $rc = 0 ] && [ $(restarts $A57) = $r57 ] && [ $(nev rollback ok ".app==\"$A57\"") = $n57 ] && ! grep -q 'restarting it' '$R/rb2.log'"
+# K8: stats unreadable for an app at 'rollback ok' -> rollback fail, said out loud, exit 1, ATTENTION
+CFFAKE_STATS_FAIL=$A7 CFFAKE_NAMED="$NAMED" bash "$M" rollback --wave 1 --service svc-7 --yes --reason "again" --run "$R" > "$R/rb3.log" 2>&1; rc=$?
+bash "$M" status --wave 1 --run "$R" > "$R/status3.log" 2>&1
+check "K8 a-7's stats answer an error: 'rollback fail … cannot read its instances', exit 1, status ATTENTION -- never a silent skip" "[ $rc = 1 ] && [ $(nev rollback fail ".app==\"$A7\" and (.note|test(\"cannot read its instances\"))") = 1 ] && grep -q 'a-7: rolled back before, cannot read its instances' '$R/rb3.log' && grep -q 'svc-7 .* ATTENTION' '$R/status3.log'"
+
+echo "== X: a restart that fails on the way to the Valkey (restart:fail) is restarted again by the auto-rollback"
+newrun X; bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1
+CFFAKE_CRASH=$A57 CFFAKE_NAMED="$NAMED" bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1
+check "X1 a-57: restart fail, then the rollback tried a restart (2 restarts), recorded as rollback fail (still crashing)" "[ $(nev restart fail ".app==\"$A57\"") = 1 ] && [ $(restarts $A57) = 2 ] && [ $(nev rollback fail ".app==\"$A57\" and .service==\"$G7\"") = 1 ]"
+check "X2 svc-7's names back; svc-8 and svc-9 migrated" "[ \"$(siname $G7)\" = svc-7 ] && [ $(nev verify ok ".service==\"$G8\"") = 3 ] && [ $(nev verify ok ".service==\"$G9\"") = 2 ]"
 
 [ "$fails" = 0 ] && echo "ALL PASS" || { echo "$fails FAIL"; exit 1; }

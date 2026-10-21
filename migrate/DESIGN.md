@@ -137,7 +137,8 @@ until `confirm`, and rollback happens before `confirm` by construction).
 |---|---|---|
 | BOUND-V | unbind Valkey | none |
 | UNBOUND-R | rebind Redis | none — Redis untouched |
-| RESTARTED / VERIFIED | rebind Redis + restart | writes made to Valkey since cutover (store-mode apps: counted and reported) |
+| RESTARTED / VERIFIED (or that restart **failed**) | rebind Redis + restart — a failed restart onto the Valkey counts: the rebind helps only after a new start | writes made to Valkey since cutover (store-mode apps: counted and reported) |
+| already ROLLED BACK (`rollback ok`) | looked at again, the **ledger first**: if that rollback did not restart the app although it had been (or failed to be) restarted onto the Valkey, restart it now — its process still runs on the Valkey env, RUNNING proves nothing (SBX 2026-10-20, app-028). Otherwise the stats: an instance down → restart (names were swapped at its last start); all up → skipped without a new ledger line; instances or app state unreadable → `rollback fail`, never a silent skip | none |
 | data copied | nothing — the copy is additive; Redis stays authoritative until `confirm` | none |
 | STANDBY | rebind Redis + restart (Redis still running) | same as above |
 | **RETIRED** | **impossible** | — the reason `retire` needs `confirm` + grace + a second prompt |

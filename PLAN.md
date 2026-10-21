@@ -219,8 +219,18 @@ plus a review document for the client, built from the binding graph:
   --wave 6` (one create, alone), BOSH deployment grep by guid (present), `provision-check`, `apply
   --wave 6` → **TOTAL 136 of 136 verified, 20 of 20 services, 0 rolled-back.** App-028 (the
   crash-looping multi-bound app, 08+07) was still `0/1 crashed` after 08's rollback and needed a
-  manual `cf restart`; the rollback's restart rule did not pick it — **to investigate** (which
-  ledger line the rule keyed on) before the next delta is closed.
+  manual `cf restart`. **Cause (ledger, 2026-10-21):** its line under 07 was `rollback ok` from the
+  old auto-rollback (bindings only, no restart — its previous line `restart:fail` was not in the
+  restart list), and `rollback_service` skipped every app at `rollback ok` outright. **Fixed:**
+  `restart:fail` restarts like `restart`; an app at `rollback ok` is looked at again — the ledger
+  first (that rollback skipped the restart after a start onto the Valkey → restart, RUNNING proves
+  nothing), the stats second (an instance down → restart; all up → skipped, no new line; unreadable
+  → `rollback fail`, loud). Review round found the stats-only first version wrong (a slow app that
+  came up after the restart timeout runs on the Valkey env while RUNNING) plus two swallowed API
+  errors (app state, instance count) — all fixed; cases K0–K8, X1–X2. Follow-up noted by the
+  reviewer: after `rollback --service 09`, an app at `rollback:fail` under 08 (restarted by 08's
+  step, crashed because 09's name was stuck) is fixed only by a second `rollback --service 08`;
+  the runbook says so (§6b), no automatic cross-service retry.
 
 ## Open questions
 

@@ -201,6 +201,13 @@ bash migrate/migrate.sh provision-check --run runs/sbx
 bash migrate/migrate.sh apply --wave 6 --run runs/sbx
 ```
 
+Roll the services back in **chain order away from the hollow one** (SBX: 07, then 08, then 09): a
+multi-bound app restarted by one service's step crashes while its *other* service's name is still
+stuck, and that rollback records it `rollback:fail`. If a service was rolled back before its
+neighbour's names were back, run `rollback --wave N --service <it>` once more afterwards: an app
+at `rollback:fail` (or one rolled back without a restart) is restarted again; an app that is up
+is left alone. After each rollback, `cf app <multi-bound app>` should show all instances running.
+
 Before the real migration: `provision` will create one service at a time as Blacksmith sees it and
 `provision-check` will ask BOSH for the deployment (next tool change); until then, after every
 provision run: `genesis @<env> b deployments > /tmp/deps.txt` and check every `valkey_guid` of
