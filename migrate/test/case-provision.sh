@@ -29,6 +29,7 @@ bash "$M" status --wave 1 --run "$R" > "$R/status1.log" 2>&1
 check "A5 status wave 1 shows STAGED for 4 services" "[ $(grep -c ' STAGED ' "$R/status1.log") = 4 ]"
 n1=$(grep -c . "$R/ledger.jsonl"); bash "$M" provision --waves 1-2 --yes --run "$R" > "$R/prov2.log" 2>&1
 check "A6 re-run: no new create-valkey ok lines" "[ $(nev create-valkey ok) = 12 ] && grep -q 'already there' '$R/prov2.log'"
+bash "$M" provision-check --run "$R" > "$R/pc-a.log" 2>&1   # the hollow gate: apply/preflight need a provision-check line per service
 bash "$M" preflight --wave 1 --run "$R" > "$R/pf1.log" 2>&1; check "A7 preflight wave 1 OK" "[ $? = 0 ] && grep -q '^PREFLIGHT: OK' '$R/pf1.log'"
 check "A8 preflight reports 4 staged present + 4 not shared" "[ $(grep -c 'staged valkey present' "$R/pf1.log") = 4 ] && [ $(grep -c 'not shared' "$R/pf1.log") = 4 ]"
 CFFAKE_SHARED=$G0 bash "$M" preflight --wave 1 --run "$R" > "$R/pf-shared.log" 2>&1; check "A9 shared instance -> preflight FAIL" "[ $? != 0 ] && grep -q 'FAIL  service cache-0: shared into 1' '$R/pf-shared.log'"
@@ -40,7 +41,10 @@ EOF
 bash "$M" preflight --wave 1 --run "$R" > "$R/pf-gone.log" 2>&1; check "B1 preflight FAILs on the missing staged valkey" "[ $? != 0 ] && grep -q 'FAIL  service cache-16: staged valkey .* not found in CF' '$R/pf-gone.log'"
 bash "$M" provision --wave 1 --yes --run "$R" > "$R/prov3.log" 2>&1
 check "B2 provision: void (fail 'gone') then a new ok for cache-16" "[ $(nev create-valkey fail ".service==\"$G16\" and (.note|test(\"gone from CF\"))") = 1 ] && [ $(nev create-valkey ok ".service==\"$G16\"") = 2 ]"
-bash "$M" preflight --wave 1 --run "$R" > "$R/pf-gone2.log" 2>&1; check "B3 preflight OK again" "grep -q '^PREFLIGHT: OK' '$R/pf-gone2.log'"
+bash "$M" preflight --wave 1 --run "$R" > "$R/pf-gone1.log" 2>&1; check "B2b preflight before a new provision-check: cache-16's line is for the OLD valkey -> FAIL (hollow gate)" "[ $? != 0 ] && grep -q 'FAIL  service cache-16: provision-check line is for another valkey' '$R/pf-gone1.log'"
+bash "$M" provision-check --wave 1 --run "$R" > "$R/pc-b.log" 2>&1
+check "B2c provision-check --wave 1 replaced wave 1's 4 lines and KEPT wave 2's 8 (merge), checked_at column filled" "[ $(awk -F'\t' 'NR>1 && $1==1' "$R/provision-check.tsv" | wc -l | tr -d ' ') = 4 ] && [ $(awk -F'\t' 'NR>1 && $1==2' "$R/provision-check.tsv" | wc -l | tr -d ' ') = 8 ] && [ $(awk -F'\t' 'NR>1 && $14 ~ /^20[0-9][0-9]-/' "$R/provision-check.tsv" | wc -l | tr -d ' ') = 12 ]"
+bash "$M" preflight --wave 1 --run "$R" > "$R/pf-gone2.log" 2>&1; check "B3 preflight OK again" "grep -q '^PREFLIGHT: OK' '$R/pf-gone2.log' && [ $(grep -c 'provision-check OK, BOSH deployment present' "$R/pf-gone2.log") = 4 ]"
 check "B4 inventory still staged for cache-16 (new guid)" "grep -q $'cache-16-valkey-staged\t'\"$(ledger "select(.service==\"$G16\" and .step==\"create-valkey\" and .outcome==\"ok\") | .note" | tail -1 | grep -oE '[0-9a-f-]{36}' | head -1)\"$'\tcache-small\tstaged' '$R/inventory.tsv'"
 
 echo "== C: apply wave 1 on staged valkeys: rename-standby, rename-valkey, name-sync both, apps migrated"
@@ -76,12 +80,22 @@ newrun E; bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1; rm -f 
 bash "$M" preflight --wave 1 --run "$R" > "$R/pf.log" 2>&1; check "E1 preflight FAILs: staged exists but ledger has no create-valkey" "[ $? != 0 ] && [ $(grep -c 'but the ledger has no create-valkey' "$R/pf.log") = 4 ]"
 bash "$M" provision --wave 1 --yes --run "$R" > "$R/prov.log" 2>&1; check "E2 provision adopts the 4 (no new instances)" "[ $(nev create-valkey ok '(.note|test("adopted"))') = 4 ] && [ $(jq '[.si[]|select(.name|endswith("-valkey-staged"))]|length' "$CFFAKE_STATE") = 4 ]"
 bash "$M" status --wave 1 --run "$R" > "$R/status.log" 2>&1; check "E3 adopted staged valkeys show STAGED, inventory staged (review finding 1)" "[ $(grep -c ' STAGED ' "$R/status.log") = 4 ] && [ $(awk -F'\t' 'NR>1 && $11=="staged"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 4 ]"
+bash "$M" preflight --wave 1 --free-ips 0 --run "$R" > "$R/pf-g1.log" 2>&1; check "E3b hollow gate: preflight without any provision-check -> 4 FAIL 'no provision-check line', verdict FAIL" "[ $? != 0 ] && [ $(grep -c 'FAIL  service cache-.*: no provision-check line' "$R/pf-g1.log") = 4 ] && ! grep -q '^PREFLIGHT: OK' '$R/pf-g1.log'"
+bash "$M" provision-check --wave 1 --no-bosh --run "$R" > /dev/null 2>&1; bash "$M" preflight --wave 1 --free-ips 0 --run "$R" > "$R/pf-g2.log" 2>&1
+check "E3c a --no-bosh provision-check does not pass the gate (bosh=skipped)" "[ $? != 0 ] && [ $(grep -c 'did not see a BOSH deployment .* (bosh=skipped)' "$R/pf-g2.log") = 4 ]"
+bash "$M" provision-check --wave 1 --run "$R" > /dev/null 2>&1; sed -i.bak 's/\t20[0-9][0-9]-[^\t]*$/\t2020-01-01T00:00:00Z/' "$R/provision-check.tsv"; bash "$M" preflight --wave 1 --free-ips 0 --run "$R" > "$R/pf-g3.log" 2>&1
+check "E3d a provision-check older than the valkey's create does not pass the gate" "[ $? != 0 ] && [ $(grep -c 'is older than the valkey.s create' "$R/pf-g3.log") = 4 ]"
+bash "$M" provision-check --wave 1 --run "$R" > /dev/null 2>&1
 bash "$M" preflight --wave 1 --free-ips 0 --run "$R" > "$R/pf2.log" 2>&1; check "E4 preflight: 0 IPs needed for a staged wave, passes with --free-ips 0 (review finding 2)" "[ $? = 0 ] && grep -q '0 Valkey(s) still to create (IPs needed: 0; 4 already' '$R/pf2.log'"
 bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1; check "E5 apply renames the adopted staged valkeys: 4 rename-valkey ok, CF names right, 8 name-sync ok" "[ $? = 0 ] && [ $(nev rename-valkey ok) = 4 ] && [ \"$(siname $G0)\" = cache-0-redis-standby ] && [ $(jq '[.si[]|select(.name=="cache-0")]|length' "$CFFAKE_STATE") = 1 ] && [ $(nev name-sync ok) = 8 ]"
 
 echo "== F: no vault.conf -> name-sync skipped, script written; day-of apply without provision unchanged"
 newrun F; rm -f "$R/vault.conf"
-bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1; bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1; check "F1 apply exits 0 without vault.conf" "[ $? = 0 ]"
+bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1; bash "$M" provision-check --wave 1 --run "$R" > /dev/null 2>&1
+"$CF_CMD" curl "/v3/service_instances/$G0" -X PATCH -d '{"name":"cache-0-redis-standby"}' > /dev/null   # a run died after this PATCH, before its ledger line
+bash "$M" preflight --wave 1 --run "$R" > "$R/pf.log" 2>&1; check "F0 redis already under the standby name, no ledger line: preflight PASSes it as 'renamed by a run that died', not drift" "[ $? = 0 ] && grep -q 'PASS  service cache-0: already carries the standby name' '$R/pf.log' && ! grep -q 'already exists in the space' '$R/pf.log'"
+bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1; check "F1 apply exits 0 without vault.conf" "[ $? = 0 ]"
+check "F1b cache-0: rename-standby ok 'found already renamed', no PATCH on it, migrated" "[ $(nev rename-standby ok ".service==\"$G0\" and (.note|test(\"found already renamed\"))") = 1 ] && [ $(grep -c "PATCH	/v3/service_instances/$G0" "$R/commands.log") = 0 ] && [ $(nev verify ok ".service==\"$G0\"") = 1 ]"
 check "F2 8 name-sync skipped, 8 commands in name-sync-wave-1.sh" "[ $(nev name-sync skipped) = 8 ] && [ $(grep -c '^safe set' "$R/name-sync-wave-1.sh") = 8 ]"
 bash "$M" status --wave 1 --run "$R" > "$R/status.log" 2>&1; check "F3 status footer: name-sync pending: 8" "grep -q 'name-sync pending: 8 ' '$R/status.log'"
 bash "$M" name-sync --wave 1 --run "$R" > "$R/ns.log" 2>&1; check "F4 name-sync without vault.conf refuses with a hint" "[ $? != 0 ] && grep -q 'no SAFE_RUN' '$R/ns.log'"
@@ -89,7 +103,7 @@ newrun G; bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1
 check "G1 day-of apply: 4 creates under the real name, no rename-valkey, inventory cut-over" "[ $(nev create-valkey ok '(.note|test("\\(staged")|not)') = 4 ] && [ $(nev rename-valkey ok) = 0 ] && [ $(awk -F'\t' 'NR>1 && $1==1 && $11=="cut-over"' "$R/inventory.tsv" | wc -l | tr -d ' ') = 4 ] && [ $(nev verify ok) = 4 ]"
 
 echo "== I: SAFE_RUN reaches the wrong Vault -> name-sync pre-check fails, nothing written (review finding 5)"
-newrun I; bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1
+newrun I; bash "$M" provision --wave 1 --yes --run "$R" > /dev/null 2>&1; bash "$M" provision-check --wave 1 --run "$R" > /dev/null 2>&1
 SAFEFAKE_STATE="$R/other-vault" bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1; check "I1 apply still exits 0" "[ $? = 0 ]"
 check "I2 8 name-sync fail with 'pre-check', nothing in the other vault, right vault untouched" "[ $(nev name-sync fail '(.note|test("pre-check"))') = 8 ] && [ ! -d "$R/other-vault" -o $(ls "$R/other-vault" 2>/dev/null | wc -l | tr -d ' ') = 0 ] && [ \"$(cat "$SAFEFAKE_STATE/$G0")\" = cache-0 ]"
 bash "$M" name-sync --wave 1 --run "$R" > "$R/ns.log" 2>&1; check "I3 name-sync with the right vault: 0 in sync, 8 set now" "[ $? = 0 ] && grep -q 'name-sync: 0 in sync, 8 set now, 0 failed; still pending: 0' '$R/ns.log' && [ \"$(cat "$SAFEFAKE_STATE/$G0")\" = cache-0-redis-standby ]"

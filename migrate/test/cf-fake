@@ -3,7 +3,8 @@
 #   cf-fake seed <waves.tsv>     build the initial world from a plan: spaces, redis instances,
 #                                valkey plans, apps (STARTED, 1 instance), app<->redis bindings
 #   cf curl PATH [-i] [-X M] [-H h] [-d body]    v3 subset used by migrate.sh (GET/POST/PATCH/DELETE)
-#   CFFAKE_FAIL_GET=<path prefix> -> every GET under it is a 500 error document (API-error paths)
+#   CFFAKE_FAIL_GET=<path prefix>[,..] -> every GET under it is a 500 error document (API-error paths); a prefix ending
+#                                in '$' matches the path exactly (e.g. .../processes/web$ leaves .../web/stats alone)
 # Failure injection (env):
 #   CFFAKE_FAIL_CREATE=<svc name>      the valkey create job FAILS
 #   CFFAKE_CRASH=<app guid>            after a restart that app reports CRASHED instances
@@ -11,7 +12,11 @@
 #   CFFAKE_STOPPED=<app guid[,..]>     those apps are STOPPED
 #   CFFAKE_INSTANCES=<guid>=N[,..]     instance count per app (default 1)
 #   CFFAKE_CREATE_POLLS=N              job polls before a create completes (default 2)
-#   CFFAKE_BIND_FAIL=<app guid>        binding create for that app FAILS (job)
+#   CFFAKE_BIND_FAIL=<app guid>        binding create for that app FAILS (job); like CF, the binding record STAYS in state
+#                                      'create failed' and a new bind for the pair is refused until it is deleted
+#   CFFAKE_BIND_POLLS=N                job polls before a bind completes (default 1). A binding's last_operation.state follows
+#                                      its job: 'in progress' until then; every GET of the bindings list counts as one poll
+#                                      ("time passes" for a bind of a killed run that nobody polls)
 #   CFFAKE_SHARED=<svc guid>           that instance is shared into one other space (relationships/shared_spaces)
 #   CFFAKE_NO_INCLUDED=1               GET /v3/service_plans/<g>?include=service_offering answers without `included`
 #   CFFAKE_FINISH_JOBS=1               "time passed": every pending job completes before this call (a job of a killed
@@ -21,7 +26,7 @@
 #                                      it, the broker lost it (SBX 2026-10-20) -- rename works (CF only); bind creates a
 #                                      binding in state 'create failed' and the job fails "deployment not found"; unbind
 #                                      of such a binding fails the same way. DELETE ...?purge=true removes it + bindings.
-#   CFFAKE_RENAME_FAIL=<si guid>:<name> PATCH of that instance TO that name is accepted but its job FAILS (name unchanged)
+#   CFFAKE_RENAME_FAIL=<si guid>:<name>[,..] PATCH of that instance TO that name is accepted but its job FAILS (name unchanged)
 #   CFFAKE_NAMED=<app guid>:<name>[,..] that app resolves its service BY NAME from the VCAP_SERVICES it read at its LAST
 #                                      restart (st['env'][app] = names bound then): CRASHED while that snapshot lacks
 #                                      <name>; a later rename does not help until the app is restarted again
@@ -82,7 +87,7 @@ def hollow(g): return bool(H) and g in st['si'] and st['si'][g]['plan'].startswi
 NAMED={}
 for kv in os.environ.get('CFFAKE_NAMED','').split(','):
     if ':' in kv: g,n=kv.split(':',1); NAMED[g]=n
-def env_snapshot(ag): st.setdefault('env',{})[ag]=sorted({st['si'][b['si']]['name'] for b in st['bind'].values() if b['app']==ag and not b.get('failed') and b['si'] in st['si']})
+def env_snapshot(ag): st.setdefault('env',{})[ag]=sorted({st['si'][b['si']]['name'] for b in st['bind'].values() if b['app']==ag and bind_state(b)=='succeeded' and b['si'] in st['si']})
 def si_obj(g):
     s=st['si'][g]; sp=s['space']; pl=s['plan']; w=os.environ.get('CFFAKE_WRONG','')
     if s['last_op']['state']=='initial':   # the broker answers after CFFAKE_INITIAL_POLLS reads of the instance (default 1)
@@ -96,8 +101,14 @@ PLANS=dict(st['plans']); PLANS['plan-valkey-other']={'name':'cache-other','offer
 INST={}
 for kv in os.environ.get('CFFAKE_INSTANCES','').split(','):
     if '=' in kv: g,n=kv.split('='); INST[g]=int(n)
-fg=os.environ.get('CFFAKE_FAIL_GET','')   # CFFAKE_FAIL_GET=<path prefix>: every GET under it answers a 500 error document (API error path)
-if fg and method=='GET' and p.startswith(fg): err(500,'UnknownError','An unknown error occurred (fake CFFAKE_FAIL_GET)')
+fg=[x for x in os.environ.get('CFFAKE_FAIL_GET','').split(',') if x]   # CFFAKE_FAIL_GET=<path prefix>[,..]: every GET under it answers a 500 error document; 'x$' = exactly x
+def bind_state(b):   # a binding's last_operation.state follows its job (in progress until polled out); 'failed' sticks
+    if b.get('failed'): return 'failed'
+    j=st['jobs'].get(b.get('job',''))
+    if j is None: return 'succeeded'
+    if j['n']<j['polls']: return 'in progress'
+    return 'failed' if j['fail'] else 'succeeded'
+if fg and method=='GET' and any((p==x[:-1]) if x.endswith('$') else p.startswith(x) for x in fg): err(500,'UnknownError','An unknown error occurred (fake CFFAKE_FAIL_GET)')
 elif p=='/v3/info': out={'name':'cf-fake'}
 elif p=='/v3/jobs/'+p[9:] and p.startswith('/v3/jobs/'):
     jg=p[9:]; j=st['jobs'].get(jg)
@@ -155,7 +166,7 @@ elif p.startswith('/v3/service_instances/'):
     elif method=='GET': out=si_obj(g)
     elif method=='PATCH':
         b=json.loads(body)
-        if os.environ.get('CFFAKE_RENAME_FAIL')==g+':'+b.get('name',''): accepted(job('update:'+g, 1, 'Service broker error: rename refused (fake)'))
+        if g+':'+b.get('name','') in os.environ.get('CFFAKE_RENAME_FAIL','').split(','): accepted(job('update:'+g, 1, 'Service broker error: rename refused (fake)'))
         else:
             if 'name' in b: st['si'][g]['name']=b['name']
             accepted(job('update:'+g))
@@ -168,19 +179,23 @@ elif p=='/v3/service_credential_bindings' and method=='GET':
     bad=[k for k in q if k not in ('app_guids','service_instance_guids','type','names','guids','per_page','page')]
     if bad: err(400,'CF-BadQueryParameter',f"Unknown query parameter(s): '{','.join(bad)}'")
     else:
-        res=[{'guid':g,'type':'app','last_operation':{'type':'create','state':('failed' if b.get('failed') else 'succeeded')},'relationships':{'app':{'data':{'guid':b['app']}},'service_instance':{'data':{'guid':b['si']}}}} for g,b in st['bind'].items()
+        sel=[(g,b) for g,b in st['bind'].items()
              if (not q.get('app_guids') or b['app'] in q['app_guids'][0].split(',')) and (not q.get('service_instance_guids') or b['si'] in q['service_instance_guids'][0].split(','))]
+        res=[{'guid':g,'type':'app','last_operation':{'type':'create','state':bind_state(b)},'relationships':{'app':{'data':{'guid':b['app']}},'service_instance':{'data':{'guid':b['si']}}}} for g,b in sel]
+        for g,b in sel:   # time passes: a listed binding's job advances one poll
+            j=st['jobs'].get(b.get('job',''))
+            if j is not None and j['n']<j['polls']: j['n']+=1
         out=listing(res)
 elif p=='/v3/service_credential_bindings' and method=='POST':
     b=json.loads(body); ag=b['relationships']['app']['data']['guid']; sg=b['relationships']['service_instance']['data']['guid']
     if ag not in st['apps'] or sg not in st['si']: err(422,'CF-UnprocessableEntity','app or service instance not found')
     elif any(x['app']==ag and x['si']==sg for x in st['bind'].values()): err(422,'CF-UnprocessableEntity','The app is already bound to the service instance')
-    elif os.environ.get('CFFAKE_BIND_FAIL')==ag: accepted(job('bind', 1, 'Service broker error: bind refused'))
     elif hollow(sg):   # the binding record stays, in state create failed
         bg='b-'+uuid.uuid4().hex[:8]; st['bind'][bg]={'app':ag,'si':sg,'failed':True}
         accepted(job('bind', 1, f"bind could not be completed: Service broker error: failed to retrieve credentials: failed to get deployment VMs: deployment not found: valkey-cache-small-{sg}"))
-    else:
-        bg='b-'+uuid.uuid4().hex[:8]; st['bind'][bg]={'app':ag,'si':sg}; accepted(job('bind'))
+    else:   # the record exists from the POST on; its state follows the job (CFFAKE_BIND_FAIL: the job fails, the record stays 'failed')
+        bg='b-'+uuid.uuid4().hex[:8]; jg=job('bind', int(os.environ.get('CFFAKE_BIND_POLLS','1')), 'Service broker error: bind refused' if os.environ.get('CFFAKE_BIND_FAIL')==ag else None)
+        st['bind'][bg]={'app':ag,'si':sg,'job':jg}; accepted(jg)
 elif p.startswith('/v3/service_credential_bindings/') and method=='DELETE':
     g=p.split('/')[3]
     if g not in st['bind']: err(404,'CF-ResourceNotFound','binding not found')

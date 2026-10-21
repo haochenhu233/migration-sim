@@ -298,6 +298,48 @@ plus a review document for the client, built from the binding graph:
   Mitigation: one more scan on the Sunday morning before `plan`, or a preflight check "live
   bindings of each Redis ⊆ plan apps" (not built yet).
 
+- **2026-10-21 — The 7 apply/rollback defects fixed before the second SBX pass** (asked: "check
+  the connections migration and rollback, renaming and rename back, again"; two fresh-agent reviews
+  found them, a third reviewed the fix). Each needed a failure during the handling of a failure,
+  which the first pass never had. (1) *rollback re-run said done while the app ran on the Valkey*:
+  after a `rollback fail` the restart is decided by the **ledger** — restarted (or failed to) onto
+  the Valkey since the pair's last rollback **ok** ⇒ restart; a rollback fail in between undid
+  nothing, RUNNING proves nothing (`restarted_since_rollback_ok`; the same rule for a `rollback ok`
+  that skipped its restart, and — review round 3 — for any other last line such as the new
+  `bind-valkey blocked`). (2) *multi-bound app restarted into a hole*: a wave service given up on
+  whose Redis still carries `-redis-standby` (NAMES-STUCK) **blocks the app** — `bind-valkey
+  blocked`, nothing bound or restarted; `rollback --service` the stuck one, then `apply`. (3) the
+  instance count is never guessed (unreadable ⇒ `drift fail`, app skipped). (4) a Valkey binding
+  still `in progress` is **waited for, never adopted** (`binding_ready`: ok / none / corpse / ERR /
+  WAIT); past BIND_TIMEOUT only that app is left as it is, the service goes on (review round 3: a
+  service rollback would have tried to delete the in-progress binding). (5) **the hollow gate**:
+  `preflight` needs, for every wave service with a Valkey, its `provision-check.tsv` line — same
+  guid, `OK`, `bosh=present`, `checked_at` ≥ the create; `--no-bosh` does not pass; the file is now
+  merged per wave (`--wave N` no longer wipes the other waves' lines). Consequence: BOSH access on
+  cutover day too, and a resume of a day-of wave needs a `provision-check` after its creates. (6)
+  the record of a rebind that failed (CF keeps it, state `failed`, and refuses "already bound")
+  is deleted first, in rollback and in apply. (7) a Valkey purged *before* the rollback (404) is
+  "name free": the Redis still goes back, the create is **voided** (`create-valkey fail "purged
+  before the rollback"` — inventory/status say create-failed, `provision` creates again; review
+  round 3: an `undone` alone left the purged guid listed as staged). Small: a halt inside the
+  services loop still waits for the issued creates and puts names back; a Redis found already
+  under the standby name is recorded, not refused (preflight agrees); `rollback` ignores Ctrl-C
+  outright (a handler kept the shell alive but killed the `jq` children — review round 3);
+  `svc_create_wait` checks its listing; `rollback` rewrites the inventory. **Harness rule learned:**
+  the gate broke every offline flow that applied straight after `provision` — the harnesses now
+  run `provision → provision-check → apply` like the procedure, and case R's hollow is injected
+  *after* the check (the Friday-check / Sunday-loss shape). The new reset case (API error in the
+  *verify* phase) crashed `reset-scaled.sh` ("CF_ERR: unbound variable": set inside `$(…)`) —
+  fixed; checklist rows 25 (subshell-set status) and 26 (last-event rules cover new events). Fake:
+  bindings follow their job (`in progress` until polled out; a failed bind leaves the record, as
+  CF does), `CFFAKE_BIND_POLLS`, list-valued `CFFAKE_RENAME_FAIL` / `CFFAKE_FAIL_GET` (`$` =
+  exact). Negative check: the new cases run against the old `migrate.sh` fail (S3/S5, D2, D4,
+  G1/G2, W1/W2, I1). Suites: provision 80 of 80, rollback 76 of 76, reset 9 of 9 (macOS, plain;
+  bastion = Linux not re-run for this change — no OS-specific construct added). Not verified live
+  yet: a CF binding's `in progress` state shape and CF refusing the DELETE of an in-progress
+  binding (both fail closed if different). The second SBX pass should trigger #1/#4/#6 on
+  purpose (kill the terminal mid-bind; a rollback with the broker stopped).
+
 ## Open questions
 
 - [ ] dominant client stacks — Java/Spring + .NET assumed; confirm (decides which real-stack apps matter)

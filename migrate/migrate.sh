@@ -368,6 +368,7 @@ cmd_preflight(){
     local cur st; cur=$(printf '%s' "$j" | jq -r .name); st=$(printf '%s' "$j" | jq -r '.last_operation.state')
     local ren; ren=$(ledger_done "$sg" "" rename-standby)
     if [ -n "$ren" ]; then [ "$cur" = "${name}-redis-standby" ] && ok "service $name: already renamed to standby (ledger agrees)" || fail "service $name: ledger says renamed but CF name is '$cur' (drift)"
+    elif [ "$cur" = "${name}-redis-standby" ]; then ok "service $name: already carries the standby name (renamed by a run that died before its ledger line; apply records it)"
     else [ "$cur" = "$name" ] && ok "service $name: name matches guid $(printf '%s' "$sg" | cut -c1-8)" || fail "service $name: guid now named '$cur' (drift -- renamed by hand?)"; fi
     [ "$st" = succeeded ] && ok "service $name: last operation succeeded" || fail "service $name: last_operation=$st"
     # shared instances: CF refuses to rename them (SharedServiceInstanceCannotBeRenamed) and the tool has no sharing flow (NP: 0 cross-space)
@@ -400,8 +401,21 @@ cmd_preflight(){
       else fail "service $name: API error checking the staged name (cannot rule out an orphan)"; fi
     fi
     if lj=$(cflist "/v3/service_instances?names=${name}-redis-standby&space_guids=$sp"); then
-      if [ -z "$ren" ] && [ "$(printf '%s' "$lj" | jq -r '.resources|length')" != 0 ]; then fail "service $name: '${name}-redis-standby' already exists in the space"; fi
+      if [ -z "$ren" ] && [ "$cur" != "${name}-redis-standby" ] && [ "$(printf '%s' "$lj" | jq -r '.resources|length')" != 0 ]; then fail "service $name: '${name}-redis-standby' already exists in the space"; fi
     else fail "service $name: API error checking the standby name (cannot rule out a collision)"; fi
+    # the hollow-Valkey gate (review 2026-10-21, defect 5): a Valkey CF calls succeeded may have no BOSH deployment; only
+    # provision-check (with BOSH) sees that, so apply needs its line: this Valkey, OK, bosh=present, checked after the create
+    if [ -n "$cre" ]; then
+      local pcf="$RUN/provision-check.tsv" pcl pvk pres pbosh pts vk8; vk8=$(svc_note_guid "$sg" | cut -c1-8)
+      pcl=$(awk -F'\t' -v g="$sg" 'NR>1 && $3==g' "$pcf" 2>/dev/null | tail -1)
+      pvk=$(printf '%s' "$pcl" | cut -f4); pres=$(printf '%s' "$pcl" | cut -f11); pbosh=$(printf '%s' "$pcl" | cut -f13); pts=$(printf '%s' "$pcl" | cut -f14)
+      if [ -z "$pcl" ]; then fail "service $name: no provision-check line for it -- run: provision-check --wave $WAVE (the hollow-Valkey check; needs BOSH)"
+      elif [ "$pvk" != "$(svc_note_guid "$sg")" ]; then fail "service $name: provision-check line is for another valkey (${pvk:0:8}, ledger has $vk8) -- run: provision-check --wave $WAVE"
+      elif [ "$pres" != OK ]; then fail "service $name: provision-check said $pres -- fix it, then provision-check --wave $WAVE again"
+      elif [ "$pbosh" != present ]; then fail "service $name: provision-check did not see a BOSH deployment for valkey $vk8 (bosh=$pbosh) -- run provision-check with BOSH (no --no-bosh)"
+      elif [ -z "$pts" ] || [[ "$pts" < "$cre" ]]; then fail "service $name: provision-check (${pts:-no timestamp}) is older than the valkey's create ($cre) -- run: provision-check --wave $WAVE again"
+      else ok "service $name: provision-check OK, BOSH deployment present ($pts)"; fi
+    else warn "service $name: no valkey yet (apply creates it today) -- no provision-check possible ahead; a hollow one shows as a failed bind"; fi
     if [ -z "$cre" ]; then
       if lj=$(cflist "/v3/service_instances?names=$name&space_guids=$sp"); then
         local vk vkst; vk=$(printf '%s' "$lj" | jq -r '.resources[] | select(.guid!="'"$sg"'") | .guid' | head -1)
@@ -585,6 +599,23 @@ job_wait(){
 #   <any> is given (rollback: it must be deleted too).
 binding_guid(){ local lj; lj=$(cflist "/v3/service_credential_bindings?type=app&app_guids=$1&service_instance_guids=$2") || { echo ERR; return; }
   printf '%s' "$lj" | jq -r --arg any "${3:-}" '[.resources[] | select($any!="" or ((.last_operation.state // "succeeded") != "failed"))] | .[0].guid // empty'; }
+# binding_ready <app> <si> -> one line: "ok <guid>" (a SUCCEEDED binding) | "none" | "corpse <guid>" (the record of a
+#   bind that FAILED: CF keeps it and refuses a second binding for the pair until it is deleted) | "ERR <why>" (API) |
+#   "WAIT <why>" (still in progress past BIND_TIMEOUT: nothing is wrong with the service, the caller leaves the app as it is).
+#   A binding still 'in progress' / 'initial' (the bind of a killed run) is WAITED for, up to BIND_TIMEOUT, never
+#   adopted: adopted, a bind that then fails leaves the app with no store after the unbind + restart (review 2026-10-21).
+binding_ready(){
+  local ag="$1" si="$2" lj row g s start said=""; start=$(date +%s)
+  while :; do
+    lj=$(cflist "/v3/service_credential_bindings?type=app&app_guids=$ag&service_instance_guids=$si") || { echo "ERR API error listing bindings"; return; }
+    row=$(printf '%s' "$lj" | jq -r '.resources[0] | select(.!=null) | "\(.guid) \(.last_operation.state // "succeeded")"' 2>/dev/null)
+    [ -n "$row" ] || { echo none; return; }
+    g="${row%% *}"; s="${row#* }"
+    case "$s" in succeeded) echo "ok $g"; return;; failed) echo "corpse $g"; return;; esac
+    [ $(( $(date +%s) - start )) -ge "$BIND_TIMEOUT" ] && { echo "WAIT binding $g still '$s' after ${BIND_TIMEOUT}s (a bind of an earlier run? wait, then run again)"; return; }
+    [ -n "$said" ] || say "   binding ${g:0:8} is '$s' (a bind of an earlier run?) -- waiting for it, not adopting it" >&2; said=1; sleep "$JOB_POLL"
+  done
+}
 # app_stats <app> -> "running/total" ; "ERR" on API error
 app_stats(){ local j; j=$(cfx "/v3/apps/$1/processes/web/stats" 2>/dev/null); cf_json_ok "$j" || { echo ERR; return; }
   printf '%s' "$j" | jq -r '"\([.resources[]|select(.state=="RUNNING")]|length)/\(.resources|length)"'; }
@@ -602,12 +633,16 @@ wave_unlock(){ [ -n "${LOCKF:-}" ] && rm -f "$LOCKF"; LOCKF=""; }
 svc_note_guid(){ ledger_lines | jq -r --arg s "$1" 'select(.service==$s and .app=="" and .step=="create-valkey" and .outcome=="ok") | .note' | tail -1 | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1; }
 app_last(){ # app_last <svc> <app> -> last step[:outcome] for the pair ("" if none)
   ledger_lines | jq -r --arg s "$1" --arg a "$2" 'select(.service==$s and .app==$a) | if .outcome=="ok" then .step else .step+":"+.outcome end' | tail -1; }
+restarted_since_rollback_ok(){ # <svc> <app> -> "true" when, among the pair's events BEFORE its last line, the app was (or failed
+  # to be) restarted (restart / verify step) after the last rollback OK -- its process holds the Valkey env (a crash-restart
+  # keeps the env of the last start). A rollback FAIL in between does not reset this: it undid nothing (review 2026-10-21).
+  ledger_lines | jq -rs --arg s "$1" --arg a "$2" '[.[]|select(.service==$s and .app==$a)] | .[:-1]
+    | (map(.step=="rollback" and .outcome=="ok")|rindex(true)) as $i | .[(if $i==null then 0 else $i+1 end):] | any(.step=="restart" or .step=="verify")'; }
 rollback_skipped_restart(){ # <svc> <app>, pair's last line is rollback ok: "true" when that rollback did NOT restart the app
-  # although the app had been (or failed to be) restarted onto the Valkey since the rollback before it -- its process
-  # still runs on the Valkey env (a crash-restart keeps the env of the last start). The note is "cause: <why>; <did>".
-  ledger_lines | jq -rs --arg s "$1" --arg a "$2" '[.[]|select(.service==$s and .app==$a)] | .[-1] as $l | .[:-1] as $p
-    | if ($l.note|split("; ")|last|test("restart")) then false
-      else (($p|map(.step=="rollback")|rindex(true)) as $i | $p[(if $i==null then 0 else $i+1 end):] | any(.step=="restart" or .step=="verify")) end'; }
+  # although the app had been (or failed to be) restarted onto the Valkey since the successful rollback before it -- its
+  # process still runs on the Valkey env. The note is "cause: <why>; <did>".
+  local did; did=$(ledger_lines | jq -rs --arg s "$1" --arg a "$2" '[.[]|select(.service==$s and .app==$a)] | .[-1].note|split("; ")|last|test("restart")')
+  if [ "$did" = true ]; then echo false; else restarted_since_rollback_ok "$1" "$2"; fi; }
 
 # ---- staged Valkeys (provision, DESIGN §6c): created days ahead as <name>-valkey-staged, renamed to
 # <name> by apply right after the Redis took the standby name. The ledger note of a staged create
@@ -681,10 +716,16 @@ rollback_names(){
   [ -n "$vk" ] || { [ -z "$(ledger_done "$sg" "" create-valkey)" ] || vk=$(svc_note_guid "$sg"); }   # a voided create (fail after ok) has no valkey to rename: redis only
   if [ -n "$vk" ]; then
     j=$(cfx "/v3/service_instances/$vk" 2>/dev/null)
-    if ! cf_json_ok "$j"; then R_NAMES="cannot read valkey $vk: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"
-      ledger_add "$WAVE" "$sg" "" rollback-names fail 0 "$R_NAMES -- names left as they are"; say "   !! rollback: $R_NAMES -- names left as they are"; return 1; fi   # unknown whether <name> is free: stop
-    cur=$(printf '%s' "$j" | jq -r .name); t0=$(date +%s)
-    if [ "$cur" = "$stn" ]; then [ -z "$(ledger_done "$sg" "" rename-valkey)" ] || ledger_add "$WAVE" "$sg" "" rename-valkey undone 0 "$name -> $stn (found already renamed back)"; say "   valkey already named $stn"
+    if ! cf_json_ok "$j"; then
+      if printf '%s' "$j" | jq -e '.errors[0].title=="CF-ResourceNotFound"' >/dev/null 2>&1; then cur=GONE   # purged before the rollback (the hollow advice says after): the name is free, the redis still goes back
+      else R_NAMES="cannot read valkey $vk: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"
+        ledger_add "$WAVE" "$sg" "" rollback-names fail 0 "$R_NAMES -- names left as they are"; say "   !! rollback: $R_NAMES -- names left as they are"; return 1; fi   # unknown whether <name> is free: stop
+    else cur=$(printf '%s' "$j" | jq -r .name); fi; t0=$(date +%s)
+    if [ "$cur" = GONE ]; then   # the rename is undone by the purge; the create is VOIDED (as provision records a lost Valkey) so inventory/status say create-failed, not "staged" with a dead guid
+      [ -z "$(ledger_done "$sg" "" rename-valkey)" ] || ledger_add "$WAVE" "$sg" "" rename-valkey undone 0 "$name -> (none: valkey $vk not found in CF, purged?) -- name free"
+      [ -z "$(ledger_done "$sg" "" create-valkey)" ] || ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "valkey $vk not found in CF (purged before the rollback) -- provision --wave $WAVE creates it again"
+      say "   valkey ${vk:0:8} not found in CF (purged?) -- name free; provision --wave $WAVE creates it again"
+    elif [ "$cur" = "$stn" ]; then [ -z "$(ledger_done "$sg" "" rename-valkey)" ] || ledger_add "$WAVE" "$sg" "" rename-valkey undone 0 "$name -> $stn (found already renamed back)"; say "   valkey already named $stn"
     elif [ "$cur" = "$name" ]; then
       if cfreq PATCH "/v3/service_instances/$vk" "{\"name\":\"$stn\"}" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then
         ledger_add "$WAVE" "$sg" "" rename-valkey undone $(( ($(date +%s)-t0)*1000 )) "$name -> $stn (rollback)"; say "   valkey renamed back -> $stn (${vk:0:8})"; name_sync "$sg" "$vk" "$stn" "$name"
@@ -724,13 +765,19 @@ rollback_service(){
       elif [ "${s%/*}" != "${s#*/}" ]; then relook="only $s instance(s) running"
       else continue; fi
     fi
-    t0=$(date +%s); ok=1; local did=""
-    # 1) Redis binding back (if it was removed)
-    bg=$(binding_guid "$ag" "$sg")
-    if [ "$bg" = ERR ]; then ok=""; R_ERR="cannot list bindings"
-    elif [ -z "$bg" ]; then
+    t0=$(date +%s); ok=1; local did="" br corpse=""
+    # 1) Redis binding back (if it was removed). A binding in progress is waited for (binding_ready); the record of a
+    #    rebind that FAILED earlier is deleted first -- CF refuses a new binding for the pair while it exists (every
+    #    re-run was refused "already bound" until a hand delete; review 2026-10-21).
+    br=$(binding_ready "$ag" "$sg")
+    case "$br" in ERR*) ok=""; R_ERR="${br#ERR }";; WAIT*) ok=""; R_ERR="${br#WAIT }";; "corpse "*) corpse="${br#corpse }";; esac
+    if [ -n "$ok" ] && [ -n "$corpse" ]; then
+      if cfreq DELETE "/v3/service_credential_bindings/$corpse" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then did="failed redis binding ${corpse:0:8} deleted"
+      else ok=""; R_ERR="failed redis binding $corpse (an earlier rebind) could not be deleted: $R_ERR"; fi
+    fi
+    if [ -n "$ok" ] && [ "${br%% *}" != ok ]; then
       if cfreq POST "/v3/service_credential_bindings" "{\"type\":\"app\",\"relationships\":{\"app\":{\"data\":{\"guid\":\"$ag\"}},\"service_instance\":{\"data\":{\"guid\":\"$sg\"}}}}" \
-         && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then did="rebind redis"; else ok=""; fi
+         && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then did="${did:+$did + }rebind redis"; else ok=""; fi
     fi
     # 2) Valkey binding away
     if [ -n "$ok" ] && [ -n "$vk" ]; then bg=$(binding_guid "$ag" "$vk" any)
@@ -744,10 +791,14 @@ rollback_service(){
       fi
     fi
     # 3) restart if the app was (or failed to be) restarted onto the Valkey, or is not fully up after an earlier
-    #    rollback (names were still swapped then, or that rollback skipped the restart) -- never a STOPPED app
+    #    rollback (names were still swapped then, or that rollback skipped the restart) -- never a STOPPED app.
+    #    After a rollback FAIL the ledger decides first (restarted onto the Valkey since the last rollback OK -> its
+    #    process still holds the Valkey env, RUNNING proves nothing), then the stats (review 2026-10-21, defect 1).
     if [ -n "$ok" ]; then local again=""
       case "$last" in restart|restart:fail|verify|verify:fail|rollback) again=1;;
-        rollback:fail) s=$(app_stats "$ag"); [ "$s" != ERR ] && [ "${s%/*}" != "${s#*/}" ] && again=1;; esac   # some instance not RUNNING
+        rollback:fail) if [ "$(restarted_since_rollback_ok "$sg" "$ag")" = true ]; then again=1
+          else s=$(app_stats "$ag"); [ "$s" != ERR ] && [ "${s%/*}" != "${s#*/}" ] && again=1; fi;;   # some instance not RUNNING
+        *) [ "$(restarted_since_rollback_ok "$sg" "$ag")" = true ] && again=1;; esac   # any other last line (bind-valkey:blocked, drift:fail, ...): the ledger decides (review 2026-10-21 round 3)
       if [ -n "$again" ]; then st=$(cfx "/v3/apps/$ag" 2>/dev/null | jq -r '.state // empty' 2>/dev/null)
         case "$st" in STARTED|STOPPED) ;; *) ok=""; R_ERR="cannot read app state (${st:-no answer})";; esac   # an API error is not "not started"
         if [ "$st" = STARTED ]; then inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // empty' 2>/dev/null)
@@ -955,8 +1006,11 @@ cmd_provcheck(){
       echo "!! bosh: $bosh_err -- every service with a valkey is API-ERROR below"
     else echo "bosh: $(wc -l < "$deps" | tr -d ' ') deployments listed by '$(bosh_cmd)' ($nredok of $nred Redis of the plan found)"; fi
   else bosh_mode=error; bosh_err="$R_ERR"; echo "!! bosh: $bosh_err -- every service with a valkey is API-ERROR below; fix BOSH_CMD (or --no-bosh to check CF only)"; fi
-  local out="$RUN/provision-check.tsv"
-  printf 'wave\tservice\tredis_guid\tvalkey_guid\torg\tspace\tredis_plan\tvalkey_plan\tvalkey_offering\tvalkey_last_op\tresult\tdetail\tbosh\n' > "$out"
+  local out="$RUN/provision-check.tsv" checked_at old; checked_at=$(now)
+  # the lines of waves NOT checked this run are kept (preflight gates every wave on its line); checked waves are replaced
+  old=$(awk -F'\t' -v ws=" $list " 'NR>1 && index(ws, " "$1" ")==0' "$out" 2>/dev/null)
+  printf 'wave\tservice\tredis_guid\tvalkey_guid\torg\tspace\tredis_plan\tvalkey_plan\tvalkey_offering\tvalkey_last_op\tresult\tdetail\tbosh\tchecked_at\n' > "$out"
+  [ -z "$old" ] || printf '%s\n' "$old" >> "$out"
   declare -A PLN PLO SPN SPO ORN
   # plan_info <guid> -> PLN[g]=name PLO[g]=offering name (GET /v3/service_plans/<g>?include=service_offering); "" on error
   plan_info(){ [ -n "${1:-}" ] || return 1; [ -n "${PLN[$1]:-}" ] && return 0; local j; j=$(cfcurl "/v3/service_plans/$1?include=service_offering")
@@ -1025,7 +1079,7 @@ cmd_provcheck(){
         fi
       fi
       case "$res" in OK) nok=$((nok+1)); if [ "$vn" = "$name" ]; then ncut=$((ncut+1)); else nstg=$((nstg+1)); fi;; MISSING) nmiss=$((nmiss+1));; MISMATCH) nmis=$((nmis+1));; HOLLOW) nhol=$((nhol+1));; *) nerr=$((nerr+1));; esac
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$sg" "${vk:--}" "$on" "$spn" "$rpn" "$vpn" "$vpo" "$vlo" "$res" "$detail" "$bdep" >> "$out"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$sg" "${vk:--}" "$on" "$spn" "$rpn" "$vpn" "$vpo" "$vlo" "$res" "$detail" "$bdep" "$checked_at" >> "$out"
       printf '%-8s wave %-3s %-40s %s\n' "$res" "$w" "$name" "$detail"
     done < <(wave_rows "$w" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
   done
@@ -1121,7 +1175,7 @@ svc_create_wait(){
     vname="${VNAME[$sg]}"; job="${JOBS[$sg]% *}"; t1="${JOBS[$sg]#* }"; tag="plan $plan"; [ "$vname" = "$name" ] || tag="staged, plan $plan"
     say "$name: waiting for valkey deploy ($job, up to ${CREATE_TIMEOUT}s)"
     if job_wait "$job" "$CREATE_TIMEOUT"; then
-      lj=$(cflist "/v3/service_instances?names=$vname&space_guids=${SPACE[$sg]}")
+      lj=$(cflist "/v3/service_instances?names=$vname&space_guids=${SPACE[$sg]}") || { ledger_add "$WAVE" "$sg" "" create-valkey fail $(( ($(date +%s)-t1)*1000 )) "job done but listing $vname failed (API error) -- the next provision adopts it once listed"; SKIP[$sg]=1; say "!! $name: create done but the listing failed (API error) -- skipped; provision again adopts it"; continue; }
       n=$(printf '%s' "$lj" | jq -r '.resources|length' 2>/dev/null)
       vg=$(printf '%s' "$lj" | jq -r '.resources[0].guid // empty'); vp=$(printf '%s' "$lj" | jq -r '.resources[0].relationships.service_plan.data.guid // empty')
       if [ "$n" = 1 ] && [ "$vg" != "$sg" ] && [ "$vp" = "${PLANG[$sg]}" ]; then
@@ -1147,17 +1201,28 @@ svc_rename_staged(){
   else ledger_add "$WAVE" "$sg" "" rename-valkey fail $(( ($(date +%s)-t0)*1000 )) "$R_ERR"; SKIP[$sg]=1; say "!! $name: staged valkey rename failed: $R_ERR -- skipped (redis is $name-redis-standby, valkey still $stn)"; return 1; fi
 }
 
+# svc_names_back: a service given up on (drift, failed rename/create/copy) after its Redis took the standby name gets its
+#   names back, or every app of it that restarts later (a multi-bound app: by its OTHER service's step) fails to find it
+svc_names_back(){
+  local sg name
+  while IFS=$'\t' read -r sg name; do
+    [ -n "${SKIP[$sg]:-}" ] && [ -n "$(ledger_done "$sg" "" rename-standby)" ] || continue
+    say "!! $name: skipped after the rename -- names back"; rollback_names "$sg" "$name" "${VK[$sg]:-}" || true   # vk looked up from the ledger when unset
+  done < <(printf '%s\n' "$ROWS" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3}')
+}
 apply_services(){
   svc_arrays
-  local sg name sorg ssp plan flags std j cur t0 sp
+  local sg name sorg ssp plan flags std j cur t0 sp halted=""
   while IFS=$'\t' read -r sg name sorg ssp plan flags; do
-    halt_check || return 1
+    halt_check || { halted=1; break; }   # the creates already issued are still waited for below (an abandoned create is a leftover the next run must adopt)
     std="${name}-redis-standby"
     j=$(cfx "/v3/service_instances/$sg" 2>/dev/null); cf_json_ok "$j" || { ledger_add "$WAVE" "$sg" "" drift fail 0 "GET service: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"; SKIP[$sg]=1; say "!! $name: cannot read instance $sg -- skipped"; continue; }
     cur=$(printf '%s' "$j" | jq -r .name); sp=$(printf '%s' "$j" | jq -r '.relationships.space.data.guid'); SPACE[$sg]=$sp
     # -- rename-standby (+ name-sync of Blacksmith's copy)
     if [ -n "$(ledger_done "$sg" "" rename-standby)" ]; then
       [ "$cur" = "$std" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "ledger: renamed; CF name is '$cur'"; SKIP[$sg]=1; say "!! $name: drift (CF name '$cur') -- skipped"; continue; }
+    elif [ "$cur" = "$std" ]; then   # a run died after the PATCH and before its ledger line (the guid is the plan's Redis): record it, sync the broker's copy
+      ledger_add "$WAVE" "$sg" "" rename-standby ok 0 "$name -> $std (found already renamed)"; say "$name: already named $std -- recorded"; name_sync "$sg" "$sg" "$std" "$name"
     else
       [ "$cur" = "$name" ] || { ledger_add "$WAVE" "$sg" "" drift fail 0 "expected name '$name', CF has '$cur'"; SKIP[$sg]=1; say "!! $name: guid $sg is named '$cur' -- skipped"; continue; }
       t0=$(date +%s)
@@ -1181,6 +1246,7 @@ apply_services(){
     svc_create_issue "$sg" "$name" "$sp" "$plan" "$name"
   done < <(printf '%s\n' "$ROWS" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
   svc_create_wait
+  [ -z "$halted" ] || { say "!! halted: the issued creates were waited for; names of the services given up on go back; the rest resumes with apply"; svc_names_back; return 1; }
   # -- copy-data for datastore services
   while IFS=$'\t' read -r sg name flags; do
     [ -n "${SKIP[$sg]:-}" ] && continue; case ",$flags," in *,datastore,*) ;; *) continue;; esac
@@ -1197,12 +1263,7 @@ apply_services(){
       else ledger_add "$WAVE" "$sg" "" copy-data blocked 0 "operator deferred"; SKIP[$sg]=1; fi
     else ledger_add "$WAVE" "$sg" "" copy-data blocked 0 "no copy-data.sh hook and no terminal"; SKIP[$sg]=1; say "!! $name: copy-data needs a hook or a terminal -- skipped"; fi
   done < <(printf '%s\n' "$ROWS" | awk -F'\t' '{ if ($12 ~ /datastore/) ds[$4]=1; n[$4]=$3 } END { for (s in ds) print s"\t"n[s]"\t"(ds[s]?"datastore":"") }')
-  # -- a service given up on (drift, failed rename/create/copy) after its Redis took the standby name: names back,
-  #    or every app of it that restarts later (a multi-bound app: by its OTHER service's step) fails to find it
-  while IFS=$'\t' read -r sg name; do
-    [ -n "${SKIP[$sg]:-}" ] && [ -n "$(ledger_done "$sg" "" rename-standby)" ] || continue
-    say "!! $name: skipped after the rename -- names back"; rollback_names "$sg" "$name" "${VK[$sg]:-}" || true   # vk looked up from the ledger when unset
-  done < <(printf '%s\n' "$ROWS" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3}')
+  svc_names_back
   return 0
 }
 
@@ -1216,22 +1277,41 @@ apply_apps(){
       say "$app: SKIP (no binding, team action)"; continue;; esac
     st=$(cfx "/v3/apps/$ag" 2>/dev/null | jq -r '.state // empty' 2>/dev/null)
     [ -n "$st" ] || { say "!! $app: cannot read app $ag -- skipped"; while IFS=$'\t' read -r sg name; do ledger_add "$WAVE" "$sg" "$ag" drift fail 0 "GET app failed"; done <<< "$svcs"; continue; }
-    inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // 1' 2>/dev/null)
     local allv=1 sgx; while IFS=$'\t' read -r sgx _; do [ -n "${SKIP[$sgx]:-}" ] && continue   # verified on EVERY wave service of the app (a neighbour may have been rolled back since)
       { [ -n "$(ledger_done "$sgx" "$ag" verify)" ] && [ "$(app_last "$sgx" "$ag")" = verify ]; } || allv=""; done <<< "$svcs"
     if [ -n "$allv" ]; then say "== $app (${ag:0:8}) already verified (ledger) -- skipped"; continue; fi
+    # a wave service given up on whose Redis STILL carries the standby name (its names-back failed: NAMES-STUCK) -- the app
+    # is not touched: restarted for its other service it would look for <name> and find nothing (SBX wave 6 shape;
+    # review 2026-10-21, defect 2). Recorded 'bind-valkey blocked' under its other services; apply redoes it once the
+    # stuck service was rolled back (rollback --service puts the names back).
+    local stuck="" nmx; while IFS=$'\t' read -r sgx nmx; do [ -n "${SKIP[$sgx]:-}" ] && [ "$(ledger_last_rename "$sgx" rename-standby)" = ok ] && stuck="${stuck:+$stuck, }$nmx"; done <<< "$svcs"
+    if [ -n "$stuck" ]; then
+      while IFS=$'\t' read -r sg name; do [ -n "${SKIP[$sg]:-}" ] || ledger_add "$WAVE" "$sg" "$ag" bind-valkey blocked 0 "not touched: ${stuck%%,*} is name-stuck (its redis still carries the standby name; a restart would not find it) -- rollback --wave $WAVE --service ${stuck%%,*}, then apply again"; done <<< "$svcs"
+      say "== $app (${ag:0:8}) BLOCKED: $stuck name-stuck (redis still *-redis-standby) -- not bound, not restarted; rollback --wave $WAVE --service ${stuck%%,*} first, then apply again"; continue; fi
+    # never guess the instance count: a multi-instance app would lose its rolling restart (review 2026-10-21, defect 3)
+    inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // empty' 2>/dev/null)
+    case "$inst" in ''|*[!0-9]*) if [ "$st" != STOPPED ]; then say "!! $app: cannot read its instance count (${inst:-no answer}) -- skipped, nothing changed"; while IFS=$'\t' read -r sg name; do [ -n "${SKIP[$sg]:-}" ] || ledger_add "$WAVE" "$sg" "$ag" drift fail 0 "GET processes/web: instance count unknown (${inst:-no answer}) -- not guessed"; done <<< "$svcs"; continue; fi; inst=0;; esac
     say "== $app (${ag:0:8}) state=$st instances=$inst"
     local svc_ok=""; did=""
-    # bind every wave service's valkey
+    # bind every wave service's valkey. A binding in progress (a bind of a killed run) is waited for, never adopted; the
+    # record of a bind that FAILED is deleted first (CF refuses a second binding for the pair while it exists)
     while IFS=$'\t' read -r sg name; do
       [ -n "${SKIP[$sg]:-}" ] && { say "   $name: service skipped earlier -- app left on redis for it"; continue; }
       vk="${VK[$sg]:-}"; [ -n "$vk" ] || { say "   $name: no valkey guid -- skipped"; continue; }
       if [ -n "$(ledger_done "$sg" "$ag" bind-valkey)" ]; then svc_ok="$svc_ok $sg"; continue; fi
-      t0=$(date +%s); bg=$(binding_guid "$ag" "$vk")
-      if [ "$bg" = ERR ]; then ledger_add "$WAVE" "$sg" "$ag" bind-valkey fail 0 "API error listing bindings"; fails=$((fails+1)); rollback_service "$sg" "$name" "$vk" "bind-valkey of $app: API error"; SKIP[$sg]=1; continue; fi
-      if [ -n "$bg" ]; then ledger_add "$WAVE" "$sg" "$ag" bind-valkey ok 0 "binding already present ($bg)"; svc_ok="$svc_ok $sg"; continue; fi
+      t0=$(date +%s); local br corpse=""; br=$(binding_ready "$ag" "$vk")
+      case "$br" in
+        ERR*) ledger_add "$WAVE" "$sg" "$ag" bind-valkey fail 0 "${br#ERR }"; say "   !! bind to valkey $name: ${br#ERR }"; fails=$((fails+1)); rollback_service "$sg" "$name" "$vk" "bind-valkey of $app: ${br#ERR }"; SKIP[$sg]=1; continue;;
+        WAIT*)   # a slow bind of an earlier run: not the service's fault -- THIS APP is left as it is (redis binding kept, nothing restarted), the service and its other apps go on
+          ledger_add "$WAVE" "$sg" "$ag" bind-valkey fail 0 "${br#WAIT } -- app left as it is"; say "   !! $app: ${br#WAIT } -- app left as it is, the wave goes on"; fails=$((fails+1))
+          [ "$fails" -ge "$BREAKER" ] && { say "!! $fails failures in a row -- wave stopped (circuit breaker)"; return 1; }; continue 2;;
+        "ok "*) ledger_add "$WAVE" "$sg" "$ag" bind-valkey ok 0 "binding already present (${br#ok })"; svc_ok="$svc_ok $sg"; continue;;
+        "corpse "*) corpse="${br#corpse }"
+          if cfreq DELETE "/v3/service_credential_bindings/$corpse" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then say "   failed binding ${corpse:0:8} (an earlier bind) deleted first"
+          else ledger_add "$WAVE" "$sg" "$ag" bind-valkey fail $(( ($(date +%s)-t0)*1000 )) "failed binding $corpse (an earlier bind) could not be deleted: $R_ERR"; say "   !! bind to valkey $name: the failed binding ${corpse:0:8} could not be deleted: $R_ERR"; fails=$((fails+1)); rollback_service "$sg" "$name" "$vk" "bind-valkey of $app: failed binding $corpse not deletable: $R_ERR"; SKIP[$sg]=1; continue; fi;;
+      esac
       if cfreq POST "/v3/service_credential_bindings" "{\"type\":\"app\",\"relationships\":{\"app\":{\"data\":{\"guid\":\"$ag\"}},\"service_instance\":{\"data\":{\"guid\":\"$vk\"}}}}" && { [ -z "$R_JOB" ] || job_wait "$R_JOB" "$BIND_TIMEOUT"; }; then
-        ledger_add "$WAVE" "$sg" "$ag" bind-valkey ok $(( ($(date +%s)-t0)*1000 )) ""; say "   bound -> valkey $name"; svc_ok="$svc_ok $sg"
+        ledger_add "$WAVE" "$sg" "$ag" bind-valkey ok $(( ($(date +%s)-t0)*1000 )) "${corpse:+failed binding $corpse deleted first}"; say "   bound -> valkey $name"; svc_ok="$svc_ok $sg"
       else ledger_add "$WAVE" "$sg" "$ag" bind-valkey fail $(( ($(date +%s)-t0)*1000 )) "$R_ERR"; say "   !! bind to valkey $name failed: $R_ERR"; fails=$((fails+1)); rollback_service "$sg" "$name" "$vk" "bind-valkey of $app failed: $R_ERR"; SKIP[$sg]=1; fi
     done <<< "$svcs"
     [ -n "$svc_ok" ] || { [ "$fails" -ge "$BREAKER" ] && { say "!! $fails failures in a row -- wave stopped (circuit breaker)"; return 1; }; continue; }
@@ -1296,7 +1376,7 @@ svc_select(){
   [ -n "$WAVE" ] && [ -n "${SVCF:-}" ] || { echo "usage: migrate.sh $SUB --wave N --service <name|guid> [--run dir] ..."; return 1; }
   ROWS=$(wave_rows "$WAVE" | awk -F'\t' -v f="$SVCF" '$3==f || index($4,f)==1'); [ -n "$ROWS" ] || { echo "wave $WAVE: no service matches --service $SVCF"; return 1; }
   SG=$(printf '%s\n' "$ROWS" | cut -f4 | sort -u); [ "$(printf '%s\n' "$SG" | wc -l | tr -d ' ')" = 1 ] || { echo "--service $SVCF matches several services in wave $WAVE"; return 1; }
-  NAME=$(printf '%s\n' "$ROWS" | head -1 | cut -f3); VK=$(svc_note_guid "$SG")
+  NAME=$(printf '%s\n' "$ROWS" | head -1 | cut -f3); VK=""; [ -z "$(ledger_done "$SG" "" create-valkey)" ] || VK=$(svc_note_guid "$SG")   # a voided create (lost / purged Valkey) has no Valkey to act on
   SVC_EV=$(ledger_lines | jq -r --arg s "$SG" 'select(.service==$s and .app=="" and .outcome=="ok" and (.step=="confirm" or .step=="retire")) | .step' | tail -1)
 }
 confirm_or_die(){ # confirm_or_die <prompt> <expected>
@@ -1316,9 +1396,12 @@ cmd_rollback(){
   else echo "ROLLBACK wave $WAVE service $NAME ($(printf '%s' "$SG" | cut -c1-8)): names back (redis -> $NAME, valkey ${VK:+$(printf '%s' "$VK" | cut -c1-8) }-> $(staged_name "$NAME"), kept), then $n app(s) back on the redis"; fi
   [ "$SVC_EV" = confirm ] && echo "   note: service was CONFIRMED -- writes made to the valkey since cutover are lost for it"
   confirm_or_die "type yes to roll back: " yes || return 1
+  # Ctrl-C is IGNORED for the whole rollback (children inherit the ignore: a handler would keep this shell alive but still
+  # kill the jq/awk between a CF call and its ledger line). A half rollback is worse than a slow one; kill -TERM if you must.
+  trap '' INT; echo "(Ctrl-C is ignored until this service's rollback has run to its end)"
   wave_lock "$WAVE" || return 1; trap 'wave_unlock' EXIT
   NAMES_FAILED=""; rollback_service "$SG" "$NAME" "$VK" "$why"
-  wave_unlock
+  write_inventory; wave_unlock   # the inventory is a derived view: names back / a voided create must show in it now, not at the next apply
   [ -z "$NAMES_FAILED" ] || { echo "!! names not restored ($R_NAMES) -- fix, then rollback --wave $WAVE --service $NAME again; status --wave $WAVE"; return 1; }
   [ "$(app_last_any_fail "$SG")" = 0 ] || { echo "!! some apps did not roll back -- status --wave $WAVE"; return 1; }
   echo "rolled back -- status --wave $WAVE; re-migrate later with: apply --wave $WAVE --service $NAME"

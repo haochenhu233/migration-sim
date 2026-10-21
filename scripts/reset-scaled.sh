@@ -25,11 +25,12 @@ RUN=""; GO=""; POLL="${RESET_POLL:-10}"; WAITMAX="${RESET_WAIT:-900}"
 while [ $# -gt 0 ]; do case "$1" in --run) RUN="${2%/}"; shift 2;; --go) GO=1; shift;; *) echo "usage: reset-scaled.sh --run <dir> [--go]"; exit 2;; esac; done
 [ -n "$RUN" ] && [ -s "$RUN/waves.tsv" ] || { echo "!! --run <dir> with waves.tsv required"; exit 2; }
 [ -s "$RUN/ledger.jsonl" ] || { echo "!! $RUN/ledger.jsonl missing -- nothing was migrated from this run dir? (archive by hand if the plan is all there is)"; exit 2; }
-PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
+PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"; CF_ERR=""
 say(){ printf '%s\n' "$*"; }
 cfget(){ local j; j=$($CF curl "$1" 2>/dev/null); printf '%s' "$j" | jq -e 'type=="object" and (has("errors")|not)' >/dev/null 2>&1 || { CF_ERR="$(printf '%s' "$j" | jq -r '.errors[0].detail // .errors[0].title // "no/invalid JSON"' 2>/dev/null)"; return 1; }; printf '%s' "$j"; }
 cfcode(){ local j; j=$($CF curl "$1" 2>/dev/null)   # "ok" | "notfound" (CF-ResourceNotFound / 10010) | the error title | "" on junk
   printf '%s' "$j" | jq -r 'if type!="object" then "" elif has("errors") then (if (.errors[0].title=="CF-ResourceNotFound" or .errors[0].code==10010) then "notfound" else (.errors[0].title // "error") end) else "ok" end' 2>/dev/null; }
+# nbind / bound print a count, or ERR on an API error (they run inside $(..): cfget's CF_ERR does not reach the caller)
 nbind(){ local j; j=$(cfget "/v3/service_credential_bindings?service_instance_guids=$1&per_page=200") || { echo ERR; return; }; printf '%s' "$j" | jq -r '.resources|length'; }
 bound(){ local j; j=$(cfget "/v3/service_credential_bindings?type=app&app_guids=$1&service_instance_guids=$2") || { echo ERR; return; }; printf '%s' "$j" | jq -r '.resources|length'; }
 mode="DRY RUN (nothing changes; add --go)"; [ -n "$GO" ] && mode="LIVE"
@@ -50,7 +51,8 @@ if [ -z "$GO" ]; then   # phases 2-4 only make sense after the rollbacks; show w
   for vk in $(jq -r 'select(.step=="create-valkey" and .outcome=="ok") | .note' "$LEDGER" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | sort -u); do
     code=$(cfcode "/v3/service_instances/$vk"); case "$code" in notfound) say "   $vk: already gone"; continue;; ok) ;; *) say "   $vk: cannot read it (${code:-no JSON})"; continue;; esac
     j=$(cfget "/v3/service_instances/$vk") || { say "   $vk: $CF_ERR"; continue; }
-    say "   $(printf '%s' "$j" | jq -r '"\(.name) (\(.last_operation.type) \(.last_operation.state))"') $vk: $(nbind "$vk") binding(s) -- deleted only once named *-valkey-staged and unbound"
+    nb=$(nbind "$vk"); [ "$nb" = ERR ] && nb="? (cannot list its)"
+    say "   $(printf '%s' "$j" | jq -r '"\(.name) (\(.last_operation.type) \(.last_operation.state))"') $vk: $nb binding(s) -- deleted only once named *-valkey-staged and unbound"
   done
   say "dry run ends here -- run with --go"; exit 0
 fi
@@ -60,7 +62,7 @@ while IFS=$'\t' read -r w name sg ag an; do
   j=$(cfget "/v3/service_instances/$sg") || { say "!! $name: cannot read redis $sg: $CF_ERR"; bad=$((bad+1)); continue; }
   cur=$(printf '%s' "$j" | jq -r .name); [ "$cur" = "$name" ] || { say "!! $name: redis $sg is named '$cur' (rollback did not finish? run again)"; bad=$((bad+1)); }
   b=$(bound "$ag" "$sg"); napp=$((napp+1))
-  case "$b" in 1) ;; 0) say "!! $name: app $an ($ag) has NO binding to its redis"; bad=$((bad+1));; ERR) say "!! $name: cannot list bindings of app $an: $CF_ERR"; bad=$((bad+1));; *) say "!! $name: app $an has $b bindings to its redis"; bad=$((bad+1));; esac
+  case "$b" in 1) ;; 0) say "!! $name: app $an ($ag) has NO binding to its redis"; bad=$((bad+1));; ERR) say "!! $name: cannot list bindings of app $an (API error)"; bad=$((bad+1));; *) say "!! $name: app $an has $b bindings to its redis"; bad=$((bad+1));; esac
 done < <(awk -F'\t' 'NR>1 {print $1 "\t" $3 "\t" $4 "\t" $9 "\t" $8}' "$PLAN")
 say "   $napp app-service pairs checked, $bad problem(s)"
 [ $bad = 0 ] || { say "!! not in the expected state -- nothing deleted. Fix the lines above (usually: rollback that service again), then re-run"; exit 1; }
@@ -73,7 +75,7 @@ for vk in $vks; do
   j=$(cfget "/v3/service_instances/$vk") || { say "!! $vk: $CF_ERR"; exit 1; }
   vn=$(printf '%s' "$j" | jq -r .name); st=$(printf '%s' "$j" | jq -r '.last_operation | "\(.type) \(.state)"')
   case "$vn" in *-valkey-staged) ;; *) say "!! $vk is named '$vn', not a staged name -- is it still cut over? refused (rollback that service, then re-run)"; refuse=$((refuse+1)); continue;; esac
-  nb=$(nbind "$vk"); [ "$nb" = 0 ] || { say "!! $vn ($vk) still has ${nb} binding(s)/key(s) -- refused"; refuse=$((refuse+1)); continue; }
+  nb=$(nbind "$vk"); case "$nb" in 0) ;; ERR) say "!! $vn ($vk): cannot list its bindings (API error) -- refused"; refuse=$((refuse+1)); continue;; *) say "!! $vn ($vk) still has ${nb} binding(s)/key(s) -- refused"; refuse=$((refuse+1)); continue;; esac
   say "   $vn ($vk): $st, no bindings -> delete"; todo="$todo $vk"
 done
 say "   $(echo $todo | wc -w | tr -d ' ') to delete, $gone already gone, $refuse refused"
