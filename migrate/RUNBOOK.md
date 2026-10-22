@@ -48,6 +48,11 @@ printf 'BOSH_CMD="genesis @<env> b"\n' > runs/<env>/bosh.conf
 export MIGRATE_OP=<name>
 ```
 
+If the first command answers `invalid option name set: pipefail` or `syntax error near unexpected
+token '$'{\r''`, the files arrived with Windows line endings (a copy through a Windows machine or a
+browser). Once: `sed -i 's/\r$//' migrate/*.sh migrate/example/*.sh migrate/test/*` — then
+`bash -n migrate/migrate.sh` prints nothing. Hand the bundle over as the tarball, not as single files.
+
 Rules for the genesis BOSH wrapper, learned in SBX: **run `genesis @<env> b env` once in the
 terminal before `provision-check`** (it stores the vault session; the tool captures output and
 cannot answer the login prompt). **Never pipe `genesis … b …` output to `head`** — redirect to a
