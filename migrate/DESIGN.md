@@ -5,6 +5,8 @@ a nervous app team on the call is that the operator **always knows where every s
 **can stop at any moment without leaving anything half-done**, and **can go backwards**. This
 document defines that layer. Implementation: one bash script (`migrate.sh`, subcommands, same
 shape as the discovery tool), `jq`, and plain files — no daemon, no database, no new UI.
+The operator's step-by-step instructions (scan → plan → provision → provision-check → preflight →
+apply, FAIL → action tables) are in [RUNBOOK.md](RUNBOOK.md); this document is the why.
 
 ---
 

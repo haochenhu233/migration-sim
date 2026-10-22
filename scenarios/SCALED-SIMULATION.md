@@ -10,6 +10,9 @@ plans steered to z3 with raised `limit`; blacksmith redeployed; probe landed in 
 verified against the broker's Vault.
 
 All commands run on the bastion in `~/ocfp/migration-sim` unless the line says otherwise.
+The environment-independent instructions (what each step checks, what to do on each FAIL, the
+daily `provision-check`, the resume rule after a day-of create) are in `migrate/RUNBOOK.md`;
+this file holds the SBX values and the rehearsal's measurements.
 The bastion logs idle sessions out: run anything longer than a few minutes inside `tmux`
 (`tmux new -s sim` … `tmux attach -t sim`), so `provision` and `apply` survive the disconnect.
 
