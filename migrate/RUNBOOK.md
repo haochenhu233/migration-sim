@@ -230,6 +230,16 @@ A WARN never blocks. A service **without a Valkey** yet gives a WARN ("apply cre
 
 One terminal per lane, each in `tmux`; a lane is a range of waves run back-to-back.
 
+First, in each lane's window, renew the vault session and prove the name-sync wrapper works —
+genesis's session from the day before has expired by now, and the wrapper cannot ask for a login
+while the tool captures its output (SBX 2026-10-22: all 40 name-syncs of a pass failed that way,
+the cutover itself unaffected):
+
+```bash
+genesis @<env> b env > /dev/null
+bash runs/<env>/safe-run.sh "safe get secret/<a redis guid of the wave>:instance_name"   # must print its name
+```
+
 ```bash
 # lane A                                                        # lane B (another terminal)
 time bash migrate/migrate.sh apply --waves 1-3 --run runs/<env>  time bash migrate/migrate.sh apply --waves 4-6 --run runs/<env>

@@ -352,6 +352,16 @@ plus a review document for the client, built from the binding graph:
 
 ## Log
 
+- 2026-10-22 — **Second SBX pass, apply: 136 of 136 verified, 20 of 20, every wave 100 %; all 40
+  name-syncs failed** with genesis's `[FATAL] Could not successfully authenticate` captured in the ledger
+  note: the vault session renewed for the provision-check the day before had expired, and `safe-run.sh`
+  (`genesis … bosh --connect`) cannot prompt while the tool captures its output. Cosmetic by design (CF
+  names right, apps verified); repair = renew (`g32 @sbx-us b env`), prove the wrapper on one guid, then
+  `name-sync --waves 1-6`. Runbook §7 now starts with that renewal. **Open for the tool (after this
+  pass):** a preflight WARN that reads one instance name back through `SAFE_RUN` — would have shown this
+  before the first rename instead of after 40 failures. Pitfall seen while diagnosing: the ledger note
+  stores genesis's coloured output, so `jq` printing a note looks like a live vault error; it is not.
+
 - 2026-10-22 — **Ctrl-C at the `type yes` question never ended it (SBX, first apply of the second pass).**
   `apply` installs its flag trap before the question; bash runs the handler on a trapped SIGINT and then
   *restarts* a terminal `read`, so each Ctrl-C printed the trap line and the question went on (typing `no`
