@@ -2,9 +2,10 @@
 
 The instructions for one foundation, from the discovery scan to the cutover. Every command is
 run on the bastion of that foundation, in `~/ocfp/migration-sim`, with `<env>` the genesis
-environment name (SBX: `sbx-us`, run dir `runs/sbx`). The SBX-specific values (network name,
-cloud-config name, populations) are in `scenarios/SCALED-SIMULATION.md`; the reasons behind
-every step are in `DESIGN.md`.
+environment name (SBX: `sbx-us`, run dir `runs/sbx`). The values that differ per foundation
+(services network name, cloud-config name, the `--services` pattern) are written down once per
+foundation in `runs/<env>/README` by whoever runs it first; the reasons behind every step are
+in `DESIGN.md`.
 
 Two files decide everything: **`runs/<env>/waves.tsv`** is the plan (what to migrate, in which
 wave) and **`runs/<env>/ledger.jsonl`** is the record (what happened). Every command reads the
@@ -301,8 +302,14 @@ health endpoint). The silent services' STOPPED apps stay STOPPED — they pick t
 the team starts them.
 
 Paste out per lane: the `time`, the `TOTAL` line of `status`, the `attention:` block if any
-(guids, no names), and the three numbers lines from `scenarios/SCALED-SIMULATION.md` §8
-(create ms min/median/max, verified count).
+(guids, no names), and the numbers lines below (none has a name in it):
+
+```bash
+bash migrate/migrate.sh status --run runs/<env> > runs/<env>/summary.txt
+jq -r 'select(.step=="create-valkey" and .outcome=="ok") | .ms' runs/<env>/ledger.jsonl | sort -n | awk '{a[NR]=$1} END {print "create ms: min", a[1], "median", a[int(NR/2)+1], "max", a[NR]}'
+jq -r 'select(.step=="verify" and .outcome=="ok") | .ms' runs/<env>/ledger.jsonl | wc -l          # apps verified
+jq -r 'select(.step=="name-sync") | .ms' runs/<env>/ledger.jsonl | sort -n | tail -1              # slowest name-sync, ms
+```
 
 ---
 
