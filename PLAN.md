@@ -352,6 +352,22 @@ plus a review document for the client, built from the binding graph:
 
 ## Log
 
+- 2026-10-22 — **Ctrl-C at the `type yes` question never ended it (SBX, first apply of the second pass).**
+  `apply` installs its flag trap before the question; bash runs the handler on a trapped SIGINT and then
+  *restarts* a terminal `read`, so each Ctrl-C printed the trap line and the question went on (typing `no`
+  ends it). Fix: the four questions (apply, provision, rollback's `confirm_or_die`, copy-data `done/skip`)
+  read through `a=$(ask)` — a `$(...)` subshell resets trapped signals to default, so Ctrl-C ends the read
+  (rc 130, empty answer = no); the main shell's trap runs once afterwards and sets the flag (at the copy-data
+  question that halts the wave at its next boundary, as any Ctrl-C). Verified in a python pty on bash 5.3 and
+  3.2 (Ctrl-C, slow typing across a pause, `no`, idle then `yes`). Harness Q11 took three versions to bite:
+  a pty whose input is at EOF answers every read at once (both old and new code "not confirmed" without any
+  signal); an async job (`&`) of a non-interactive bash has SIGINT ignored and a shell entering with it ignored
+  cannot trap it (nothing reacted); the final case runs apply in the harness foreground under its own
+  `script(1)` pty fed by `<(sleep 30)`, signals by anchored `pkill -f` (main shell + subshell, not the pty
+  wrapper), watchdog at 12 s. New code: 81 of 81 (Q11 in 3 s); old code: Q11 FAIL at 12 s with the exact SBX
+  transcript. The bastion keeps the old copy for this pass (`no` + Enter cancels; after a Ctrl-C at the
+  question type `no`, not `yes` — the flag would halt the wave at its first step).
+
 - 2026-10-22 — **Second SBX pass, provision measured (20 of 20 staged, PROVISION-CHECK OK).** Plan
   from a fresh scan with `--services '^(scla|sclb)-redis-' --wave-size 4 --max-apps 40`: 20 services,
   120 apps, 136 connections, 16 multi-bound, 2 silent, 6 waves — identical to the first pass. One

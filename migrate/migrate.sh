@@ -558,6 +558,13 @@ say(){ printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 # have_tty: an operator can answer a prompt. Tested on /dev/tty, not fd 0, because prompts also
 # sit inside `while read ... done < <(...)` loops where fd 0 is the loop's input.
 have_tty(){ { : </dev/tty; } 2>/dev/null; }
+# ask: one line typed at the terminal, on stdout -- ALWAYS called as a=$(ask), never bare. The $(...) subshell is the
+# point: a subshell resets trapped signals to their default, so Ctrl-C ends the question (rc 130, empty answer),
+# whereas in the main shell with apply's flag trap installed bash restarts a terminal read after the handler --
+# one trap line per Ctrl-C and the question never ended (SBX 2026-10-22). The caller reads any answer but the
+# expected word as "no"; the main shell's trap still runs once the subshell is gone and sets STOP_REQ, so a
+# Ctrl-C at the copy-data question also halts the wave at its next step boundary, like any Ctrl-C.
+ask(){ local a; read -r a </dev/tty || return 1; printf '%s' "$a"; }
 # cf invocations ignore SIGINT so that Ctrl-C never kills a request mid-flight: the trap in
 # apply only sets a flag, and the step that is running completes and is recorded.
 cfx(){ ( trap '' INT; exec $TMO "$CF" curl "$@" ); }
@@ -826,7 +833,7 @@ apply_wave(){
     echo "preflight: PASS ($(printf '%s\n' "$pf" | grep -c '^WARN') warning(s), $RUN/preflight-wave-$WAVE.log)"
   else ledger_add "$WAVE" "" "" preflight-override ok 0 "--force by $OP"; fi
   if [ -z "${YES:-}" ]; then
-    if have_tty; then printf 'Execute wave %s now? type yes: ' "$WAVE"; read -r a </dev/tty; [ "$a" = yes ] || { echo "not confirmed"; return 1; }
+    if have_tty; then printf 'Execute wave %s now? type yes: ' "$WAVE"; a=$(ask); [ "$a" = yes ] || { echo "not confirmed"; return 1; }
     else echo "!! not a terminal and no --yes: refusing"; return 1; fi
   fi
   wave_lock "$WAVE" || return 1
@@ -849,7 +856,7 @@ provision_wave(){
   echo "PROVISION wave $WAVE: $nsvc service(s) -> Valkeys created now as <name>-valkey-staged; Redis and apps untouched  run=$RUN  operator=$OP"
   local info; info=$(cfcurl "/v3/info"); cf_json_ok "$info" || { echo "!! cf curl /v3/info failed -- not logged in?"; return 1; }
   if [ -z "${YES:-}" ]; then
-    if have_tty; then printf 'Provision wave %s now? type yes: ' "$WAVE"; read -r a </dev/tty; [ "$a" = yes ] || { echo "not confirmed"; return 1; }
+    if have_tty; then printf 'Provision wave %s now? type yes: ' "$WAVE"; a=$(ask); [ "$a" = yes ] || { echo "not confirmed"; return 1; }
     else echo "!! not a terminal and no --yes: refusing"; return 1; fi
   fi
   wave_lock "$WAVE" || return 1
@@ -1258,7 +1265,7 @@ apply_services(){
       else ledger_add "$WAVE" "$sg" "" copy-data fail $(( ($(date +%s)-t0)*1000 )) "hook exit $? (see copy-data-$WAVE.log)"; SKIP[$sg]=1; say "!! $name: copy-data hook failed -- skipped"; fi
     elif have_tty; then   # NOT -t 0: this loop's stdin is the process substitution below
       echo "   $name: DATA COPY needed: ${name}-redis-standby ($sg) -> $name (${VK[$sg]}) -- SESSION-COMMANDS 8c (replication / MIGRATE / DUMP-RESTORE)"
-      printf '   type done when the copy is complete, skip to leave the service for later: '; read -r a </dev/tty
+      printf '   type done when the copy is complete, skip to leave the service for later: '; a=$(ask)
       if [ "$a" = done ]; then ledger_add "$WAVE" "$sg" "" copy-data ok $(( ($(date +%s)-t0)*1000 )) "manual, confirmed by $OP"
       else ledger_add "$WAVE" "$sg" "" copy-data blocked 0 "operator deferred"; SKIP[$sg]=1; fi
     else ledger_add "$WAVE" "$sg" "" copy-data blocked 0 "no copy-data.sh hook and no terminal"; SKIP[$sg]=1; say "!! $name: copy-data needs a hook or a terminal -- skipped"; fi
@@ -1382,7 +1389,7 @@ svc_select(){
 confirm_or_die(){ # confirm_or_die <prompt> <expected>
   [ -n "${YES:-}" ] && return 0
   have_tty || { echo "!! not a terminal and no --yes: refusing"; return 1; }
-  local a; printf '%s' "$1"; read -r a </dev/tty; [ "$a" = "$2" ] || { echo "not confirmed"; return 1; }
+  local a; printf '%s' "$1"; a=$(ask); [ "$a" = "$2" ] || { echo "not confirmed"; return 1; }
 }
 
 cmd_rollback(){

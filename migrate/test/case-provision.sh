@@ -186,4 +186,26 @@ else pass "Q8/Q9 skipped: no timeout(1) with --foreground on this box (macOS) --
 BOSHFAKE_NOAUTH=1 bash "$M" provision-check --wave 1 --run "$R" > "$R/pc10.log" 2>&1; rc=$?
 check "Q10 no valid vault session (genesis cannot prompt, stdout captured) -> said with the remedy, not the method list; every service API-ERROR, FAIL" "[ $rc = 1 ] && grep -q \"no valid vault session, and genesis cannot ask for the login while its output is captured -- run '.*bosh-fake env' once in this shell\" '$R/pc10.log' && ! grep -q 'VAULT_GITHUB_TOKEN' '$R/pc10.log' && [ $(grep -c '^API-ERROR wave 1 ' "$R/pc10.log") = 4 ]"
 
+# Q11: Ctrl-C at the "type yes" question. The question is read in a $(ask) subshell where SIGINT is back at its
+# default, so Ctrl-C -- which the terminal sends to the whole foreground group: main shell AND subshell -- ends
+# it; the main shell's flag trap is deferred while it waits for the subshell and runs once after. With the read
+# in the main shell (before 2026-10-22) the trap ran and bash restarted the read: a line per Ctrl-C, never an end.
+# Three things this case had to get right (each hid the bug on the old code in a first version): apply gets its
+# own pty (script(1), util-linux `-c` or BSD form) whose input is held open -- a pty at EOF answers every read at
+# once, question over, no Ctrl-C needed; apply runs in the harness's FOREGROUND -- an async job (`&`) of a
+# non-interactive bash has SIGINT ignored, and a shell that enters with it ignored cannot trap it, so nothing
+# would react; the signal goes by command line (pkill -f, anchored so the pty wrapper is not hit) to every
+# process that IS this apply: main shell and its $(ask) subshell, as the terminal would. A watchdog ends an
+# unanswered question by force so the old behaviour shows as "took 12 s" instead of hanging the suite.
+bash "$M" provision-check --wave 1 --run "$R" > "$R/pc11.log" 2>&1                       # a fresh OK line (Q10 left API-ERRORs)
+pat="^bash [^ ]*migrate.sh apply --wave 1 --run $R\$"
+( for _ in $(seq 1 50); do grep -q 'type yes' "$R/int.log" 2>/dev/null && break; sleep 0.2; done; sleep 0.3; pkill -INT -f "$pat" ) &
+( sleep 12; pkill -9 -f "$pat" ) & wd=$!
+t0=$(date +%s)
+if script -q -c true /dev/null >/dev/null 2>&1; then script -q -c "bash $M apply --wave 1 --run $R" /dev/null < <(sleep 30) > "$R/int.log" 2>&1
+else script -q /dev/null bash "$M" apply --wave 1 --run "$R" < <(sleep 30) > "$R/int.log" 2>&1; fi
+dt=$(( $(date +%s)-t0 )); kill $wd 2>/dev/null; wait 2>/dev/null
+check "Q11 Ctrl-C at 'Execute wave 1 now? type yes:' (SIGINT to main shell + question subshell, own pty, input held open) ends it: not confirmed within 10 s (took ${dt}s), no wave-start in the ledger, no lock left" \
+  "[ $dt -lt 10 ] && grep -q 'type yes: ' '$R/int.log' && grep -q 'not confirmed' '$R/int.log' && ! grep -q '\"step\":\"wave-start\"' '$R/ledger.jsonl' && [ ! -s '$R/wave-1.lock' ]"
+
 echo; [ "$fails" = 0 ] && echo "ALL PASS (workdir $W)" || { echo "$fails FAIL (workdir $W)"; exit 1; }

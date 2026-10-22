@@ -251,7 +251,7 @@ bash migrate/migrate.sh status --wave 1 --run runs/<env>
 
 Stopping: `touch runs/<env>/STOP` halts every lane at its next step boundary (issued creates
 are still waited for; a service given up on gets its names back). Ctrl-C finishes the current
-step, records it and exits. **Do not kill the terminal** — a kill between a CF call and its
+step, records it and exits; at a question (`type yes`, `done`/`skip`) Ctrl-C answers no. **Do not kill the terminal** — a kill between a CF call and its
 ledger line is the one thing the tool cannot record; the next `apply` finds the state in CF
 (a binding `in progress` is waited for, a failed one deleted, a Redis already renamed is
 recorded) but slower.
