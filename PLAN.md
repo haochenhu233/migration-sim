@@ -352,6 +352,19 @@ plus a review document for the client, built from the binding graph:
 
 ## Log
 
+- 2026-10-22 — **Second SBX pass, provision measured (20 of 20 staged, PROVISION-CHECK OK).** Plan
+  from a fresh scan with `--services '^(scla|sclb)-redis-' --wave-size 4 --max-apps 40`: 20 services,
+  120 apps, 136 connections, 16 multi-bound, 2 silent, 6 waves — identical to the first pass. One
+  `provision --waves 1-6` process, prompts answered by hand: 38 min wall-clock of which ~18 min were
+  prompt waits (`--yes` next time). Per-wave timestamps (`provision ok` events): a 4-service wave =
+  **3 min 32 s**, a 3-service wave = 3 min 31 s → ~20 min of real work for 20 Valkeys. Create (POST →
+  succeeded) min 67 s / median 191 s / max 204 s, n 20: four concurrent builds finished in one build's
+  time (no director queuing at 4). Broker accept spacing 5 s (17) / 6 s (3). **NP (274 services,
+  waves of 10, `--yes`):** issuing 274 × 5.5 s ≈ 25 min total; wall-clock ≈ 2 h if the director overlaps
+  10 builds, ≈ 4.7 h if it caps at 4 — read the first NP wave's create median (≈200 s = overlapping;
+  400–600 s = queuing) and check the NP director's `workers` beforehand. Provision runs in ONE process
+  by design: the one-create-at-a-time rule (`svc_create_accept`) watches only its own last POST.
+
 - 2026-10-06 — **RETRACTED** the "async deprovision: deleted in CF ≠ gone" finding: it was inferred, never observed. Real cause: `reset-population.sh` never deleted the Valkeys (invalid `service_offering_names` filter on /v3/service_instances → error document read as an empty list). Script fixed (offering from `cf services`, hard stop if Valkeys remain). `retire` still censuses the standby before deleting — as plain prudence, not because of this.
 
 - 2026-10-02 — `preflight` + `dry-run` built, offline-tested against a stub cf (ledger/CF reconciliation, collisions, plan visibility, half-down app and hazard env → FAIL). Next: run both against the SBX population, then `apply`.
