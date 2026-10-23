@@ -17,7 +17,7 @@ does not repeat.
 | when | step | section |
 |---|---|---|
 | Thursday + Friday, twice a day | discovery scan, merge | 2 |
-| Friday | `plan` from the freshest report, review, `provision`, `provision-check` | 3, 4, 5 |
+| Friday | `plan` from the freshest report, review, `name-check --fix`, `provision`, `provision-check` | 3, 4, 5 |
 | Saturday, Sunday morning | `provision-check` again (the Valkeys are still real) | 5 |
 | Sunday | `preflight`, `dry-run`, `apply` per lane; `status` in another terminal | 6, 7, 8 |
 | after | `name-sync` to 0, hand checks, numbers; `confirm` / `retire` weeks later | 9 |
@@ -114,6 +114,24 @@ Output: `waves.tsv` (the plan, names inside — stays in the env), `components.t
 Review `waves.tsv` by eye: a service that spans several teams needs a joint window; a
 `hazard` flag means a bound app also hardcodes the address (the team fixes the env var before
 its wave). The `wave` column can be edited by hand before `provision`.
+
+### 3b. Blacksmith's copy of the names — `name-check --fix`
+
+Instances imported from the old broker (lab, 2026-10-22) have **no `instance_name`** in their
+Blacksmith Vault root: no name in the broker UI, and `apply`'s name-sync would refuse them.
+Once after `plan`, with the vault session fresh (`vault.conf` as in section 2):
+
+```bash
+bash migrate/migrate.sh name-check --fix --run runs/<env>          # every wave; or --waves A-B
+```
+
+One `safe` call per wave (≈ 30 s), one more for the seeds. Per service: `in sync`, `UNSET` (root
+present, key missing → `--fix` writes the CF name and reads it back), `NO ROOT` (never written:
+not this broker's instance, or `SAFE_RUN` reaches the wrong Vault — if **every** service says so,
+fix `vault.conf`), `MISMATCH` (the broker holds another name — never written; look by hand).
+A dead vault session is reported as such and nothing is recorded. `preflight` WARNs on anything
+not in sync and on waves never checked; it does not block. Without `name-check`, `apply` still
+seeds an unset root with the standby name.
 
 If a ledger from an earlier plan is in the run dir, move it aside first
 (`mv runs/<env>/ledger.jsonl runs/<env>/ledger-<date>.jsonl`): the new plan's GUIDs differ and

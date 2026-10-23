@@ -285,4 +285,45 @@ check "W3 apply: app-22 refused with 'HALF-MIGRATED' (drift fail), not 'nothing 
   "[ $rc = 0 ] && [ $(nev drift fail ".app==\"$A22\" and (.note|test(\"HALF-MIGRATED\"))") = 1 ] && [ $(nev drift fail ".app==\"$A22\" and (.note|test(\"nothing changed\"))") = 0 ] && [ $(restarts $A22) = 0 ] && [ $(nev verify ok) = 3 ]"
 unset RESTART_TIMEOUT CFFAKE_INSTANCES CFFAKE_BROKEN
 
+echo "== X: name-check -- roots with no instance_name (client lab 2026-10-22), an absent root, a mismatch, a dead vault session"
+newrun X; X=($(awk -F'\t' 'NR>1 && $1==1 && !s[$4]++ {print $4}' "$R/waves.tsv")); XN=($(awk -F'\t' 'NR>1 && $1==1 && !s[$4]++ {print $3}' "$R/waves.tsv"))
+: > "$R/safe/${X[1]}"; rm -f "$R/safe/${X[2]}"; echo other-name > "$R/safe/${X[3]}"   # unset, absent, mismatch; X[0] in sync
+bash "$M" name-check --wave 1 --run "$R" > "$R/nc1.log" 2>&1; rc=$?
+check "X1 name-check (no --fix): exit 1; 1 ok + 3 fail lines (unset / absent / mismatch), summary '1 in sync, 1 unset (0 seeded), 1 mismatch, 1 absent, 0 unanswered'; nothing written" \
+  "[ $rc = 1 ] && [ $(nev name-check ok) = 1 ] && [ $(nev name-check fail "(.note|test(\"unset in Blacksmith\"))") = 1 ] && [ $(nev name-check fail "(.note|test(\"no secret at\"))") = 1 ] && [ $(nev name-check fail "(.note|test(\"MISMATCH: broker holds 'other-name'\"))") = 1 ] && grep -q 'name-check wave 1: 4 services -- 1 in sync, 1 unset (0 seeded), 1 mismatch, 1 absent, 0 unanswered' '$R/nc1.log' && [ -z \"\$(cat "$R/safe/${X[1]}")\" ] && [ ! -f "$R/safe/${X[2]}" ] && [ \"\$(cat "$R/safe/${X[3]}")\" = other-name ]"
+bash "$M" name-check --fix --wave 1 --run "$R" > "$R/nc2.log" 2>&1; rc=$?
+check "X2 name-check --fix: the unset root is seeded with the CF name and read back; the absent root is NOT created; the mismatch untouched; exit 1 (2 still failing)" \
+  "[ $rc = 1 ] && [ $(nev name-check ok "(.note|test(\"was unset; seeded, read back\"))") = 1 ] && [ \"\$(cat "$R/safe/${X[1]}")\" = \"${XN[1]}\" ] && [ ! -f "$R/safe/${X[2]}" ] && [ \"\$(cat "$R/safe/${X[3]}")\" = other-name ] && grep -q '1 unset (1 seeded), 1 mismatch, 1 absent' '$R/nc2.log'"
+bash "$M" preflight --wave 1 --run "$R" > "$R/pf-x.log" 2>&1
+check "X3 preflight after it: WARN for the absent and the mismatched service (reason from the ledger), no 'never checked', verdict still OK" \
+  "grep -q '^PREFLIGHT: OK' '$R/pf-x.log' && [ $(grep -c '^WARN  service .*Blacksmith.s copy of the name' "$R/pf-x.log") = 2 ] && grep -q 'MISMATCH' '$R/pf-x.log' && ! grep -q 'never checked\|none of the' '$R/pf-x.log'"
+nbefore=$(nev name-check ok); nbefore=$((nbefore + $(nev name-check fail)))
+SAFEFAKE_ERR='403 permission denied' bash "$M" name-check --fix --wave 1 --run "$R" > "$R/nc3.log" 2>&1; rc=$?
+check "X4 vault session dead (every answer an error): exit 1, 'nothing recorded', no new ledger line, the error text shown" \
+  "[ $rc = 1 ] && grep -q 'nothing recorded' '$R/nc3.log' && grep -q '403 permission denied' '$R/nc3.log' && [ $(( $(nev name-check ok) + $(nev name-check fail) )) = $nbefore ]"
+bash "$M" name-check --fix --wave 1 --run "$R" > "$R/nc4.log" 2>&1; rc=$?
+check "X5 re-run: idempotent -- 2 in sync (the seeded one included), 0 seeded, the same 2 failures" "[ $rc = 1 ] && grep -q 'name-check wave 1: 4 services -- 2 in sync, 0 unset (0 seeded), 1 mismatch, 1 absent, 0 unanswered' '$R/nc4.log'"
+newrun X6; : > "$R/safe/${X[1]}"; rm -f "$R/safe/${X[2]}"
+bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply-x.log" 2>&1; rc=$?
+check "X6 apply with no name-check: name-sync seeds the unset root with the standby name ('was (unset)'); the absent root still fails the pre-check, nothing written" \
+  "[ $rc = 0 ] && [ $(nev name-sync ok ".service==\"${X[1]}\" and (.note|test(\"was '\\\\(unset\\\\)'; read back\"))") = 1 ] && [ \"\$(cat "$R/safe/${X[1]}")\" = \"${XN[1]}-redis-standby\" ] && [ $(nev name-sync fail ".service==\"${X[2]}\" and (.note|test(\"pre-check\"))") = 1 ] && [ ! -f "$R/safe/${X[2]}" ]"
+newrun X7; bash "$M" preflight --wave 1 --run "$R" > "$R/pf-x7.log" 2>&1
+check "X7 preflight on a run never name-checked: one WARN 'none of the 4 services checked', verdict OK" "grep -q '^PREFLIGHT: OK' '$R/pf-x7.log' && grep -q 'WARN  name-check: none of the 4 services checked' '$R/pf-x7.log'"
+echo "== X8-X11: review 2026-10-23 -- name-check after the rename, the VM shell failing, the seed call dying, a lost set"
+R="$W/X6"; export CFFAKE_STATE="$R/cf.json" SAFEFAKE_STATE="$R/safe"   # X6: wave 1 applied (rename-standby ok), X[1] seeded by name_sync, X[2] absent
+bash "$M" name-check --wave 1 --run "$R" > "$R/nc8.log" 2>&1; rc=$?
+check "X8 name-check after apply: the expected name is the STANDBY one (ledger), so 3 in sync (notes carry '-redis-standby (in sync)'), the absent one still absent, no MISMATCH" \
+  "[ $rc = 1 ] && grep -q 'name-check wave 1: 4 services -- 3 in sync, 0 unset (0 seeded), 0 mismatch, 1 absent, 0 unanswered' '$R/nc8.log' && [ $(nev name-check ok ".service==\"${X[1]}\" and (.note|test(\"-redis-standby \\\\(in sync\\\\)\"))") = 1 ] && ! grep -q MISMATCH '$R/nc8.log'"
+R="$W/X"; export CFFAKE_STATE="$R/cf.json" SAFEFAKE_STATE="$R/safe"; nbefore=$(( $(nev name-check ok) + $(nev name-check fail) ))
+SAFEFAKE_RAW='bash: safe: command not found' bash "$M" name-check --fix --wave 1 --run "$R" > "$R/nc9.log" 2>&1; rc=$?
+check "X9 the VM shell fails identically per service (PATH without safe): a session problem -- exit 1, nothing recorded, never a MISMATCH" \
+  "[ $rc = 1 ] && grep -q 'nothing recorded' '$R/nc9.log' && [ $(( $(nev name-check ok) + $(nev name-check fail) )) = $nbefore ] && ! grep -q MISMATCH '$R/nc9.log'"
+newrun X10; : > "$R/safe/${X[1]}"
+SAFEFAKE_DEAD_ON=set bash "$M" name-check --fix --wave 1 --run "$R" > "$R/nc10.log" 2>&1; rc=$?
+check "X10 the seed call dies before bosh ssh: said as 'returned no answer', the service recorded fail 'seed call returned no answer' (never 'seeded'), root still unset, exit 1" \
+  "[ $rc = 1 ] && grep -q 'set+read-back call returned no answer' '$R/nc10.log' && [ $(nev name-check fail ".service==\"${X[1]}\" and (.note|test(\"seed call returned no answer\"))") = 1 ] && [ $(nev name-check ok ".service==\"${X[1]}\"") = 0 ] && [ -z \"\$(cat "$R/safe/${X[1]}")\" ] && grep -q '1 unset (0 seeded)' '$R/nc10.log'"
+SAFEFAKE_FAIL=${X[1]} bash "$M" name-check --fix --wave 1 --run "$R" > "$R/nc11.log" 2>&1; rc=$?
+check "X11 the set is lost on the broker (read-back still 'no key'): fail 'set issued but the read-back did not return it (unset)', exit 1" \
+  "[ $rc = 1 ] && [ $(nev name-check fail ".service==\"${X[1]}\" and (.note|test(\"read-back did not return it \\\\(unset\\\\)\"))") = 1 ] && grep -q '1 unset (0 seeded)' '$R/nc11.log'"
+
 echo; [ "$fails" = 0 ] && echo "ALL PASS (workdir $W)" || { echo "$fails FAIL (workdir $W)"; exit 1; }

@@ -175,6 +175,7 @@ has a factual answer.
 | `confirm --service Y --by <team>` | app-team sign-off; starts the standby clock |
 | `retire --service Y` | **before deleting: re-run the connection census on the standby Redis — refuse if anyone is still connected** (catches copied-credential apps that were never updated) · then: after the client's full confirmation, ~1–2 weeks post-cutover (standby grace default **14 days**); refuses before `confirm` + grace; asks twice; the only irreversible step |
 | `name-sync --wave N` / `--waves A-B` | re-reads Blacksmith's copy of every renamed instance's name (§6d) through `SAFE_RUN` and sets the ones that differ — the "check after one reconciler cycle" step; `status` shows `name-sync pending: N` until it is 0 |
+| `name-check [--fix] [--wave N \| --waves A-B]` (default all waves) | **before the migration** (client lab 2026-10-22: instances imported from the old broker have no `instance_name` in their Blacksmith root): one `SAFE_RUN` call per wave reads every wave service's `secret/<guid>:instance_name`, each answer keyed by the full guid on one line (`… 2>&1 \| sed 's/^/NC <guid> /'`), so an expired token can never read as "all unset". The expected value follows the ledger: the plan name, or `<name>-redis-standby` once `rename-standby` is ok (a weekly re-check after wave 1 must not call every migrated service a mismatch, nor seed the stale name — review 2026-10-23). Per service `in sync` / `unset` (root present, key missing — `--fix` seeds the expected name in one more call and reads it back; a seed call that returns nothing keyed is recorded as such, never as "seeded") / `absent` (no root: wrong Vault or not this broker's — never written, `safe set` would create it) / `mismatch` (never written, reported). Recorded as `name-check ok\|fail` (service-level, cosmetic like name-sync — never a phase); `preflight` WARNs on fails and on services never checked, never FAILs. No keyed answer at all, every answer an error (safe's `!!`, or the VM shell's `bash:`/`sudo:`/`command not found`), or every answer the same non-name text ⇒ nothing recorded, exit 1 |
 | `report --wave N` | evidence pack from the ledger (markdown): per app switched/verified/downtime, timeline, incidents, rollbacks, operators |
 
 ## 4a. Execution model — inside a wave, and lanes across waves
@@ -304,6 +305,12 @@ Rule: **the tool writes that copy itself** after every rename (`rename-standby` 
 - the reconciler preserves an existing name but a set landing mid-cycle can be overwritten ⇒
   `name-sync --wave N` re-checks after one cycle. Long-term fix (backlog): implement
   `Broker.Update` + `allow_context_updates` in Blacksmith, then this step disappears.
+- **Unset root (2026-10-22):** a root that exists but has no `instance_name` (`!! no key
+  `instance_name` exists in secret …`, seen live in SBX; instances imported from the old broker
+  in the client lab) passes the pre-check as `(unset)` and is seeded with the new name — the UI
+  had no name to lose. A missing root (`!! no secret exists at path …`) still fails it: `safe set`
+  would create a secret in whatever Vault answered. `name-check --fix` (command table) seeds the
+  CF name before the migration so the UI shows it from then on.
 - Verified live in SBX (2026-10-18): `safe-run.sh "safe get secret/<guid>:instance_name"` returns
   `blacksmith/<uuid>: stdout | <name>` (plus `stderr |` banner lines), i.e. `sudo` works under
   `bosh ssh -c`, the broker's Vault answers on `http://127.0.0.1:8200`, and the output shape is

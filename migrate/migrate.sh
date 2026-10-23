@@ -3,14 +3,14 @@
 #     migrate.sh status [--wave N] [--run <dir>]      (dashboard; wrap in: watch -n 3 -c ...)
 # Run dir holds waves.tsv (the plan) + ledger.jsonl (what happened) + commands.log + lock + STOP,
 #   inventory.tsv (names/guids/state per app-Redis-Valkey line, for the client's review),
-#   vault.conf (optional: SAFE_RUN=... for name-sync), name-sync-wave-N.sh (the safe commands, always),
+#   vault.conf (optional: SAFE_RUN=... for name-sync / name-check), name-sync-wave-N.sh (the safe commands, always),
 #   bosh.conf (BOSH_CMD=... for provision-check's BOSH half, e.g. "genesis @sbx-us b"; or export BOSH_CMD).
 set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
-WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; SVCRE=""; ARG=""; WAVES=""; SVCF=""; YES=""; FORCE=""; NO_ROLLING=""
+WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; SVCRE=""; ARG=""; WAVES=""; SVCF=""; YES=""; FORCE=""; NO_ROLLING=""; FIX=""
 APPF=""; REASON=""; BY=""; GRACE="336h"; NO_CENSUS=""
-while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --waves) WAVES="$2"; shift 2;; --service) SVCF="$2"; shift 2;; --yes) YES=1; shift;; --force) FORCE=1; shift;; --no-rolling) NO_ROLLING=1; shift;; --no-bosh) NO_BOSH=1; shift;; --app) APPF="$2"; shift 2;; --reason) REASON="$2"; shift 2;; --by) BY="$2"; shift 2;; --grace) GRACE="$2"; shift 2;; --no-census) NO_CENSUS=1; shift;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
+while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --waves) WAVES="$2"; shift 2;; --service) SVCF="$2"; shift 2;; --yes) YES=1; shift;; --force) FORCE=1; shift;; --fix) FIX=1; shift;; --no-rolling) NO_ROLLING=1; shift;; --no-bosh) NO_BOSH=1; shift;; --app) APPF="$2"; shift 2;; --reason) REASON="$2"; shift 2;; --by) BY="$2"; shift 2;; --grace) GRACE="$2"; shift 2;; --no-census) NO_CENSUS=1; shift;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
 PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 
 
@@ -150,7 +150,7 @@ ledger_bad(){ [ -s "$LEDGER" ] || { echo 0; return; }; echo $(( $(grep -c . "$LE
 ledger_states(){
   [ -s "$LEDGER" ] || return 0
   ledger_lines | jq -rs --arg w "$WAVE" '
-    map(select(($w=="" or (.wave|tostring)==$w) and .step!="name-sync" and .outcome!="undone"))   # name-sync is cosmetic (Blacksmith UI), an undo line is bookkeeping: neither is a phase
+    map(select(($w=="" or (.wave|tostring)==$w) and .step!="name-sync" and .step!="name-check" and .outcome!="undone"))   # name-sync/name-check are cosmetic (Blacksmith UI), an undo line is bookkeeping: none is a phase
     | group_by([.service, .app]) | map(last)                      # last event per (service, app)
     | .[] | [ .service, .app,
               (if .outcome=="ok" then .step else (.step + ":" + .outcome) end),
@@ -161,7 +161,7 @@ ledger_states(){
                else "" end) ] | @tsv'
 }
 wave_started(){ [ -s "$LEDGER" ] || { echo "-"; return; }
-  ledger_lines | jq -r --arg w "$WAVE" 'select($w=="" or (.wave|tostring)==$w) | .ts' | sort | head -1 | cut -c12-19; }
+  ledger_lines | jq -r --arg w "$WAVE" 'select(($w=="" or (.wave|tostring)==$w) and .step!="name-check") | .ts' | sort | head -1 | cut -c12-19; }   # name-check runs days before the wave
 
 cmd_status(){
   [ -s "$PLAN" ] || { echo "no $PLAN -- run: migrate.sh plan <merged_report.csv>"; exit 1; }
@@ -440,6 +440,15 @@ cmd_preflight(){
     else fail "service $name: API error checking plan '$plan'"; fi
     case "$plan" in *secure*) warn "service $name: plan '$plan' looks like a SECURE (dynamic-credential) plan -- intended?";; esac
   done < <(printf '%s\n' "$rows" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
+  # 3b Blacksmith's copy of the names (name-check; ledger only -- no safe call here, nothing new can die before the verdict).
+  #    WARN, never FAIL: the broker's name is cosmetic, and apply's name-sync seeds an unset one with the standby name anyway.
+  local ncn=0 ncf=0 ncm=0 ncl
+  while IFS=$'\t' read -r sg name; do ncn=$((ncn+1)); ncl=$(namecheck_last "$sg")
+    case "$ncl" in "") ncm=$((ncm+1));; ok*) ;; *) ncf=$((ncf+1)); warn "service $name: Blacksmith's copy of the name: ${ncl#*	}";; esac
+  done < <(printf '%s\n' "$rows" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3}')
+  if [ "$ncm" = "$ncn" ]; then warn "name-check: none of the $ncn services checked in Blacksmith's Vault (run: name-check --fix --wave $WAVE; an unset name shows as no name in the broker UI -- not blocking)"
+  elif [ "$ncm" != 0 ]; then warn "name-check: $ncm of $ncn services never checked (run: name-check --fix --wave $WAVE)"
+  elif [ "$ncf" = 0 ]; then ok "name-check: all $ncn services' names present in Blacksmith's Vault"; fi
   # 4 per app
   while IFS=$'\t' read -r ag app aflags; do
     case ",$aflags," in *,no-binding:*) ok "app $app: no binding (${aflags##*no-binding:}) -- team action, tool will skip"; continue;; esac
@@ -710,6 +719,13 @@ safe_esc(){ printf '%s' "$1" | sed 's/[\\"$`]/\\&/g'; }
 safe_out_value(){ tr -d '\r' | sed 's/^[^|]*| //' | grep -xF -- "$1" | head -1; }   # bosh ssh -c prefixes lines with "<instance>: stdout | "
 SAFE_TIMEOUT="${SAFE_TIMEOUT:-180}"; if command -v timeout >/dev/null 2>&1; then TMOS="timeout $SAFE_TIMEOUT"; else TMOS=""; fi
 safe_x(){ ( trap '' INT; exec $TMOS $1 "$2" ) 2>&1; }   # safe_x <SAFE_RUN prefix> <remote command>: bounded, INT-shielded like cfx
+# the two shapes safe prints for a missing name (safe vault/errors.go; the first seen live in SBX 2026-10-22):
+#   root present, key missing -> "!! no key `instance_name` exists in secret `secret/<g>`"   (seedable)
+#   no root at all            -> "!! no secret exists at path `secret/<g>`"                   (wrong Vault / not this broker: never written -- safe set would CREATE it)
+safe_out_nokey(){ tr -d '\r' | sed 's/^[^|]*| //' | grep -qF 'no key `instance_name` exists in secret'; }
+# safe_keyed <tag> <guid>: the text of the line the tool keyed "<tag> <guid> <text>" (its "2>&1 | sed" suffix puts every
+#   answer, whatever stream safe wrote to, on one stdout line); prints "1<TAB><text>" (text may be empty), nothing when no such line
+safe_keyed(){ tr -d '\r' | sed 's/^[^|]*| //' | awk -v t="$1" -v g="$2" '$1==t && $2==g {print "1\t" substr($0, length($1)+length($2)+3); exit}'; }
 # name_sync <svc_guid> <instance_guid> <new name> <old name>: R_SYNC = insync | set | fail | skipped; 0 unless fail.
 #   Known-object check first (checklist row 20): the broker's copy must currently read <old name> (or already
 #   <new name>) -- otherwise SAFE_RUN reaches the wrong Vault, or the guid is not this broker's; nothing is written.
@@ -720,7 +736,8 @@ name_sync(){
   if ! sr=$(safe_run_cmd); then R_SYNC=skipped; ledger_add "$WAVE" "$sg" "" name-sync skipped 0 "$g instance_name=$n -- no SAFE_RUN in $RUN/vault.conf; run name-sync-wave-$WAVE.sh on the broker VM"; say "   name-sync skipped (${g:0:8}): no vault.conf -- queued in name-sync-wave-$WAVE.sh"; return 0; fi
   out=$(safe_x "$sr" "safe get secret/$g:instance_name"); cmdlog SAFE "get secret/$g instance_name" "$?"
   if [ -n "$(printf '%s\n' "$out" | safe_out_value "$n")" ]; then R_SYNC=insync; ledger_add "$WAVE" "$sg" "" name-sync ok $(( ($(date +%s)-t0)*1000 )) "$g instance_name=$n (already set)"; say "   name-sync: ${g:0:8} already '$n'"; return 0; fi
-  if [ -z "$(printf '%s\n' "$out" | safe_out_value "$old")" ]; then R_SYNC=fail; ledger_add "$WAVE" "$sg" "" name-sync fail $(( ($(date +%s)-t0)*1000 )) "$g instance_name=$n -- pre-check: the broker's copy is not '$old' (wrong Vault behind SAFE_RUN? not this broker's instance?) -- nothing written: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"; say "   !! name-sync (${g:0:8}): Blacksmith's copy is not '$old' -- nothing written; check SAFE_RUN"; return 1; fi
+  if printf '%s\n' "$out" | safe_out_nokey; then old="(unset)"   # root present, no instance_name (imported from the old broker; client lab 2026-10-22): seed it -- the UI shows no name until then
+  elif [ -z "$(printf '%s\n' "$out" | safe_out_value "$old")" ]; then R_SYNC=fail; ledger_add "$WAVE" "$sg" "" name-sync fail $(( ($(date +%s)-t0)*1000 )) "$g instance_name=$n -- pre-check: the broker's copy is not '$old' (wrong Vault behind SAFE_RUN? not this broker's instance?) -- nothing written: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"; say "   !! name-sync (${g:0:8}): Blacksmith's copy is not '$old' -- nothing written; check SAFE_RUN"; return 1; fi
   out=$(safe_x "$sr" "$cmd"); cmdlog SAFE "set secret/$g instance_name=$n" "$?"
   got=$(printf '%s\n' "$out" | safe_out_value "$n"); ms=$(( ($(date +%s)-t0)*1000 ))
   if [ -n "$got" ]; then R_SYNC=set; ledger_add "$WAVE" "$sg" "" name-sync ok "$ms" "$g instance_name=$n (was '$old'; read back)"; say "   name-sync ok (${g:0:8}: '$old' -> '$n')"; return 0
@@ -959,7 +976,7 @@ write_inventory(){
         rv:  ((map(select(.step=="rename-valkey"  and (.outcome=="ok" or .outcome=="undone"))) | last) as $x | $x != null and $x.outcome=="ok"),
         rvu: ((map(select(.step=="rename-valkey"  and (.outcome=="ok" or .outcome=="undone"))) | last) as $x | $x != null and $x.outcome=="undone"),
         cv:  (map(select(.step=="create-valkey")) | last),
-        lastev: (map(select(.step!="name-sync")) | last) }
+        lastev: (map(select(.step!="name-sync" and .step!="name-check")) | last) }
     | [ .s, (.ren|tostring), (.rv|tostring), (.rvu|tostring),
         (if .cv.outcome=="ok" then (.cv.note | [scan("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")][0] // "") else "" end),
         (if .cv.outcome=="ok" then (.cv.note | test("\\(staged") | tostring) else "false" end),
@@ -1164,6 +1181,82 @@ cmd_namesync(){
   done
   echo "name-sync: $insync in sync, $set set now, $failed failed; still pending: $(WAVE="" namesync_pending) -- status shows the footer until it is 0"
   [ "$failed" = 0 ]
+}
+
+# name-check [--fix] [--wave N | --waves A-B] (default: every wave in the plan): Blacksmith's copy of each wave
+#   service's name BEFORE the migration. Client lab 2026-10-22: instances imported from the old broker carry no
+#   instance_name in their Vault root -> no name in the broker UI, and name-sync's known-object pre-check refuses
+#   them. ONE SAFE_RUN call per wave (gets), one more for the seeds: every answer comes back on a line keyed by the
+#   full guid, whatever stream safe wrote to, so an expired token / dead wrapper can never read as "all unset".
+#   Per service: in sync | unset (root present, key missing; --fix seeds the CF name and reads it back) | absent
+#   (no root: wrong Vault or not this broker's instance -- never written) | mismatch (another name -- never
+#   written, reported) | unanswered. Recorded as name-check ok|fail (service-level, cosmetic like name-sync:
+#   never a phase); preflight WARNs on fails and on services never checked. Exit 1 when any service is not ok.
+nc_kind(){ # nc_kind <safe output> <guid> <expected name> -> "<kind>\t<text>": insync | unset | absent | mismatch | error | empty | none
+  local k t; k=$(printf '%s\n' "$1" | safe_keyed NC "$2"); [ -n "$k" ] || { printf 'none\t'; return; }; t="${k#1	}"
+  if [ "$t" = "$3" ]; then printf 'insync\t%s' "$t"
+  else case "$t" in
+    *'no key `instance_name` exists in secret'*) printf 'unset\t%s' "$t";;
+    *'no secret exists at path'*) printf 'absent\t%s' "$t";;
+    "") printf 'empty\t';;                         # an empty stored value? never seen live -- reported, not written (review 2026-10-23)
+    '!!'*|'bash:'*|'-bash:'*|'sh:'*|'sudo:'*|*': command not found'*|*'Permission denied'*) printf 'error\t%s' "$t";;   # safe's own errors, or the VM shell's (PATH without safe, sudo refused)
+    *) printf 'mismatch\t%s' "$t";; esac; fi; }
+# nc_expected <svc guid> <plan name> -> the name Blacksmith's copy must hold NOW: the plan name, or <name>-redis-standby once
+#   the ledger says the Redis was renamed (review 2026-10-23: a weekly name-check after wave 1 said MISMATCH on every
+#   migrated service, and --fix would have seeded the stale pre-rename name on a root left unset by a timed-out name-sync)
+nc_expected(){ if [ "$(ledger_last_rename "$1" rename-standby)" = ok ]; then printf '%s-redis-standby' "$2"; else printf '%s' "$2"; fi; }
+namecheck_last(){ [ -s "$LEDGER" ] || return 0   # namecheck_last <svc guid> -> "<outcome>\t<note without the leading guid>" of its last name-check line, "" when never checked
+  ledger_lines | jq -r --arg s "$1" 'select(.service==$s and .app=="" and .step=="name-check") | .outcome+"\t"+(.note|sub("^[^ ]+ ";""))' | tail -1; }
+cmd_namecheck(){
+  [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
+  local list; list=$(wave_list); [ -n "$list" ] || list=$(awk -F'\t' 'NR>1 {print $1}' "$PLAN" | sort -un | paste -sd' ' -)
+  local sr; sr=$(safe_run_cmd) || { echo "!! no SAFE_RUN in $RUN/vault.conf -- name-check needs the broker's Vault (see RUNBOOK §2)"; exit 1; }
+  local w sg name cmd out t0 ms kind text tot=0 tins=0 tuns=0 tseed=0 tmis=0 tabs=0 tnone=0 bad=0
+  for w in $list; do WAVE="$w"
+    local rows; rows=$(wave_rows "$w" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3}'); [ -n "$rows" ] || { echo "wave $w: no rows in $PLAN"; bad=1; continue; }
+    local n; n=$(printf '%s\n' "$rows" | wc -l | tr -d ' ')
+    cmd=""; while IFS=$'\t' read -r sg name; do cmd="${cmd:+$cmd; }safe get secret/$sg:instance_name 2>&1 | sed 's/^/NC $sg /'"; done <<< "$rows"
+    t0=$(date +%s); out=$(safe_x "$sr" "$cmd"); cmdlog SAFE "name-check wave $w: get x$n" "$?"; ms=$(( ($(date +%s)-t0)*1000 ))
+    # the whole call must have answered: no keyed line at all, every answer an error, or every answer the same non-name text
+    # (the VM shell failing identically per service) is a Vault/session/wrapper problem -- nothing recorded
+    local ans=0 err=0 uns=0 seeds="" ins=0 mis=0 abs=0 none=0 seeded=0 exp same=1 first="" odd=0
+    while IFS=$'\t' read -r sg name; do exp=$(nc_expected "$sg" "$name"); kind=$(nc_kind "$out" "$sg" "$exp"); text="${kind#*	}"; kind="${kind%%	*}"
+      [ "$kind" = none ] || ans=$((ans+1)); [ "$kind" = error ] && err=$((err+1))
+      case "$kind" in error|mismatch|empty) odd=$((odd+1)); if [ "$odd" = 1 ]; then first="$text"; elif [ "$text" != "$first" ]; then same=0; fi;; esac; done <<< "$rows"
+    if [ "$ans" = 0 ] || [ "$err" = "$ans" ] || { [ "$odd" = "$ans" ] && [ "$ans" -ge 2 ] && [ "$same" = 1 ]; }; then
+      echo "!! name-check wave $w: the safe call answered for $ans of $n services ($err errors, $odd with the same text) -- Vault session / SAFE_RUN problem, nothing recorded:"; printf '%s\n' "$out" | tail -5 | sed 's/^/   /'; bad=1; continue; fi
+    while IFS=$'\t' read -r sg name; do exp=$(nc_expected "$sg" "$name"); kind=$(nc_kind "$out" "$sg" "$exp"); text="${kind#*	}"; kind="${kind%%	*}"
+      local why=""; [ "$exp" = "$name" ] || why=" (renamed to standby per the ledger)"
+      case "$kind" in
+        insync) ins=$((ins+1)); ledger_add "$w" "$sg" "" name-check ok "$ms" "$sg instance_name=$exp (in sync)$why"; say "   $name: in sync ('$exp')";;
+        unset) uns=$((uns+1)); seeds="${seeds:+$seeds
+}$sg	$exp"; [ -n "$FIX" ] || { ledger_add "$w" "$sg" "" name-check fail "$ms" "$sg instance_name unset in Blacksmith's Vault (root present, no key) -- name-check --fix --wave $w seeds '$exp'"; say "   $name: UNSET (no instance_name in the broker's Vault) -- --fix seeds '$exp'"; };;
+        absent) abs=$((abs+1)); ledger_add "$w" "$sg" "" name-check fail "$ms" "$sg no secret at secret/$sg -- wrong Vault behind SAFE_RUN, or not this broker's instance -- nothing written"; say "   !! $name: NO ROOT in the broker's Vault (${sg:0:8}) -- not this broker's instance, or SAFE_RUN reaches the wrong Vault; nothing written";;
+        mismatch) mis=$((mis+1)); ledger_add "$w" "$sg" "" name-check fail "$ms" "$sg MISMATCH: broker holds '$text', expected '$exp'$why -- nothing written; check by hand"; say "   !! $name: MISMATCH -- the broker holds '$text', expected '$exp'; nothing written";;
+        *) none=$((none+1)); ledger_add "$w" "$sg" "" name-check fail "$ms" "$sg no usable answer from safe ($kind): $(printf '%s' "$text" | cut -c1-120) -- nothing written"; say "   !! $name: no usable answer from safe ($kind) -- nothing written";;
+      esac; done <<< "$rows"
+    if [ -n "$FIX" ] && [ -n "$seeds" ]; then
+      cmd=""; while IFS=$'\t' read -r sg exp; do cmd="${cmd:+$cmd; }safe set secret/$sg \"instance_name=$(safe_esc "$exp")\" 2>&1 | sed 's/^/NS $sg /'; safe get secret/$sg:instance_name 2>&1 | sed 's/^/NC $sg /'"; done <<< "$seeds"
+      t0=$(date +%s); out=$(safe_x "$sr" "$cmd"); cmdlog SAFE "name-check wave $w: seed x$uns" "$?"; ms=$(( ($(date +%s)-t0)*1000 ))
+      local sans=0; while IFS=$'\t' read -r sg exp; do kind=$(nc_kind "$out" "$sg" "$exp"); [ "${kind%%	*}" = none ] || sans=$((sans+1)); done <<< "$seeds"
+      if [ "$sans" = 0 ]; then   # the seed call itself returned nothing keyed (wrapper died, session gone): whether the sets ran is unknown
+        echo "!! name-check wave $w: the set+read-back call returned no answer for the $uns unset service(s) -- wrapper/session problem; re-run name-check --fix --wave $w:"; printf '%s\n' "$out" | tail -5 | sed 's/^/   /'
+        while IFS=$'\t' read -r sg exp; do ledger_add "$w" "$sg" "" name-check fail "$ms" "$sg instance_name unset in Blacksmith's Vault; the seed call returned no answer (wrapper/session) -- re-run name-check --fix --wave $w"; done <<< "$seeds"
+      else
+      while IFS=$'\t' read -r sg exp; do kind=$(nc_kind "$out" "$sg" "$exp"); text="${kind#*	}"; kind="${kind%%	*}"
+        if [ "$kind" = insync ]; then seeded=$((seeded+1)); ledger_add "$w" "$sg" "" name-check ok "$ms" "$sg instance_name=$exp (was unset; seeded, read back)"; say "   ${exp%-redis-standby}: seeded '$exp' (read back)"
+        else ledger_add "$w" "$sg" "" name-check fail "$ms" "$sg instance_name=$exp -- set issued but the read-back did not return it ($kind): $(printf '%s' "$text" | cut -c1-120)"; say "   !! ${exp%-redis-standby}: seed read-back failed ($kind) -- re-run name-check --fix --wave $w after one reconciler cycle"; fi
+      done <<< "$seeds"
+      fi
+    fi
+    echo "name-check wave $w: $n services -- $ins in sync, $uns unset ($seeded seeded), $mis mismatch, $abs absent, $none unanswered"
+    tot=$((tot+n)); tins=$((tins+ins)); tuns=$((tuns+uns)); tseed=$((tseed+seeded)); tmis=$((tmis+mis)); tabs=$((tabs+abs)); tnone=$((tnone+none))
+    [ $((ins+seeded)) = "$n" ] || bad=1
+  done
+  local hint=""; if [ -z "$FIX" ] && [ "$tuns" != 0 ]; then hint="; --fix seeds them"; fi
+  echo "name-check: $tot services -- $tins in sync, $tuns unset ($tseed seeded$hint), $tmis mismatch, $tabs absent, $tnone unanswered"
+  [ "$tabs" = 0 ] || [ "$tabs" -lt "$tot" ] || echo "!! every service is absent from that Vault -- SAFE_RUN almost certainly reaches the wrong Vault (the env Vault instead of the broker's own); check runs/<env>/vault.conf"
+  [ "$bad" = 0 ]
 }
 
 svc_arrays(){ unset VK SKIP JOBS PLANG SPACE CLEANED VNAME ACC; declare -gA VK SKIP JOBS PLANG SPACE CLEANED VNAME ACC; }   # per wave (ISSUE_STOP is per RUN: cmd_provision / cmd_apply reset it)
@@ -1553,9 +1646,10 @@ case "$SUB" in
   provision-check) cmd_provcheck ;;
   provision-status) cmd_provstatus ;;
   name-sync) cmd_namesync ;;
+  name-check) cmd_namecheck ;;
   rollback)  cmd_rollback ;;
   confirm)   cmd_confirm ;;
   retire)    cmd_retire ;;
-  *) echo "usage: migrate.sh plan <report.csv> | provision --wave N|--waves A-B [--yes] | provision-status [--wave N] | provision-check [--waves A-B] [--no-bosh] | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N] | name-sync --wave N|--waves A-B"
+  *) echo "usage: migrate.sh plan <report.csv> | name-check [--fix] [--wave N|--waves A-B] | provision --wave N|--waves A-B [--yes] | provision-status [--wave N] | provision-check [--waves A-B] [--no-bosh] | preflight --wave N [--free-ips N] | dry-run --wave N | apply --wave N|--waves A-B [--yes] | status [--wave N] | name-sync --wave N|--waves A-B"
      echo "       rollback --wave N --service Y [--app X] [--reason ..] | confirm --wave N --service Y --by <team> [--grace 336h] | retire --wave N --service Y [--no-census] [--force]   (all: --run <dir>)"; exit 1 ;;
 esac

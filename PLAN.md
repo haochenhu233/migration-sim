@@ -369,6 +369,24 @@ plus a review document for the client, built from the binding graph:
   preflight, restarts the app, verify fails, the service rolls back). Second lab finding — Redis
   instances with **no `instance_name` in Blacksmith's Vault** (imported from the old broker): planned as
   `name-check [--fix]` (seed the root `secret/<guid>` from the CF name when empty; batched per wave) — next.
+- 2026-10-23 — **`name-check [--fix]` built** (the lab's nameless Redis). Verified live first (SBX, 2026-10-22,
+  `scla-redis-01` root): `safe rm secret/<g>:instance_name` leaves the root; `safe get` then prints
+  `!! no key `instance_name` exists in secret …`; the reconciler has no source to refill it
+  (`resolveInstanceName` falls back to Metadata keys nothing sets) — the lab's state, persistent. The UI
+  list still shows the index's name, the detail page none (`handlers/bosh/handler.go:357`). Design: one
+  `SAFE_RUN` call per wave, every answer keyed by the full guid on one stdout line (`2>&1 | sed`), so a dead
+  session is "nothing recorded", never "all unset"; seed only on the no-key shape (`safe set` creates a
+  secret when the path is absent — the wrong-Vault trap), mismatch reported and never written; `name_sync`
+  accepts the unset shape at rename time; preflight WARNs from the ledger only. Cases X1–X7 (fake: real
+  wording for both shapes, `SAFEFAKE_ERR`); old code fails all 7. **Review round found 6:** the expected
+  name was the plan's, not the ledger's (a re-check after wave 1 = MISMATCH on every migrated service, and
+  `--fix` would seed the stale name) → `nc_expected` follows `rename-standby`; VM-shell errors (`bash: safe:
+  command not found`) were recorded as a MISMATCH per service → classified as errors, and "every service the
+  same non-name text" aborts; the seed call had no "answered at all?" guard (a dead wrapper logged "seeded
+  but …") → guarded, honest note; an empty value was written on an unverified shape → reported, not written;
+  the fake split on `; ` inside names; `wave_started` took the name-check time. All fixed, cases X8–X11.
+  Provision suite 108 checks. Next in SBX: `name-check --fix --wave <its wave>` on the deleted-name instance
+  (expect UNSET → seeded, UI detail page named again), then its wave.
 - 2026-10-22 — **Second SBX pass, apply: 136 of 136 verified, 20 of 20, every wave 100 %; all 40
   name-syncs failed** with genesis's `[FATAL] Could not successfully authenticate` captured in the ledger
   note: the vault session renewed for the provision-check the day before had expired, and `safe-run.sh`

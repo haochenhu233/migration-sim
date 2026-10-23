@@ -1,22 +1,40 @@
 #!/usr/bin/env bash
-# safe-fake: stands in for SAFE_RUN (e.g. `genesis @env:blacksmith bosh ssh blacksmith/0 -c`) in tests.
-# Takes ONE argument -- the remote command string, like `bosh ssh -c` -- and understands
-#   safe set secret/<g> "instance_name=<n>"  [&& safe get secret/<g>:instance_name]
+# safe-fake: stands in for SAFE_RUN (runs/<env>/safe-run.sh -> `bosh ssh -c` on the broker VM) in tests.
+# Takes ONE argument -- the remote command string -- made of these, joined by " && " or "; ":
+#   safe set secret/<g> "instance_name=<n>"                      (like safe: merges into the root, CREATES it when absent)
 #   safe get secret/<g>:instance_name
-# State: $SAFEFAKE_STATE/<g>. Output lines carry the bosh-ssh prefix "blacksmith/0: stdout | " plus
-# bosh's banner/trailer lines, so the tool's read-back has to find the value among noise.
-#   SAFEFAKE_FAIL=<g>   sets of that guid are lost (the read-back then shows the old value or nothing)
-# Unverified live: the exact prefix/banner of `bosh ssh -c`, and that safe on the broker VM is targeted
-# non-interactively -- the delta lists both as the first live check (vault.conf's SAFE_RUN is whatever works).
-S="${SAFEFAKE_STATE:-/tmp/safefake}"; mkdir -p "$S"; rc=0
+# each optionally followed by the tool's keying suffix ` 2>&1 | sed 's/^/<TAG> <g> /'` (name-check): then every
+# line of that command, stdout or stderr, comes back on stdout prefixed "<TAG> <g> ".
+# State: $SAFEFAKE_STATE/<g> = the root; first line = instance_name. Three shapes, worded as the real safe does
+# (vault/errors.go; the no-key one seen live in SBX 2026-10-22):
+#   file with a name      -> stdout | <name>
+#   file, first line empty -> stderr | !! no key `instance_name` exists in secret `secret/<g>`   (root present, unset)
+#   no file               -> stderr | !! no secret exists at path `secret/<g>`                  (no root)
+# Output lines carry the bosh-ssh prefix "blacksmith/0: stdout | " / "stderr | " plus bosh's banner/trailer
+# lines, so the tool's read-back has to find the value among noise.
+#   SAFEFAKE_FAIL=<g>     sets of that guid are lost (the read-back then shows the old value or nothing)
+#   SAFEFAKE_ERR=<text>   every safe command answers "!! <text>" (expired token, sealed vault)
+#   SAFEFAKE_RAW=<text>   every safe command answers "<text>" as is (the VM shell failing: "bash: safe: command not found")
+#   SAFEFAKE_DEAD_ON=set  a command string holding a `safe set` dies like the wrapper before bosh ssh (exit 2, nothing keyed)
+# Unverified live: the exact banner lines of `bosh ssh -c`.
+S="${SAFEFAKE_STATE:-/tmp/safefake}"; mkdir -p "$S"
+if [ "${SAFEFAKE_DEAD_ON:-}" = set ] && [[ "$1" == *"safe set "* ]]; then echo "safe-run.sh: 'genesis @sbx-us:blacksmith bosh --connect' failed" >&2; exit 2; fi
 echo "Using deployment 'blacksmith'"; echo
-printf '%s\n' "$1" | sed 's/ && /\n/g' | while IFS= read -r c; do
+emit(){ # emit <stream> <tag> <line>: a tagged line is always stdout (the tool's 2>&1)
+  if [ -n "$2" ]; then printf 'blacksmith/0: stdout | %s%s\n' "$2" "$3"; else printf 'blacksmith/0: %s | %s\n' "$1" "$3"; fi; }
+re_tag='^(.*) 2>&1 \| sed '"'"'s/\^/(.*) /'"'"'$'
+printf '%s\n' "$1" | sed 's/ && safe /\nsafe /g; s/; safe /\nsafe /g' | while IFS= read -r c; do   # split only before the next safe command: a "; " inside a quoted name stays
+  tag=""; if [[ "$c" =~ $re_tag ]]; then c="${BASH_REMATCH[1]}"; tag="${BASH_REMATCH[2]} "; fi
+  if [ -n "${SAFEFAKE_ERR:-}" ]; then emit stderr "$tag" "!! $SAFEFAKE_ERR"; continue; fi
+  if [ -n "${SAFEFAKE_RAW:-}" ]; then emit stderr "$tag" "$SAFEFAKE_RAW"; continue; fi
   if [[ "$c" =~ ^safe\ set\ secret/([^\ ]+)\ \"instance_name=(.*)\"$ ]]; then
     g="${BASH_REMATCH[1]}"; v=$(printf '%s' "${BASH_REMATCH[2]}" | sed 's/\\\([\\"$`]\)/\1/g')
     [ "${SAFEFAKE_FAIL:-}" = "$g" ] || printf '%s\n' "$v" > "$S/$g"
   elif [[ "$c" =~ ^safe\ get\ secret/([^:\ ]+):instance_name$ ]]; then
     g="${BASH_REMATCH[1]}"
-    if [ -f "$S/$g" ]; then printf 'blacksmith/0: stdout | %s\n' "$(cat "$S/$g")"; else printf 'blacksmith/0: stderr | !! no secret exists at secret/%s\n' "$g"; fi
-  else printf 'blacksmith/0: stderr | safe-fake: unsupported: %s\n' "$c"; fi
+    if [ ! -f "$S/$g" ]; then emit stderr "$tag" "!! no secret exists at path \`secret/$g\`"
+    elif [ -z "$(head -1 "$S/$g")" ]; then emit stderr "$tag" "!! no key \`instance_name\` exists in secret \`secret/$g\`"
+    else emit stdout "$tag" "$(head -1 "$S/$g")"; fi
+  else emit stderr "$tag" "safe-fake: unsupported: $c"; fi
 done
 echo; echo "Succeeded"
