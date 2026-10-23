@@ -223,7 +223,7 @@ What it checks, and what to do on a FAIL:
 | classic plan visible in the space | `cf enable-service-access valkey -o <org>` |
 | IP headroom ≥ Valkeys still to create | `free-ips.sh` again (`free-ips.txt` older than 24 h is a WARN); services already staged need none |
 | quota in each org | the org's quota (`cf quota`) |
-| every app in the wave running | `STOPPED` is a WARN: the app is rebound, not restarted; a crashed app is the team's, before the wave |
+| every app in the wave running | `STOPPED`, or **some instances not RUNNING before the wave** (crashed app): a WARN — the app is rebound, not restarted, verified on bindings only; it comes up on the Valkey when the team next restarts it. FAIL only when it is *partly* running **and** its Redis is a datastore (its live instance would keep writing to the standby Redis): fix it or `cf stop` it before the wave |
 | hazard apps' env fixed, pipeline pairs complete | team action |
 
 A WARN never blocks. A service **without a Valkey** yet gives a WARN ("apply creates it today")
@@ -314,7 +314,11 @@ bash migrate/migrate.sh name-sync --waves 1-6 --run runs/<env>   # until the foo
 
 Hand check a few apps (`cf env <app>` shows a `valkey` binding and no `redis`; the app's own
 health endpoint). The silent services' STOPPED apps stay STOPPED — they pick the Valkey up when
-the team starts them.
+the team starts them. The same goes for apps that were already crashed before their wave:
+`status` lists both kinds in the footer "apps rebound but NOT restarted" — hand that list to the
+app teams ("your app is on the Valkey from its next restart; please fix and restart it within the
+grace period"). Do not "skip" such an app instead: it would stay bound to a Redis that is renamed
+now and retired later.
 
 Paste out per lane: the `time`, the `TOTAL` line of `status`, the `attention:` block if any
 (guids, no names), and the numbers lines below (none has a name in it):

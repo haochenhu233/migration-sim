@@ -208,4 +208,81 @@ dt=$(( $(date +%s)-t0 )); kill $wd 2>/dev/null; wait 2>/dev/null
 check "Q11 Ctrl-C at 'Execute wave 1 now? type yes:' (SIGINT to main shell + question subshell, own pty, input held open) ends it: not confirmed within 10 s (took ${dt}s), no wave-start in the ledger, no lock left" \
   "[ $dt -lt 10 ] && grep -q 'type yes: ' '$R/int.log' && grep -q 'not confirmed' '$R/int.log' && ! grep -q '\"step\":\"wave-start\"' '$R/ledger.jsonl' && [ ! -s '$R/wave-1.lock' ]"
 
+echo "== V: an app broken BEFORE its wave (lab 2026-10-22): rebound, not restarted, verified on bindings; partly running on a datastore service refused"
+newrun V; export RESTART_TIMEOUT=2
+A0=860c4212-e028-4013-ba36-4cab96e5aa45; A16=6e49804f-3e74-4af4-96ec-66293ad0c71e; A22=e541007d-27ff-469c-bee0-1aaec73eb5f1
+G22=$(awk -F'\t' '$8=="app-22" {print $4}' "$R/waves.tsv")
+restarts(){ jq -r --arg g "$1" '.restarts[$g] // 0' "$CFFAKE_STATE"; }
+# cache-22 is a datastore service in this run's plan (the fixture has none); the fake seeds from the plan, flags change nothing in its world
+awk -F'\t' -v OFS='\t' '$3=="cache-22" { $12=($12==""?"datastore":$12",datastore") } { print }' "$R/waves.tsv" > "$R/w.tmp" && mv "$R/w.tmp" "$R/waves.tsv"
+bash "$M" provision --wave 1 --yes --run "$R" > "$R/prov.log" 2>&1; bash "$M" provision-check --wave 1 --run "$R" > "$R/pc.log" 2>&1
+export CFFAKE_INSTANCES="$A16=2,$A22=2"
+CFFAKE_BROKEN="$A16:1,$A22:1" bash "$M" preflight --wave 1 --run "$R" > "$R/pf1.log" 2>&1; rc=$?
+check "V1 preflight: app-16 1/2 RUNNING on a cache service -> WARN (rebind only); app-22 1/2 on a DATASTORE service -> FAIL 'fix or cf stop'; verdict FAIL" \
+  "[ $rc != 0 ] && grep -q 'WARN  app app-16: 1/2 RUNNING before the wave -- rebind only' '$R/pf1.log' && grep -q \"FAIL  app app-22: only 1/2 instances running on a datastore service -- fix or 'cf stop'\" '$R/pf1.log' && grep -q '^PREFLIGHT: 1 FAIL' '$R/pf1.log'"
+CFFAKE_BROKEN="$A16:1,$A22:0" bash "$M" preflight --wave 1 --run "$R" > "$R/pf2.log" 2>&1; rc=$?
+check "V2 preflight: app-22 fully down (0/2) on the datastore service -> WARN (nothing left to diverge); PREFLIGHT: OK" \
+  "[ $rc = 0 ] && grep -q '^PREFLIGHT: OK' '$R/pf2.log' && grep -q 'WARN  app app-22: 0/2 RUNNING before the wave' '$R/pf2.log' && grep -q 'WARN  app app-16: 1/2 RUNNING before the wave' '$R/pf2.log'"
+CFFAKE_BROKEN="$A16:1,$A22:1" bash "$M" dry-run --wave 1 --run "$R" > "$R/dry.log" 2>&1
+check "V3 dry-run says it: app-16 restart SKIPPED (1/2 RUNNING, rebind only), verify on bindings; app-22 flagged PARTLY running on a DATASTORE service" \
+  "grep -q 'app-16.*state=STARTED (1/2 RUNNING)' '$R/dry.log' && [ $(grep -c 'restart SKIPPED: app is 1/2 RUNNING before the wave -- rebind only' "$R/dry.log") = 2 ] && grep -q 'verify app-16: L1 bindings = valkey only, state still 1/2 RUNNING (L2' '$R/dry.log' && [ $(grep -c 'PARTLY running on a DATASTORE service: apply refuses it' "$R/dry.log") = 1 ]"
+export CFFAKE_BROKEN="$A16:1,$A22:0"; printf 'exit 0\n' > "$R/copy-data.sh"   # the datastore service needs a copy-data hook (or a terminal)
+bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1; rc=$?
+check "V4 apply exits 0: both broken apps rebound (bind-valkey + unbind-redis ok), 'restart ok skipped: app was r/n RUNNING before the wave', 'verify ok (bindings only)'; the 2 healthy apps verified as usual; no rollback" \
+  "[ $rc = 0 ] && [ $(nev bind-valkey ok "(.app==\"$A16\" or .app==\"$A22\")") = 2 ] && [ $(nev unbind-redis ok "(.app==\"$A16\" or .app==\"$A22\")") = 2 ] && [ $(nev restart ok ".app==\"$A16\" and (.note|test(\"^skipped: app was 1/2 RUNNING before the wave\"))") = 1 ] && [ $(nev restart ok ".app==\"$A22\" and (.note|test(\"^skipped: app was 0/2 RUNNING\"))") = 1 ] && [ $(nev verify ok '(.note|test("^L1 ok \\(bindings only: app was [01]/2 RUNNING before the wave\\)$"))') = 2 ] && [ $(nev verify ok) = 4 ] && [ $(nev rollback ok) = 0 ] && [ $(nev rollback fail) = 0 ]"
+check "V5 the broken apps were NOT restarted (fake counters 0); app-0 was (1)" "[ $(restarts $A16) = 0 ] && [ $(restarts $A22) = 0 ] && [ $(restarts $A0) = 1 ]"
+bash "$M" status --wave 1 --run "$R" > "$R/st.log" 2>&1
+check "V6 status: 4 services VERIFIED 1/1; footer: 2 apps rebound but NOT restarted, naming app-16 and app-22 as 'broken before the wave'" \
+  "[ $(grep -c ' VERIFIED ' "$R/st.log") = 4 ] && grep -q '^2 app(s) rebound but NOT restarted' '$R/st.log' && grep -q 'app-16 (broken before the wave)' '$R/st.log' && grep -q 'app-22 (broken before the wave)' '$R/st.log'"
+# the team fixed app-16 between two runs (all RUNNING now): the ledger's decision holds -- no restart on the re-apply (row 8)
+CFFAKE_BROKEN="$A22:0" bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply2.log" 2>&1; rc=$?
+check "V7 apply again with app-16 healthy now: idempotent -- no new restart/verify lines, app-16 still not restarted by the tool" "[ $rc = 0 ] && [ $(nev restart ok) = 4 ] && [ $(nev verify ok) = 4 ] && [ $(restarts $A16) = 0 ]"
+# rollback of app-16's service while it is still broken: redis rebound, valkey unbound, NO restart (it would only fail); a re-run adds nothing
+bash "$M" rollback --wave 1 --service cache-16 --yes --reason drill --run "$R" > "$R/rb.log" 2>&1; rc=$?
+check "V8 rollback cache-16 (app-16 still 1/2): rollback ok 'rebind redis + unbind valkey + no restart [broken-before: was 1/2, now 1/2', not restarted, redis binding back" \
+  "[ $rc = 0 ] && [ $(nev rollback ok ".app==\"$A16\" and (.note|test(\"rebind redis \\\\+ unbind valkey \\\\+ no restart \\\\[broken-before: was 1/2, now 1/2\"))") = 1 ] && [ $(restarts $A16) = 0 ] && [ $(jq --arg s $G16 --arg a $A16 '[.bind[]|select(.si==$s and .app==$a)]|length' "$CFFAKE_STATE") = 1 ]"
+n16=$(nev rollback ok ".app==\"$A16\""); bash "$M" rollback --wave 1 --service cache-16 --yes --reason drill --run "$R" > "$R/rb2.log" 2>&1; rc=$?
+check "V9 rollback cache-16 again, app-16 still broken: exit 0, no restart, no new ledger line" "[ $rc = 0 ] && [ $(restarts $A16) = 0 ] && [ $(nev rollback ok ".app==\"$A16\"") = $n16 ]"
+# app-22 fixed and started by the team after the wave (all RUNNING now) -> its process may hold the valkey env: the rollback restarts it
+unset CFFAKE_BROKEN
+bash "$M" rollback --wave 1 --service cache-22 --yes --reason drill --run "$R" > "$R/rb3.log" 2>&1; rc=$?
+check "V10 rollback cache-22 with app-22 all RUNNING now: restarted once ('started since, may hold the valkey env'), rollback ok" \
+  "[ $rc = 0 ] && [ $(restarts $A22) = 1 ] && grep -q 'app-22: broken before the wave (0/2) but all 2/2 RUNNING now -- started since' '$R/rb3.log' && [ $(nev rollback ok ".app==\"$A22\" and (.note|test(\"\\\\+ restart$\"))") = 1 ]"
+unset CFFAKE_INSTANCES
+
+echo "== W: review 2026-10-22 -- rollback FAIL retry, multi-bound app restarted by a neighbour's rollback, half-migrated datastore app"
+# W1: a rollback that FAILED (bindings listing down) must not erase the broken decision: the retry does not restart the app
+newrun W1; export CFFAKE_INSTANCES="$A16=2"; export CFFAKE_BROKEN="$A16:1"
+bash "$M" provision --wave 1 --yes --run "$R" > "$R/prov.log" 2>&1; bash "$M" provision-check --wave 1 --run "$R" > "$R/pc.log" 2>&1
+bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1
+CFFAKE_FAIL_GET=/v3/service_credential_bindings bash "$M" rollback --wave 1 --service cache-16 --yes --reason drill --run "$R" > "$R/rb1.log" 2>&1; rc=$?
+check "W1a rollback cache-16 with the bindings listing failing: rollback fail, exit 1, app-16 not restarted" "[ $rc != 0 ] && [ $(nev rollback fail ".app==\"$A16\"") = 1 ] && [ $(restarts $A16) = 0 ]"
+bash "$M" rollback --wave 1 --service cache-16 --yes --reason drill --run "$R" > "$R/rb2.log" 2>&1; rc=$?
+check "W1b retry (API fine): rollback ok 'no restart [broken-before: was 1/2, now 1/2', app-16 still not restarted, redis binding back" \
+  "[ $rc = 0 ] && [ $(nev rollback ok ".app==\"$A16\" and (.note|test(\"no restart \\\\[broken-before: was 1/2, now 1/2\"))") = 1 ] && [ $(restarts $A16) = 0 ] && [ $(jq --arg s $G16 --arg a $A16 '[.bind[]|select(.si==$s and .app==$a)]|length' "$CFFAKE_STATE") = 1 ]"
+# W2: app-16 bound to cache-16 AND cache-22, 0/2 at the wave (both pairs 'skipped'); the team starts it; rollback of cache-22 restarts it
+#     (process now on cache-22's REDIS env); the re-apply for cache-22 must RESTART it (verify on RUNNING), not reuse cache-16's stale 'broken 0/2'
+newrun W2; export CFFAKE_INSTANCES="$A16=2"; export CFFAKE_BROKEN="$A16:0"
+awk -F'\t' -v OFS='\t' '$8=="app-22" { r=$0; $8="app-16"; $9="'"$A16"'"; print r; print; next } { print }' "$R/waves.tsv" > "$R/w.tmp" && mv "$R/w.tmp" "$R/waves.tsv"
+"$CF_CMD" seed "$R/waves.tsv" > /dev/null   # re-seed: the extra binding
+bash "$M" provision --wave 1 --yes --run "$R" > "$R/prov.log" 2>&1; bash "$M" provision-check --wave 1 --run "$R" > "$R/pc.log" 2>&1
+bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1; rc=$?
+check "W2a apply: app-16 rebound for both services, one skipped-restart line per pair (0/2), not restarted" "[ $rc = 0 ] && [ $(nev restart ok ".app==\"$A16\" and (.note|test(\"^skipped: app was 0/2\"))") = 2 ] && [ $(restarts $A16) = 0 ]"
+unset CFFAKE_BROKEN   # the team fixed and started it: 2/2 RUNNING
+bash "$M" rollback --wave 1 --service cache-22 --yes --reason drill --run "$R" > "$R/rb.log" 2>&1; rc=$?
+check "W2b rollback cache-22: app-16 all RUNNING now -> restarted (1), rollback ok '+ restart'" "[ $rc = 0 ] && [ $(restarts $A16) = 1 ] && [ $(nev rollback ok ".app==\"$A16\" and .service==\"$G22\" and (.note|test(\"\\\\+ restart$\"))") = 1 ]"
+bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply2.log" 2>&1; rc=$?
+check "W2c re-apply: cache-22 pair redone WITH a restart (2) and a verify on RUNNING (note 'state STARTED', not 'bindings only'); the one restart is recorded under cache-16 too (real), no new skipped line" \
+  "[ $rc = 0 ] && [ $(restarts $A16) = 2 ] && [ $(nev verify ok ".app==\"$A16\" and .service==\"$G22\" and (.note|test(\"^L1 ok \\\\(state STARTED\\\\)$\"))") = 1 ] && [ $(nev restart ok ".app==\"$A16\" and (.note|test(\"^skipped\")|not)") = 2 ] && [ $(nev restart ok ".app==\"$A16\" and (.note|test(\"^skipped\"))") = 2 ]"
+# W3: a partly running app on a datastore service whose bind/unbind an earlier run already did (died before the restart line):
+#     refused as HALF-MIGRATED (route to rollback), never "nothing changed"
+newrun W3; export CFFAKE_INSTANCES="$A22=2"; export CFFAKE_BROKEN="$A22:1"
+awk -F'\t' -v OFS='\t' '$3=="cache-22" { $12=($12==""?"datastore":$12",datastore") } { print }' "$R/waves.tsv" > "$R/w.tmp" && mv "$R/w.tmp" "$R/waves.tsv"; printf 'exit 0\n' > "$R/copy-data.sh"
+bash "$M" provision --wave 1 --yes --run "$R" > "$R/prov.log" 2>&1; bash "$M" provision-check --wave 1 --run "$R" > "$R/pc.log" 2>&1
+for stp in bind-valkey unbind-redis; do jq -nc --arg s "$G22" --arg a "$A22" --arg st "$stp" '{ts:"2026-10-22T00:00:00Z",wave:1,service:$s,app:$a,step:$st,outcome:"ok",ms:1,op:"test",note:""}'; done >> "$R/ledger.jsonl"
+bash "$M" apply --wave 1 --yes --run "$R" > "$R/apply.log" 2>&1; rc=$?
+check "W3 apply: app-22 refused with 'HALF-MIGRATED' (drift fail), not 'nothing changed'; not restarted; the other 3 apps verified" \
+  "[ $rc = 0 ] && [ $(nev drift fail ".app==\"$A22\" and (.note|test(\"HALF-MIGRATED\"))") = 1 ] && [ $(nev drift fail ".app==\"$A22\" and (.note|test(\"nothing changed\"))") = 0 ] && [ $(restarts $A22) = 0 ] && [ $(nev verify ok) = 3 ]"
+unset RESTART_TIMEOUT CFFAKE_INSTANCES CFFAKE_BROKEN
+
 echo; [ "$fails" = 0 ] && echo "ALL PASS (workdir $W)" || { echo "$fails FAIL (workdir $W)"; exit 1; }

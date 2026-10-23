@@ -195,6 +195,7 @@ cmd_status(){
       if (index($12,"hazard") && rank(state) <= 1) hz[s]++
       if (rank(state) >= 4) switched[s]++
       if (state=="VERIFIED") verified[s]++
+      if (state=="VERIFIED" && note[k] ~ /bindings only|state STOPPED/) { nr[s]++; nrapp[a]=1; nrapps[s]=nrapps[s] (nrapps[s]==""?"":", ") $8 " (" (note[k] ~ /STOPPED/ ? "STOPPED" : "broken before the wave") ")" }   # rebound, not restarted (nrapp: distinct apps)
       if (rank(state) < 0) failed[s]++
       if (state=="ROLLED-BACK") rolled[s]++
       if (!(s in minrank) || rank(state) < minrank[s]) minrank[s]=rank(state)
@@ -225,6 +226,9 @@ cmd_status(){
       tn=0; for (s in team) tn+=team[s]
       if (tn>0) { printf "\napps shown as N+T: T are team-action (no binding; the team re-points them, the tool does not):\n"
         for (i=1;i<=ns;i++) if (team[order[i]]>0) printf "   %-28s %s\n", disp[order[i]], teamapps[order[i]] }
+      nrn=0; for (a in nrapp) nrn++
+      if (nrn>0) { printf "\n%d app(s) rebound but NOT restarted (STOPPED or broken before the wave) -- counted as verified (bindings only); on the valkey from their next start, the team restarts them:\n", nrn
+        for (i=1;i<=ns;i++) if (nr[order[i]]>0) printf "   %-28s %s\n", disp[order[i]], nrapps[order[i]] }
       hzn=0; for (s in hz) hzn+=hz[s]
       if (hzn>0) printf "\n!! %d hazard app(s) still pending (pinned env per plan) -- preflight checks the live env; clear it before apply\n", hzn
     }' "$RUN/.states.tsv" "$PLAN"
@@ -321,7 +325,9 @@ cmd_dryrun(){
     local ag8; ag8=$(printf '%s' "$ag" | cut -c1-8)
     aflags=$(printf '%s' "$aflags" | tr ',' '\n' | grep -vE '^(datastore|cross-space)$' | paste -sd, -)
     local astate="?"; if [ -n "$live" ]; then local aj; aj=$(cfcurl "/v3/apps/$ag"); cf_json_ok "$aj" && astate=$(printf '%s' "$aj" | jq -r .state) || astate="NOT FOUND"; fi
-    echo "== app $app ($ag8)  org/space=$aorg/$asp  flags=[$aflags]  state=$astate"
+    local abroken=""; if [ "$astate" = STARTED ]; then local sj; sj=$(cfcurl "/v3/apps/$ag/processes/web/stats")   # some instance not RUNNING now = broken before the wave: rebind only
+      cf_json_ok "$sj" && abroken=$(printf '%s' "$sj" | jq -r '"\([.resources[]|select(.state=="RUNNING")]|length)/\(.resources|length)" | if (split("/")|.[0]==.[1]) then empty else . end'); fi
+    echo "== app $app ($ag8)  org/space=$aorg/$asp  flags=[$aflags]  state=$astate${abroken:+ ($abroken RUNNING)}"
     case ",$aflags," in *,hazard,*) echo "   !! HAZARD: pinned env present -- preflight refuses until the app team removed it";; esac
     case ",$aflags," in *,no-binding:*) echo "   SKIP  no binding (${aflags##*no-binding:}) -- TEAM ACTION: update env var / UPS / config to the Valkey; nothing for the tool to rebind"; echo; continue;; esac
     # every wave service this app is bound to
@@ -336,10 +342,12 @@ cmd_dryrun(){
     case "$astate" in
       STOPPED)   echo "   ${d:+DONE $d  }restart SKIPPED: app is STOPPED -- rebind only, it stays stopped and picks up the Valkey when the team next starts it";;
       "NOT FOUND") echo "   !! app guid $ag8 not found in CF -- plan is stale for this app (preflight FAILs)";;
-      *)         echo "   ${d:+DONE $d  }POST   /v3/apps/$ag8/actions/restart   (>=2 instances: POST /v3/deployments {app:$ag8} = rolling)   # cf restart $app   | rollback: rebind standby + restart";;
+      *) if [ -n "$abroken" ]; then echo "   ${d:+DONE $d  }restart SKIPPED: app is $abroken RUNNING before the wave -- rebind only; the team restarts it (on the valkey from then)$( [ "${abroken%/*}" != 0 ] && [ -n "$(app_datastore "$ag" "$rows")" ] && printf ' -- !! PARTLY running on a DATASTORE service: apply refuses it (fix or cf stop it first)')"
+         else echo "   ${d:+DONE $d  }POST   /v3/apps/$ag8/actions/restart   (>=2 instances: POST /v3/deployments {app:$ag8} = rolling)   # cf restart $app   | rollback: rebind standby + restart"; fi;;
     esac
     d=$(ledger_done "$sg1" "$ag" verify)
-    if [ "$astate" = STOPPED ]; then echo "   ${d:+DONE $d  }verify $app: L1 bindings = valkey only, state still STOPPED (L2/L3 apply when the team starts it)   # fail: auto-rollback the SERVICE"
+    if [ "$astate" = STOPPED ] || [ -n "$abroken" ]; then local still=STOPPED; [ -z "$abroken" ] || still="$abroken RUNNING"
+      echo "   ${d:+DONE $d  }verify $app: L1 bindings = valkey only, state still $still (L2/L3 apply when the team starts it)   # fail: auto-rollback the SERVICE"
     else echo "   ${d:+DONE $d  }verify $app: L1 GET /v3/apps/$ag8/processes/web/stats all RUNNING, bindings = valkey only · L2 census on valkey, none on standby · L3 CLIENT LIST/ACL LOG   # fail: auto-rollback the SERVICE"; fi
   done
   echo
@@ -438,8 +446,7 @@ cmd_preflight(){
     local a; a=$(cfcurl "/v3/apps/$ag")
     if ! cf_json_ok "$a"; then fail "app $app: guid $ag not found"; continue; fi
     local state; state=$(printf '%s' "$a" | jq -r .state)
-    local mid=""; [ -s "$LEDGER" ] && mid=$(ledger_lines | jq -r --arg a "$ag" --arg w "$WAVE" 'select(.app==$a and (.wave|tostring)==$w) | .step+":"+.outcome' | tail -1)
-    case "$mid" in ""|verify:ok|rollback:ok|team-action:ok) mid="";; esac
+    local mid; mid=$(app_mid "$ag")
     if [ "$state" = STARTED ]; then ok "app $app: STARTED"
     elif [ "$state" = STOPPED ]; then warn "app $app: STOPPED -- rebind only, no restart; it picks up the Valkey when the team starts it"
     else warn "app $app: state $state"; fi
@@ -449,7 +456,8 @@ cmd_preflight(){
         local n r; n=$(printf '%s' "$stats" | jq -r '.resources|length'); r=$(printf '%s' "$stats" | jq -r '[.resources[]|select(.state=="RUNNING")]|length')
         if [ "$n" = "$r" ]; then ok "app $app: $r/$n instance(s) running"
         elif [ -n "$mid" ]; then warn "app $app: only $r/$n running but MID-MIGRATION (ledger: $mid) -- apply resumes it (or: rollback --app)"
-        else fail "app $app: only $r/$n instances running -- fix BEFORE migrating (a broken app looks like a migration failure after)"; fi
+        elif [ "$r" != 0 ] && [ -n "$(app_datastore "$ag" "$rows")" ]; then fail "app $app: only $r/$n instances running on a datastore service -- fix or 'cf stop' it before the wave (left unrestarted, its live instance would keep writing to the standby redis)"
+        else warn "app $app: $r/$n RUNNING before the wave -- rebind only, no restart; the team restarts it (on the valkey from then)"; fi
       else warn "app $app: no web process stats"; fi
     fi
     case ",$aflags," in *,hazard,*)
@@ -648,8 +656,39 @@ restarted_since_rollback_ok(){ # <svc> <app> -> "true" when, among the pair's ev
 rollback_skipped_restart(){ # <svc> <app>, pair's last line is rollback ok: "true" when that rollback did NOT restart the app
   # although the app had been (or failed to be) restarted onto the Valkey since the successful rollback before it -- its
   # process still runs on the Valkey env. The note is "cause: <why>; <did>".
-  local did; did=$(ledger_lines | jq -rs --arg s "$1" --arg a "$2" '[.[]|select(.service==$s and .app==$a)] | .[-1].note|split("; ")|last|test("restart")')
+  local did; did=$(ledger_lines | jq -rs --arg s "$1" --arg a "$2" '[.[]|select(.service==$s and .app==$a)] | .[-1].note|split("; ")|last|test("(^|\\+ )restart$")')   # "+ no restart (broken before …)" is not a restart
   if [ "$did" = true ]; then echo false; else restarted_since_rollback_ok "$1" "$2"; fi; }
+# ---- an app broken BEFORE its wave (lab 2026-10-22): some instance not RUNNING, no step taken yet -- handled like a
+#   STOPPED app: rebound, NOT restarted (a crash-restart keeps the env of the last start, so nothing changes for it
+#   until the team restarts it; then it comes up on the Valkey), verified on bindings only. Never "skip the app": it
+#   would stay bound to a Redis that is renamed now and retired later. One exception: PARTLY running on a datastore
+#   service -- its live instance would keep writing to the standby Redis -- refused (fix or cf stop it first).
+# app_broken_before <svc> <app> -> "r/n" when this wave already took that decision (the pair's last restart line
+#   since its last rollback OK is "skipped: app was r/n RUNNING before the wave"), else "". Used by rollback: a rollback
+#   FAIL in between undid nothing (same window as restarted_since_rollback_ok), so the retry must not restart the app
+#   (review 2026-10-22 finding 1).
+app_broken_before(){ [ -s "$LEDGER" ] || return 0
+  ledger_lines | jq -rs --arg s "$1" --arg a "$2" '[ .[] | select(.service==$s and .app==$a) ]
+    | (map(.step=="rollback" and .outcome=="ok") | rindex(true) // -1) as $i | .[$i+1:] | map(select(.step=="restart")) | (last // empty)
+    | select(.outcome=="ok" and (.note|startswith("skipped: app was "))) | .note | capture("was (?<x>[0-9]+/[0-9]+) RUNNING") | .x'; }
+# restart_kind <svc> <app> -> what the pair's last restart line since its last rollback line (ledger_done window, as
+#   apply redoes steps) says: "broken r/n" (skipped: broken before the wave) | "stopped" (skipped: STOPPED) | "real"
+#   (the tool restarted the app: its process holds the valkey env) | "" (none). Apply's resume rule is decided over
+#   ALL wave services of the app (review 2026-10-22 finding 2: a multi-bound app restarted by a neighbour's rollback).
+restart_kind(){ [ -s "$LEDGER" ] || return 0
+  ledger_lines | jq -rs --arg s "$1" --arg a "$2" '[ .[] | select(.service==$s and .app==$a) ]
+    | (map(.step=="rollback") | rindex(true) // -1) as $i | .[$i+1:] | map(select(.step=="restart" and .outcome=="ok")) | (last // empty) | .note
+    | if startswith("skipped: app was ") then "broken " + (capture("was (?<x>[0-9]+/[0-9]+) RUNNING").x) elif startswith("skipped:") then "stopped" else "real" end'; }
+# rollback_restarted <svc> <app> -> "true" when the pair's last rollback OK restarted the app (its did segment ends in
+#   "restart": the note is "cause: <why>; <did>", <did> never contains "; ")
+rollback_restarted(){ ledger_lines | jq -rs --arg s "$1" --arg a "$2" '[ .[] | select(.service==$s and .app==$a and .step=="rollback" and .outcome=="ok") ] | (last // empty) | .note | split("; ") | last | test("(^|\\+ )restart$")'; }
+app_datastore(){ printf '%s\n' "$2" | awk -F'\t' -v a="$1" '$9==a && $12 ~ /(^|,)datastore(,|$)/ {f=1} END {print (f ? "datastore" : "")}'; }   # app_datastore <app> <rows>: one of its wave services is a datastore
+# rollback_note_broken <svc> <app> -> "true" when the pair's last line (a rollback ok) skipped the restart because the app was
+#   broken before the wave -- tested on the did segment and its marker, never on the whole note (the operator's --reason is in it)
+rollback_note_broken(){ ledger_lines | jq -rs --arg s "$1" --arg a "$2" '[.[]|select(.service==$s and .app==$a)] | .[-1].note | split("; ") | last | test("no restart \\[broken-before")'; }
+app_mid(){ # app_mid <app> -> the app's last step:outcome in THIS wave when a migration step is under way, "" when none / verified / rolled back / team-action
+  [ -s "$LEDGER" ] || return 0; local m; m=$(ledger_lines | jq -r --arg a "$1" --arg w "$WAVE" 'select(.app==$a and (.wave|tostring)==$w) | .step+":"+.outcome' | tail -1)
+  case "$m" in ""|verify:ok|rollback:ok|team-action:ok) ;; *) printf '%s' "$m";; esac; }
 
 # ---- staged Valkeys (provision, DESIGN §6c): created days ahead as <name>-valkey-staged, renamed to
 # <name> by apply right after the Redis took the standby name. The ledger note of a staged create
@@ -768,6 +807,7 @@ rollback_service(){
     if [ "$last" = rollback ]; then   # rolled back before: looked at again only if its process may still be on the Valkey
       s=$(app_stats "$ag"); case "$s" in */*) ;; *) s=ERR;; esac
       if [ "$s" = ERR ]; then ledger_add "$WAVE" "$sg" "$ag" rollback fail 0 "cause: $why; FAILED: rolled back before, cannot read its instances"; say "   !! $app: rolled back before, cannot read its instances -- check by hand, then 'status --wave $WAVE'"; continue; fi
+      if [ "${s%/*}" != "${s#*/}" ] && [ "$(rollback_note_broken "$sg" "$ag")" = true ]; then continue; fi   # broken before the wave and still not up: never on the valkey, nothing to redo
       if [ "$(rollback_skipped_restart "$sg" "$ag")" = true ]; then relook="its last start was for the valkey and the earlier rollback did not restart it"   # RUNNING proves nothing here
       elif [ "${s%/*}" != "${s#*/}" ]; then relook="only $s instance(s) running"
       else continue; fi
@@ -810,7 +850,14 @@ rollback_service(){
         case "$st" in STARTED|STOPPED) ;; *) ok=""; R_ERR="cannot read app state (${st:-no answer})";; esac   # an API error is not "not started"
         if [ "$st" = STARTED ]; then inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // empty' 2>/dev/null)
           case "$inst" in ''|*[!0-9]*) ok=""; R_ERR="cannot read instance count (${inst:-no answer})";; esac   # never guess 1: a multi-instance app would lose its rolling restart
-          if [ -n "$ok" ]; then [ -z "$relook" ] || say "   $app: rolled back before, $relook -- restarting it$( [ -n "${APPF:-}" ] && printf ' (names stay as they are)' || printf ' now that the names are back')"
+          # broken before the wave (restart skipped then): still not fully up -> its process never saw the valkey, no restart
+          # (a restart would only fail on it); all RUNNING now -> someone started it since, it may hold the valkey env: restart
+          local bb=""; [ -n "$ok" ] && bb=$(app_broken_before "$sg" "$ag")
+          if [ -n "$ok" ] && [ -n "$bb" ]; then s=$(app_stats "$ag")
+            if [ "$s" = ERR ]; then ok=""; R_ERR="broken before the wave ($bb), cannot read its instances now"
+            elif [ "${s%/*}" != "${s#*/}" ]; then did="${did:+$did + }no restart [broken-before: was $bb, now $s -- never on the valkey, restart it by hand if the team restarted it since]"; again=""; say "   $app: broken before the wave ($bb), still $s -- not restarted"
+            else say "   $app: broken before the wave ($bb) but all $s RUNNING now -- started since, may hold the valkey env: restarting it"; fi; fi
+          if [ -n "$ok" ] && [ -n "$again" ]; then [ -z "$relook" ] || say "   $app: rolled back before, $relook -- restarting it$( [ -n "${APPF:-}" ] && printf ' (names stay as they are)' || printf ' now that the names are back')"
             if restart_app "$ag" "$app" "$inst"; then did="${did:+$did + }restart"; else ok=""; fi; fi; fi; fi; fi
     if [ -n "$ok" ]; then
       if [ "$last" = rollback ] && [ -z "$did" ]; then continue; fi   # looked at again, nothing to do (e.g. STOPPED): no new line
@@ -1284,8 +1331,9 @@ apply_apps(){
       say "$app: SKIP (no binding, team action)"; continue;; esac
     st=$(cfx "/v3/apps/$ag" 2>/dev/null | jq -r '.state // empty' 2>/dev/null)
     [ -n "$st" ] || { say "!! $app: cannot read app $ag -- skipped"; while IFS=$'\t' read -r sg name; do ledger_add "$WAVE" "$sg" "$ag" drift fail 0 "GET app failed"; done <<< "$svcs"; continue; }
-    local allv=1 sgx; while IFS=$'\t' read -r sgx _; do [ -n "${SKIP[$sgx]:-}" ] && continue   # verified on EVERY wave service of the app (a neighbour may have been rolled back since)
-      { [ -n "$(ledger_done "$sgx" "$ag" verify)" ] && [ "$(app_last "$sgx" "$ag")" = verify ]; } || allv=""; done <<< "$svcs"
+    local allv=1 sgx nsv=0; while IFS=$'\t' read -r sgx _; do [ -n "${SKIP[$sgx]:-}" ] && continue   # verified on EVERY wave service of the app (a neighbour may have been rolled back since)
+      nsv=$((nsv+1)); { [ -n "$(ledger_done "$sgx" "$ag" verify)" ] && [ "$(app_last "$sgx" "$ag")" = verify ]; } || allv=""; done <<< "$svcs"
+    [ "$nsv" -gt 0 ] || allv=""   # every wave service of the app skipped: not "verified" -- the bind loop below says so per service
     if [ -n "$allv" ]; then say "== $app (${ag:0:8}) already verified (ledger) -- skipped"; continue; fi
     # a wave service given up on whose Redis STILL carries the standby name (its names-back failed: NAMES-STUCK) -- the app
     # is not touched: restarted for its other service it would look for <name> and find nothing (SBX wave 6 shape;
@@ -1298,7 +1346,27 @@ apply_apps(){
     # never guess the instance count: a multi-instance app would lose its rolling restart (review 2026-10-21, defect 3)
     inst=$(cfx "/v3/apps/$ag/processes/web" 2>/dev/null | jq -r '.instances // empty' 2>/dev/null)
     case "$inst" in ''|*[!0-9]*) if [ "$st" != STOPPED ]; then say "!! $app: cannot read its instance count (${inst:-no answer}) -- skipped, nothing changed"; while IFS=$'\t' read -r sg name; do [ -n "${SKIP[$sg]:-}" ] || ledger_add "$WAVE" "$sg" "$ag" drift fail 0 "GET processes/web: instance count unknown (${inst:-no answer}) -- not guessed"; done <<< "$svcs"; continue; fi; inst=0;; esac
-    say "== $app (${ag:0:8}) state=$st instances=$inst"
+    # broken BEFORE the wave (see restart_kind)? Decided ONCE per wave, over ALL wave services of the app: a REAL restart
+    # recorded for any pair (the tool restarted it: its process holds the valkey env) -> not broken, restart+verify path;
+    # else a rollback that restarted it (rollback_restarted) -> the live stats decide again; else the recorded "broken r/n"
+    # holds (a team fix between two runs must not flip the app, row 8); else the live stats now. ERR = no decision.
+    local broken="" kreal="" klive="" kbroken="" kx s_
+    while IFS=$'\t' read -r sgx _; do kx=$(restart_kind "$sgx" "$ag")
+      case "$kx" in real) kreal=1;; "broken "*) kbroken="${kx#broken }";; stopped) ;; "") [ "$(rollback_restarted "$sgx" "$ag")" = true ] && klive=1;; esac; done <<< "$svcs"
+    if [ "$st" = STARTED ]; then
+      if [ -n "$kreal" ]; then :
+      elif [ -z "$klive" ] && [ -n "$kbroken" ]; then broken="$kbroken"
+      else s_=$(app_stats "$ag"); case "$s_" in */*) [ "${s_%/*}" = "${s_#*/}" ] || broken="$s_";; esac; fi
+      if [ -n "$broken" ] && [ "${broken%/*}" != 0 ] && [ -n "$(app_datastore "$ag" "$ROWS")" ]; then
+        # refused: its live instance would keep writing to the standby redis. Half-migrated by an earlier run (a bind or
+        # unbind already recorded, process still on the old env)? Then say so -- "nothing changed" would be false (row 9/22)
+        local half=""; while IFS=$'\t' read -r sgx _; do { [ -n "$(ledger_done "$sgx" "$ag" bind-valkey)" ] || [ -n "$(ledger_done "$sgx" "$ag" unbind-redis)" ]; } && half=1; done <<< "$svcs"
+        local dnote; if [ -n "$half" ]; then dnote="app $broken RUNNING on a datastore service, HALF-MIGRATED by an earlier run (valkey bound/redis unbound, its live instance still on the old env writing to the standby redis) -- not continued; rollback --wave $WAVE --service <name>, or fix/cf stop it and apply again"
+        else dnote="app $broken RUNNING before the wave on a datastore service -- not migrated, nothing changed; fix or cf stop it, then apply again"; fi
+        say "!! $app: ${dnote#app }"
+        while IFS=$'\t' read -r sg name; do [ -n "${SKIP[$sg]:-}" ] || ledger_add "$WAVE" "$sg" "$ag" drift fail 0 "$dnote"; done <<< "$svcs"; continue; fi
+    fi
+    say "== $app (${ag:0:8}) state=$st instances=$inst${broken:+ ($broken RUNNING before the wave: rebind only, no restart)}"
     local svc_ok=""; did=""
     # bind every wave service's valkey. A binding in progress (a bind of a killed run) is waited for, never adopted; the
     # record of a bind that FAILED is deleted first (CF refuses a second binding for the pair while it exists)
@@ -1339,6 +1407,7 @@ apply_apps(){
     local need=""; for sg in $svc_ok2; do [ -n "$(ledger_done "$sg" "$ag" restart)" ] || need=1; done   # any wave service of the app still without its restart (a neighbour rolled back since)
     if [ -n "$need" ]; then
       if [ "$st" = STOPPED ]; then for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" restart ok 0 "skipped: app STOPPED (rebind only)"; done; say "   restart skipped (app STOPPED)"
+      elif [ -n "$broken" ]; then for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" restart ok 0 "skipped: app was $broken RUNNING before the wave (rebind only; the team restarts it)"; done; say "   restart skipped (app was $broken RUNNING before the wave -- the team restarts it; on the valkey from then)"
       else
         if restart_app "$ag" "$app" "$inst"; then for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" restart ok "$R_MS" "$R_NOTE"; done; say "   restarted ($R_NOTE)"
         else for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" restart fail 0 "$R_ERR"; done; say "   !! restart failed: $R_ERR"; fails=$((fails+1))
@@ -1350,13 +1419,14 @@ apply_apps(){
     need=""; for sg in $svc_ok2; do [ -n "$(ledger_done "$sg" "$ag" verify)" ] || need=1; done
     if [ -n "$need" ]; then
       t0=$(date +%s); local vfail=""
-      if [ "$st" != STOPPED ]; then local s; s=$(app_stats "$ag"); [ "$s" != ERR ] && [ "${s%/*}" = "${s#*/}" ] && [ "${s%/*}" != 0 ] || vfail="instances $s"; fi
+      if [ "$st" != STOPPED ] && [ -z "$broken" ]; then local s; s=$(app_stats "$ag"); [ "$s" != ERR ] && [ "${s%/*}" = "${s#*/}" ] && [ "${s%/*}" != 0 ] || vfail="instances $s"; fi
       for sg in $svc_ok2; do vk="${VK[$sg]}"
         bg=$(binding_guid "$ag" "$vk"); { [ "$bg" != ERR ] && [ -n "$bg" ]; } || vfail="${vfail:+$vfail; }no valkey binding ($(printf '%s' "$sg" | cut -c1-8))"
         bg=$(binding_guid "$ag" "$sg"); [ "$bg" = "" ] || vfail="${vfail:+$vfail; }redis binding still present/unknown ($(printf '%s' "$sg" | cut -c1-8))"
       done
       if [ -z "$vfail" ] && [ -s "$RUN/verify-hook.sh" ]; then bash "$RUN/verify-hook.sh" "$ag" "$app" >> "$RUN/verify-$WAVE.log" 2>&1 || vfail="verify-hook exit $?"; fi
-      if [ -z "$vfail" ]; then for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" verify ok $(( ($(date +%s)-t0)*1000 )) "L1 ok${st:+ (state $st)}"; done; say "   verified"; fails=0
+      local vnote="L1 ok"; if [ -n "$broken" ]; then vnote="L1 ok (bindings only: app was $broken RUNNING before the wave)"; elif [ -n "$st" ]; then vnote="L1 ok (state $st)"; fi
+      if [ -z "$vfail" ]; then for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" verify ok $(( ($(date +%s)-t0)*1000 )) "$vnote"; done; say "   verified${broken:+ (bindings only)}"; fails=0
       else for sg in $svc_ok2; do ledger_add "$WAVE" "$sg" "$ag" verify fail $(( ($(date +%s)-t0)*1000 )) "$vfail"; done; say "   !! verify FAILED: $vfail"; fails=$((fails+1))
         for sg in $svc_ok2; do name=$(printf '%s\n' "$svcs" | awk -F'\t' -v s="$sg" '$1==s {print $2}'); rollback_service "$sg" "$name" "${VK[$sg]}" "verify of $app failed: $vfail"; SKIP[$sg]=1; done
         [ "$fails" -ge "$BREAKER" ] && { say "!! $fails failures in a row -- wave stopped (circuit breaker)"; return 1; }; fi

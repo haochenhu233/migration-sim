@@ -10,6 +10,8 @@
 #   CFFAKE_CRASH=<app guid>            after a restart that app reports CRASHED instances
 #   CFFAKE_STATS_FAIL=<app guid>       that app's /processes/web/stats answers an error document (404)
 #   CFFAKE_STOPPED=<app guid[,..]>     those apps are STOPPED
+#   CFFAKE_BROKEN=<app guid>:<r>[,..]  only r of that app's instances are RUNNING (the rest CRASHED), before and after any
+#                                      restart -- an app broken BEFORE its wave (lab 2026-10-22)
 #   CFFAKE_INSTANCES=<guid>=N[,..]     instance count per app (default 1)
 #   CFFAKE_CREATE_POLLS=N              job polls before a create completes (default 2)
 #   CFFAKE_BIND_FAIL=<app guid>        binding create for that app FAILS (job); like CF, the binding record STAYS in state
@@ -101,6 +103,9 @@ PLANS=dict(st['plans']); PLANS['plan-valkey-other']={'name':'cache-other','offer
 INST={}
 for kv in os.environ.get('CFFAKE_INSTANCES','').split(','):
     if '=' in kv: g,n=kv.split('='); INST[g]=int(n)
+BROKEN={}   # CFFAKE_BROKEN=<app guid>:<r>[,..]: only r of its instances RUNNING (the rest CRASHED), restarted or not -- broken BEFORE the wave
+for kv in os.environ.get('CFFAKE_BROKEN','').split(','):
+    if ':' in kv: g,n=kv.split(':'); BROKEN[g]=int(n)
 fg=[x for x in os.environ.get('CFFAKE_FAIL_GET','').split(',') if x]   # CFFAKE_FAIL_GET=<path prefix>[,..]: every GET under it answers a 500 error document; 'x$' = exactly x
 def bind_state(b):   # a binding's last_operation.state follows its job (in progress until polled out); 'failed' sticks
     if b.get('failed'): return 'failed'
@@ -217,7 +222,11 @@ elif p.startswith('/v3/apps/'):
         else:
             n=INST.get(g,1); crashed = os.environ.get('CFFAKE_CRASH')==g and st['restarts'].get(g,0)>0
             if g in NAMED and g in st.get('env',{}) and NAMED[g] not in st['env'][g]: crashed=True   # "no credentials found (SIM_SERVICE_NAME=...)"
-            out=listing([{'index':i,'state':('CRASHED' if crashed and i==0 else 'RUNNING') if a['state']=='STARTED' else 'DOWN'} for i in range(n)])
+            def inst_state(i):
+                if a['state']!='STARTED': return 'DOWN'
+                if g in BROKEN: return 'RUNNING' if i<BROKEN[g] else 'CRASHED'
+                return 'CRASHED' if crashed and i==0 else 'RUNNING'
+            out=listing([{'index':i,'state':inst_state(i)} for i in range(n)])
     elif p.endswith('/environment_variables'): out={'var':{}}
     else: err(404,'CF-NotFound','fake: unhandled '+p)
 else: err(404,'CF-NotFound','fake: unhandled '+method+' '+p)

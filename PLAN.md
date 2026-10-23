@@ -352,6 +352,23 @@ plus a review document for the client, built from the binding graph:
 
 ## Log
 
+- 2026-10-22 — **Client lab: an app already crashed before its wave made preflight FAIL and the whole
+  wave stop** (rule was "fix BEFORE migrating": a broken app would fail verify and roll the service back).
+  Decision: handle it like a STOPPED app — rebind, no restart, verify on bindings only (a crash-restart
+  keeps the env of the last start, so nothing changes for it until the team restarts it; then it is on the
+  Valkey); not "skip the app" (it would stay bound to a Redis renamed now and retired later). Exception:
+  partly running on a datastore service ⇒ still FAIL / `drift fail` (its live instance would keep writing
+  to the standby Redis). Decision taken once per wave (ledger first); rollback restarts it only when it is
+  all RUNNING now (started since ⇒ may hold the Valkey env). `status` footer "rebound but NOT restarted"
+  lists STOPPED + broken-before apps for the teams. Cases V1–V10 (fake `CFFAKE_BROKEN`); old code fails
+  9 of 10. **Review round found 6:** a `rollback fail` erased the decision (retry restarted the app);
+  a multi-bound app reused the first service's stale decision after the other's rollback had restarted
+  it; "nothing changed" said on a half-migrated app; a malformed verify note the case could not see;
+  the rollback marker tested on the whole note (incl. `--reason`); the footer counted pairs. All fixed,
+  cases W1–W3 reproduce them (pre-fix script fails 4 of the new checks). Interim for the lab: `cf stop` the crashed apps before the wave (never `apply --force`: it skips
+  preflight, restarts the app, verify fails, the service rolls back). Second lab finding — Redis
+  instances with **no `instance_name` in Blacksmith's Vault** (imported from the old broker): planned as
+  `name-check [--fix]` (seed the root `secret/<guid>` from the CF name when empty; batched per wave) — next.
 - 2026-10-22 — **Second SBX pass, apply: 136 of 136 verified, 20 of 20, every wave 100 %; all 40
   name-syncs failed** with genesis's `[FATAL] Could not successfully authenticate` captured in the ledger
   note: the vault session renewed for the provision-check the day before had expired, and `safe-run.sh`
