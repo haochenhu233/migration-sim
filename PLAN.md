@@ -430,6 +430,18 @@ plus a review document for the client, built from the binding graph:
   hand-edited values → CR-tolerant, case-insensitive, odd values counted; the `/v3/apps` lifecycle shape not
   verified live yet (asked for a 5-app `jq` from SBX); `return 0` comment; docs. **NP needs one more scan
   before the plan is final** (the user has no NP access; the client runs it).
+- 2026-10-24 — **NP re-scan with `8b41a32` (5516 apps / 280 orgs / 1294 spaces): platform line works live — 404
+  windows, 5112 linux, 0 unknown; 333 SIs, 818 bindings, 16 static refs; stopped `exit 3` on 2 env timeouts
+  (by design, re-run).** It also showed `manifest unreadable for 5514` = every manifest: since `2620eb9` the
+  YAML manifest endpoint went through the JSON-shaped `api_err` → "non-JSON response" → blanked, so the
+  `static-ref: manifest` leg was dead for a month (env-var refs unaffected). Fixed in discovery `a9c79ad`
+  (`man_err`: empty / JSON errors / `applications:` block; both call sites; stub serves `.yml` + empty file =
+  timeout; `test/case-manifest.sh` 9 checks; negative check bites). Lesson in the skill: a guard applied to
+  every call site is checked per endpoint content type; a route the stub doesn't serve is a path never run.
+  **The director was being upgraded during the same scan window**: `list-redis` (`2>/dev/null` → "0
+  deployments", exit 0) and the census (per-Redis "skipping" lines) soft-fail with the director down — check
+  the pass for those lines; a hard failure on an empty deployments list is proposed, not built. Client
+  bundle must move to `a9c79ad`; NP forward scan to be re-run on it.
 - 2026-10-22 — **Second SBX pass, apply: 136 of 136 verified, 20 of 20, every wave 100 %; all 40
   name-syncs failed** with genesis's `[FATAL] Could not successfully authenticate` captured in the ledger
   note: the vault session renewed for the provision-check the day before had expired, and `safe-run.sh`
