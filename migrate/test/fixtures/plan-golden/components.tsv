@@ -1,0 +1,7 @@
+component	wave	services	apps	service_names
+00000020	1	1	1	redis-small-test
+00000017	1	1	1	sim-redis-session
+0000001f	2	1	1	serviceshealthcheck-redis
+0000001a	2	1	1	sim-redis-queue
+00000019	2	1	2	sim-redis-store
+00000016	2	1	5	sim-redis-cache

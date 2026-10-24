@@ -8,9 +8,9 @@
 set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
-WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; SVCRE=""; ARG=""; WAVES=""; SVCF=""; YES=""; FORCE=""; NO_ROLLING=""; FIX=""
+WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; SVCRE=""; ARG=""; WAVES=""; SVCF=""; YES=""; FORCE=""; NO_ROLLING=""; FIX=""; ISOLATE=""
 APPF=""; REASON=""; BY=""; GRACE="336h"; NO_CENSUS=""
-while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --waves) WAVES="$2"; shift 2;; --service) SVCF="$2"; shift 2;; --yes) YES=1; shift;; --force) FORCE=1; shift;; --fix) FIX=1; shift;; --no-rolling) NO_ROLLING=1; shift;; --no-bosh) NO_BOSH=1; shift;; --app) APPF="$2"; shift 2;; --reason) REASON="$2"; shift 2;; --by) BY="$2"; shift 2;; --grace) GRACE="$2"; shift 2;; --no-census) NO_CENSUS=1; shift;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
+while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --waves) WAVES="$2"; shift 2;; --service) SVCF="$2"; shift 2;; --yes) YES=1; shift;; --force) FORCE=1; shift;; --fix) FIX=1; shift;; --no-rolling) NO_ROLLING=1; shift;; --no-bosh) NO_BOSH=1; shift;; --app) APPF="$2"; shift 2;; --reason) REASON="$2"; shift 2;; --by) BY="$2"; shift 2;; --grace) GRACE="$2"; shift 2;; --no-census) NO_CENSUS=1; shift;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --isolate) ISOLATE="$2"; shift 2;; --isolate=*) ISOLATE="${1#*=}"; shift;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
 PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 
 
@@ -23,6 +23,13 @@ PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 #   --order hard   largest components first
 #   --services <ERE>  only services whose NAME matches (e.g. '^sim-redis-' in SBX); others are
 #                     excluded and counted -- the scan covers the whole foundation
+#   --isolate hazard,no-binding,windows   (any subset; asked 2026-10-23 for the NP Sunday run) pack the
+#                     components that carry one of these connection flags into their own waves, numbered
+#                     LAST, one class per wave: every other wave then carries none of the isolated classes
+#                     (a class NOT named stays in the normal waves) (hazard = pinned ref to fix, preflight FAILs the wave until then; no-binding =
+#                     team re-points by hand; windows = restart behaviour not yet drilled). A component
+#                     carries a class when ANY of its connections does (a component is never split); with
+#                     several, the most blocked wins: hazard > no-binding > windows. Caps unchanged.
 # Rows whose method is not cf-bind (static-ref / unknown / api-error) get flag no-binding:<method>:
 # the app consumes the Redis without a binding, so the tool cannot rebind it -- dry-run/apply list
 # it as a TEAM action (update env / UPS / config) and skip it.
@@ -30,12 +37,26 @@ PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 # is bound to travel together => one restart per app), packed largest-first, max N services per
 # wave (a component larger than N gets its own wave). Services keyed by GUID (DESIGN 1a).
 cmd_plan(){
-  local rep="$1"; [ -s "$rep" ] || { echo "usage: migrate.sh plan <report.csv> [--run dir] [--wave-size N]"; exit 1; }
+  local rep="$1"; [ -s "$rep" ] || { echo "usage: migrate.sh plan <report.csv> [--run dir] [--wave-size N] [--isolate hazard,no-binding,windows]"; exit 1; }
+  # --isolate: one normalised list (no blanks, no duplicates, no empty tokens) is what the shell validates AND what awk splits
+  #   (review 2026-10-23: "hazard, windows" passed validation and awk looked up " windows" -> silently not isolated)
+  if [ -n "$ISOLATE" ]; then
+    local c norm="" seen=","; local -a toks; IFS=, read -ra toks <<< "$(printf '%s' "$ISOLATE" | tr -d '[:space:]')"
+    for c in "${toks[@]}"; do [ -n "$c" ] || continue
+      case "$c" in hazard|no-binding|windows) ;; *) echo "!! --isolate: unknown class '$c' (known: hazard, no-binding, windows) -- nothing written"; exit 1;; esac
+      case "$seen" in *",$c,"*) ;; *) norm="${norm:+$norm,}$c"; seen="$seen$c,";; esac
+    done
+    [ -n "$norm" ] || { echo "!! --isolate: no class given (known: hazard, no-binding, windows) -- nothing written"; exit 1; }
+    ISOLATE="$norm"
+  fi
   mkdir -p "$RUN"
-  awk -F',' -v OFS='\t' -v wsize="${WSIZE:-10}" -v maxapps="${MAXAPPS:-40}" -v silentmax="${SILENTMAX:-120}" -v order="${ORDER:-easy}" -v svcre="$SVCRE" -v run="$RUN" -v now="$(date -u +%FT%TZ)" '
+  awk -F',' -v OFS='\t' -v wsize="${WSIZE:-10}" -v maxapps="${MAXAPPS:-40}" -v silentmax="${SILENTMAX:-120}" -v order="${ORDER:-easy}" -v svcre="$SVCRE" -v isolate="$ISOLATE" -v run="$RUN" -v now="$(date -u +%FT%TZ)" '
     function find(x){ while (par[x]!=x) { par[x]=par[par[x]]; x=par[x] } return x }
     function union(a,b,  ra,rb){ ra=find(a); rb=find(b); if (ra!=rb) par[rb]=ra }
     function plan_of(dep,  p){ p=dep; sub(/^(redis|valkey)-/,"",p); sub(/-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,"",p); return p }
+    # --isolate classes, ranked by how blocked their wave is (a component with several takes the highest)
+    BEGIN { rank["windows"]=1; rank["no-binding"]=2; rank["hazard"]=3; cname[0]="-"; cname[1]="windows"; cname[2]="no-binding"; cname[3]="hazard"
+            niso=split(isolate, it, ","); for (i=1;i<=niso;i++) if (it[i]!="") iso[it[i]]=1 }
     NR==1 { for (i=1;i<=NF;i++) col[$i]=i; LIVE=("ever_live" in col)?col["ever_live"]:col["live_connection"]; next }
     {
       gsub(/\r$/,"")
@@ -62,18 +83,30 @@ cmd_plan(){
       nc=0; for (r in csvc) { cl[++nc]=r }
       # live apps per component (0 = silent: every connection idle)
       for (i=1;i<=rows;i++){ k=edge[i]; split(k,kk,SUBSEP); if (k in live) clive[find("s"kk[2])]++ }
-      # sort key: easy = (silent first, then by services asc, apps asc); hard = services desc, apps desc
-      for (i=1;i<=nc;i++){ r=cl[i]; if (order=="hard") skey[r]=sprintf("%05d%05d", 99999-csvc[r], 99999-capp[r]); else skey[r]=sprintf("%d%05d%05d", (clive[r]>0?1:0), csvc[r], capp[r]) }
+      # --isolate: the class of a connection is decided by the SAME facts as its flags in waves.tsv below (hz[k], nob[k],
+      #   aplat[app] -- the platform of the app, not of the row: review 2026-10-23); a component takes the highest class
+      #   of any of its connections (0 = normal; a component is never split)
+      for (i=1;i<=nc;i++) ccls[cl[i]]=0
+      for (i=1;i<=rows;i++){ k=edge[i]; split(k,kk,SUBSEP); c=0
+        if (("windows" in iso) && aplat[kk[1]]=="windows") c=rank["windows"]
+        if (("no-binding" in iso) && (k in nob) && c<rank["no-binding"]) c=rank["no-binding"]
+        if (("hazard" in iso) && (k in hz) && c<rank["hazard"]) c=rank["hazard"]
+        r=find("s"kk[2]); if (c>ccls[r]) ccls[r]=c }
+      # sort key: class first (normal components before isolated ones, isolated in class order), then
+      #   easy = (silent first, then by services asc, apps asc); hard = services desc, apps desc
+      for (i=1;i<=nc;i++){ r=cl[i]; if (order=="hard") skey[r]=sprintf("%d%05d%05d", ccls[r], 99999-csvc[r], 99999-capp[r]); else skey[r]=sprintf("%d%d%05d%05d", ccls[r], (clive[r]>0?1:0), csvc[r], capp[r]) }
       for (i=2;i<=nc;i++){ v=cl[i]; j=i-1; while (j>0 && skey[cl[j]]>skey[v]) { cl[j+1]=cl[j]; j-- } cl[j+1]=v }
       # pack into waves: both caps -- services per wave AND app restarts per wave
       # silent components (no live consumer anywhere) get their own, larger caps: nobody observes them
-      w=1; used=0; usedapps=0; wsil=-1
+      # a wave holds one kind (silent/live) and one class (normal / an --isolate class): a change of either closes it
+      w=1; used=0; usedapps=0; wsil=-1; wcls=-1
       for (i=1;i<=nc;i++) { r=cl[i]; sil=(clive[r]==0)?1:0
         capA=sil?silentmax:maxapps; capS=sil?wsize*3:wsize
-        if ((used>0 && used+csvc[r] > capS) || (usedapps>0 && usedapps+capp[r] > capA) || (wsil>=0 && wsil!=sil)) { w++; used=0; usedapps=0 }
-        wsil=sil
+        if ((used>0 && used+csvc[r] > capS) || (usedapps>0 && usedapps+capp[r] > capA) || (wsil>=0 && wsil!=sil) || (wcls>=0 && wcls!=ccls[r])) { w++; used=0; usedapps=0 }
+        wsil=sil; wcls=ccls[r]; wclass[w]=ccls[r]
         cw[r]=w; used+=csvc[r]; usedapps+=capp[r]; wsvc[w]+=csvc[r]; wapp[w]+=capp[r]; wcomp[w]++; if (sil) wsilent[w]+=csvc[r]
-        if (csvc[r]>capS || capp[r]>capA) { w++; used=0; usedapps=0; wsil=-1 }   # an oversized component owns its wave
+        if (ccls[r]>0) { icomp[ccls[r]]++; isvc[ccls[r]]+=csvc[r]; iapp[ccls[r]]+=capp[r]; if (!(ccls[r] in iwlo)) iwlo[ccls[r]]=w; iwhi[ccls[r]]=w }
+        if (csvc[r]>capS || capp[r]>capA) { w++; used=0; usedapps=0; wsil=-1; wcls=-1 }   # an oversized component owns its wave
       }
       nw=w; if (used==0) nw=w-1
       # ---- waves.tsv (detailed; stays in the env)
@@ -130,12 +163,20 @@ cmd_plan(){
       for (i=2;i<=nc;i++){ v=big[i]; j=i-1; while (j>0 && (csvc[big[j]]<csvc[v] || (csvc[big[j]]==csvc[v] && capp[big[j]]<capp[v]))) { big[j+1]=big[j]; j-- } big[j+1]=v }
       printf "\nlargest components (services/apps): " > h
       for (i=1;i<=5 && i<=nc;i++) printf "%s%d/%d", (i>1?", ":""), csvc[big[i]], capp[big[i]] > h
-      printf "\n\n## Wave proposal (live waves: max %d services / %d restarts; silent waves: max %d services / %d restarts; order=%s)\n\n| wave | services | silent svcs | apps (restarts) | components | orgs |\n|---|---|---|---|---|---|\n", wsize, maxapps, wsize*3, silentmax, order > h
+      printf "\n\n## Wave proposal (live waves: max %d services / %d restarts; silent waves: max %d services / %d restarts; order=%s%s)\n\n| wave | services | silent svcs | apps (restarts) | components | orgs |%s\n|---|---|---|---|---|---|%s\n", wsize, maxapps, wsize*3, silentmax, order, (isolate!=""?"; isolate="isolate:""), (isolate!=""?" class |":""), (isolate!=""?"---|":"") > h
       for (w=1;w<=nw;w++){ t=0; for (x in wteams){ split(x,xx,SUBSEP); if (xx[1]==w) t++ }
-        printf "| %d | %d | %d | %d | %d | %d |\n", w, wsvc[w], wsilent[w]+0, wapp[w], wcomp[w], t > h }
+        printf "| %d | %d | %d | %d | %d | %d |%s\n", w, wsvc[w], wsilent[w]+0, wapp[w], wcomp[w], t, (isolate!=""?" "cname[wclass[w]]" |":"") > h }
+      if (isolate!="") {   # the isolated classes: what waits for a team / a drill, and how much of the plan it is
+        printf "\n## Isolated waves (--isolate %s): packed last, one class per wave\n\nA component carries a class when ANY of its connections does (a component is never split); with several, the most blocked wins: hazard > no-binding > windows.\n\n| class | waves | components | services | apps (restarts) |\n|---|---|---|---|---|\n", isolate > h
+        nisoc=0; nisos=0; nisoa=0
+        for (c=3;c>=1;c--) if (cname[c] in iso) { if (c in icomp) printf "| %s | %d-%d | %d | %d | %d |\n", cname[c], iwlo[c], iwhi[c], icomp[c], isvc[c], iapp[c] > h; else printf "| %s | - | 0 | 0 | 0 |\n", cname[c] > h; nisoc+=icomp[c]; nisos+=isvc[c]; nisoa+=iapp[c] }
+        niw=0; for (w=1;w<=nw;w++) if (wclass[w]>0) niw++
+        printf "\nisolated in total: %d of %d components, %d of %d services, %d of %d apps in the last %d wave(s); the other %d wave(s) carry none of these classes\n", nisoc, nc, nisos, nsvc, nisoa, napp, niw, nw-niw > h
+      }
       printf "\nIP headroom needed: %d Valkeys in total (one per service); per wave as above.\n", nsvc > h
       printf "\nDetailed files (stay in the environment): waves.tsv, components.tsv\n" > h
       printf "plan: %d connections, %d services, %d apps -> %d component(s) in %d wave(s)\n", rows, nsvc, napp, nc, nw
+      if (isolate!="") printf "plan: --isolate %s: %d component(s) / %d service(s) / %d app(s) in the last %d wave(s); %d wave(s) carry none of these classes\n", isolate, nisoc, nisos, nisoa, niw, nw-niw
       printf "plan: wrote %s/waves.tsv, %s/components.tsv (detailed) and %s/plan-summary.md (aggregates only -- shareable)\n", run, run, run
     }' "$rep"
 }

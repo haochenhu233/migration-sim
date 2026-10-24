@@ -1,0 +1,12 @@
+wave	component	service	service_guid	service_org	service_space	valkey_plan	app	app_guid	app_org	app_space	flags
+2	00000016	sim-redis-cache	00000065-0000-4000-8000-000000000101	sim	dev	cache-small	sim-cache-a	0000000b-0000-4000-8000-000000000011	sim	dev	
+2	00000016	sim-redis-cache	00000065-0000-4000-8000-000000000101	sim	dev	cache-small	sim-cache-b	0000000c-0000-4000-8000-000000000012	sim	dev	
+2	00000016	sim-redis-cache	00000065-0000-4000-8000-000000000101	sim	dev	cache-small	sim-cache-c	0000000d-0000-4000-8000-000000000013	sim	dev	
+2	00000016	sim-redis-cache	00000065-0000-4000-8000-000000000101	sim	dev	cache-small	sim-static-env	00000015-0000-4000-8000-000000000021	sim	dev	no-binding:static-ref-env-var
+2	00000016	sim-redis-cache	00000065-0000-4000-8000-000000000101	sim	dev	cache-small	sim-ups	00000016-0000-4000-8000-000000000022	sim	dev	no-binding:static-ref-ups
+1	00000017	sim-redis-session	00000066-0000-4000-8000-000000000102	sim	dev	cache-small	sim-session	00000017-0000-4000-8000-000000000023	sim	dev	idle
+2	00000019	sim-redis-store	00000067-0000-4000-8000-000000000103	sim	dev	cache-medium	sim-store	00000018-0000-4000-8000-000000000024	sim	dev	
+2	00000019	sim-redis-store	00000067-0000-4000-8000-000000000103	sim	dev	cache-medium	sim-pinned	00000019-0000-4000-8000-000000000025	sim	dev	hazard
+2	0000001a	sim-redis-queue	00000068-0000-4000-8000-000000000104	sim	dev	cache-small	sim-win	0000001a-0000-4000-8000-000000000026	sim	dev	windows
+2	0000001f	serviceshealthcheck-redis	000000c9-0000-4000-8000-000000000201	oaisys	dev	cache-small	healthcheck	0000001f-0000-4000-8000-000000000031	oaisys	dev	
+1	00000020	redis-small-test	000000ca-0000-4000-8000-000000000202	oaisys	dev	cache-small	val-test-app	00000020-0000-4000-8000-000000000032	oaisys	dev	idle

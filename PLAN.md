@@ -387,6 +387,36 @@ plus a review document for the client, built from the binding graph:
   the fake split on `; ` inside names; `wave_started` took the name-check time. All fixed, cases X8–X11.
   Provision suite 108 checks. Next in SBX: `name-check --fix --wave <its wave>` on the deleted-name instance
   (expect UNSET → seeded, UI detail page named again), then its wave.
+- 2026-10-23 — **SBX `name-check --fix` run (all 7 waves, 25 services): 1 unset → seeded (the drill), 10 MISMATCH,
+  nothing written.** 7 of the 10 were the first pass's stale `-redis-standby` names: `reset-scaled` rolls back via
+  `migrate.sh rollback`, whose name-sync is not fatal, and phase 2 verifies CF names only — so a reset finishes green
+  with Blacksmith's copies not put back; the archive then hides them from the new ledger. Fixed with
+  `name-sync --waves 1-7 --run runs/sbx/pass-<date>` (the archived ledger holds `rename-standby undone`; needs
+  `vault.conf` copied in) → 22 of 25 in sync. The other 3: 2 `sim-redis-*` left as `-redis-standby` by the first
+  simulation (never retired) and 1 renamed by hand → **hand steps by design: the tool only writes names whose
+  rename it recorded.** Decision: delete the first simulation's 6 standby Redis (its retire step) and re-plan.
+  Found by the way: `sclb-redis-09`'s deployment has **0 VMs** since its only deploy (task 9071562, 2026-10-19,
+  CPI "address already in use" — the reserved-IP incident); CF said `create succeeded` (Blacksmith's
+  task-id-0/1 "deployment exists → succeeded" path). Its apps migrated and rolled back fine → the tool never
+  touches the Redis; edges: rollback onto a dead source is reported ok, `--copy-data` would fail. Kept as the
+  "dead source" fixture. Follow-up: `provision-check` BOSH half should also require ≥1 running instance per
+  Valkey deployment (this shape passes "deployment present").
+- 2026-10-23 — **NP plan read (largest env, wave size 10): 272 services / 745 apps / 821 connections / 40 orgs,
+  237 components, 29 waves (4 silent = 115 services, 25 live).** Client intent: one Sunday, 5–6 terminals each
+  running 5–6 waves in parallel — so restarts per wave are lane *wall time*, not risk; balance terminals by the
+  restarts column. Hazard 9 components / 9 services / 21 apps over 3 waves; no-binding 3 / 3 / 6 over 3 waves;
+  windows 12 / 12 / 19 over 8 waves. **`plan --isolate hazard,no-binding,windows` built**: those components go
+  into their own waves, numbered last, one class per wave (class = highest flag in the component; hazard >
+  no-binding > windows); default plan byte-identical (golden files). Review found 6: two parsers of one option
+  value (`"hazard, windows"` validated by the shell, looked up with the blank by awk → silently not isolated);
+  `--isolate=x` swallowed by the parser's `-*)`; windows class read the row's platform while the flag reads the
+  app's (last row) → class and flag could disagree; "wait for nobody" overclaimed with a subset of classes;
+  P1 was no byte-identity guard; missing cases (bridge app across classes, two components in one class wave,
+  silent isolated, absent class). All fixed; new suite `test/case-plan.sh` 29 checks (old code fails 24),
+  second fixture `merged_report_iso.csv`. Still to decide with the client: silent waves last (owners: migrate
+  or retire), `--wave-size`, IP headroom (157 live / 272 all) via `free-ips.sh`, director workers for 272
+  creates. Open: can the merge emit a blank `platform` on a backward row of a Windows app? (then the windows
+  flag — and class — miss it: last row wins).
 - 2026-10-22 — **Second SBX pass, apply: 136 of 136 verified, 20 of 20, every wave 100 %; all 40
   name-syncs failed** with genesis's `[FATAL] Could not successfully authenticate` captured in the ledger
   note: the vault session renewed for the provision-check the day before had expired, and `safe-run.sh`

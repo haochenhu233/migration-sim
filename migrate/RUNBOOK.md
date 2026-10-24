@@ -104,6 +104,12 @@ cat runs/<env>/plan-summary.md
 - `--wave-size` = services per wave, `--max-apps` = app restarts per wave;
   `--silent-max-apps 120` is the cap for waves made only of silent services (no live consumer).
 - An app and every service it is bound to land in the **same wave** (one restart per app).
+- `--isolate hazard,no-binding,windows` (any subset) puts the components that carry those flags
+  into their own waves, **numbered last**, one class per wave. Use it when the waves run in one
+  window (NP Sunday): every other wave then carries none of the named classes (name all three for a run that waits for no team); the isolated waves
+  run when the pinned refs are fixed (hazard), the hand re-points are done (no-binding), or the
+  Windows restart was drilled in SBX. A whole component moves with its flagged connection — the
+  summary's "Isolated waves" table says how many services and apps that is.
 - Connections whose method is not `cf-bind` (hardcoded address, UPS) are flagged
   `no-binding:<method>` — the tool cannot rebind them; preflight, dry-run and apply list them as
   **team action**.

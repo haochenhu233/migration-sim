@@ -1,0 +1,11 @@
+app_name,space,org,app_guid,method,static_ref,static_ref_target,redis_service_name,redis_service_space,redis_service_org,redis_deployment,service_instance_guid,platform,deployment_exists,live_connection,source
+m-app,dev,sim,00000001-0000-4000-8000-000000000001,cf-bind,,,svc-X,dev,sim,redis-cache-small-00000065-0000-4000-8000-000000000065,00000065-0000-4000-8000-000000000065,linux,yes,yes,both
+m-app,dev,sim,00000001-0000-4000-8000-000000000001,cf-bind,,,svc-Y,dev,sim,redis-cache-small-00000066-0000-4000-8000-000000000066,00000066-0000-4000-8000-000000000066,linux,yes,yes,both
+win-x,dev,sim,00000002-0000-4000-8000-000000000002,cf-bind,,,svc-X,dev,sim,redis-cache-small-00000065-0000-4000-8000-000000000065,00000065-0000-4000-8000-000000000065,windows,yes,yes,both
+env-y,dev,sim,00000003-0000-4000-8000-000000000003,static-ref: env-var,REDIS_HOST,10.0.0.9,svc-Y,dev,sim,redis-cache-small-00000066-0000-4000-8000-000000000066,00000066-0000-4000-8000-000000000066,linux,yes,yes,backward
+plain,dev,sim,00000004-0000-4000-8000-000000000004,cf-bind,,,svc-Z,dev,sim,redis-cache-small-00000067-0000-4000-8000-000000000067,00000067-0000-4000-8000-000000000067,linux,yes,yes,both
+win-live,dev,sim,0000000c-0000-4000-8000-00000000000c,cf-bind,,,svc-WL,dev,sim,redis-cache-small-000000ca-0000-4000-8000-0000000000ca,000000ca-0000-4000-8000-0000000000ca,windows,yes,yes,both
+win-live2,dev,sim,0000000d-0000-4000-8000-00000000000d,cf-bind,,,svc-WL2,dev,sim,redis-cache-small-000000cb-0000-4000-8000-0000000000cb,000000cb-0000-4000-8000-0000000000cb,windows,yes,yes,both
+win-idle,dev,sim,0000000b-0000-4000-8000-00000000000b,cf-bind,,,svc-WI,dev,sim,redis-cache-small-000000c9-0000-4000-8000-0000000000c9,000000c9-0000-4000-8000-0000000000c9,windows,yes,no,both
+mixed-p,dev,sim,00000005-0000-4000-8000-000000000005,cf-bind,,,svc-P,dev,sim,redis-cache-small-00000068-0000-4000-8000-000000000068,00000068-0000-4000-8000-000000000068,windows,yes,yes,forward
+mixed-p,dev,sim,00000005-0000-4000-8000-000000000005,cf-bind,,,svc-Q,dev,sim,redis-cache-small-00000069-0000-4000-8000-000000000069,00000069-0000-4000-8000-000000000069,,yes,yes,backward
