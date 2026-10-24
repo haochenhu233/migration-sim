@@ -66,7 +66,8 @@ cmd_plan(){
       if (svcre!="" && $col["redis_service_name"] !~ svcre) { excluded[sg]=1; exrows++; next }
       k=ag SUBSEP sg; if (k in seen) next; seen[k]=1; rows++
       if ($col["method"]!="cf-bind") { nob[k]=$col["method"]; nnob++ }
-      app[ag]=$col["app_name"]; aorg[ag]=$col["org"]; asp[ag]=$col["space"]; aplat[ag]=$col["platform"]
+      app[ag]=$col["app_name"]; aorg[ag]=$col["org"]; asp[ag]=$col["space"]
+      if (aplat[ag]!="windows") aplat[ag]=$col["platform"]   # sticky: one row saying windows makes the app windows (the merge fills platform per pair; review 2026-10-23)
       svc[sg]=$col["redis_service_name"]; sorg[sg]=$col["redis_service_org"]; ssp[sg]=$col["redis_service_space"]
       splan[sg]=plan_of($col["redis_deployment"]); sdep[sg]=$col["redis_deployment"]
       edge[rows]=k

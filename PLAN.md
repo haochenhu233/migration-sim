@@ -416,7 +416,20 @@ plus a review document for the client, built from the binding graph:
   second fixture `merged_report_iso.csv`. Still to decide with the client: silent waves last (owners: migrate
   or retire), `--wave-size`, IP headroom (157 live / 272 all) via `free-ips.sh`, director workers for 272
   creates. Open: can the merge emit a blank `platform` on a backward row of a Windows app? (then the windows
-  flag — and class — miss it: last row wins).
+  flag — and class — miss it: last row wins). **Answered the same evening, from the toolkit's source: worse
+  than that.** `platform` came only from the backward scan (cell type of a live connection), so a Windows app
+  with no live connection was never known as Windows — the NP "18 windows apps" counts only Windows apps with
+  a live connection; the 265 idle connections hide the rest. Fix in the discovery toolkit: `scan-apps` records
+  the app's lifecycle stack (`windows*` → windows, `cflinuxfs*`/docker → linux, else `?`) as `app_base.tsv`
+  column 6; `merge` prefers it, falls back to the cell value, warns on disagreement; old 5-column files behave
+  as before. Plus `plan`'s windows flag made sticky (any row → windows). Found on the way: `merge` exited 1
+  unless an external UPS existed (the last statement's status) — `return 0` added. New offline harness for
+  the toolkit (`test/cf-stub`, `test/case-platform.sh`, 16 checks; old tool fails 12). Review round (6):
+  `compare-reports` does NOT compare platform (my fit claim was wrong — it tracks consumer relationships, by
+  design; left as is); the 5-field tab-split read shifted on a null space → `\037` join; CRLF header /
+  hand-edited values → CR-tolerant, case-insensitive, odd values counted; the `/v3/apps` lifecycle shape not
+  verified live yet (asked for a 5-app `jq` from SBX); `return 0` comment; docs. **NP needs one more scan
+  before the plan is final** (the user has no NP access; the client runs it).
 - 2026-10-22 — **Second SBX pass, apply: 136 of 136 verified, 20 of 20, every wave 100 %; all 40
   name-syncs failed** with genesis's `[FATAL] Could not successfully authenticate` captured in the ledger
   note: the vault session renewed for the provision-check the day before had expired, and `safe-run.sh`
