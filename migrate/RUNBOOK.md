@@ -277,6 +277,10 @@ A WARN never blocks. A service **without a Valkey** yet gives a WARN ("apply cre
 
 One terminal per lane, each in `tmux`; a lane is a range of waves run back-to-back.
 
+When a service rolls back, read the app's log against **[`ROLLBACK-CAUSES.md`](ROLLBACK-CAUSES.md)**
+before touching anything: every rollback so far is one of six causes there, with its signature, its
+pre-wave check and its fix. Add the row the day a seventh appears.
+
 First, in each lane's window, renew the vault session and prove the name-sync wrapper works —
 genesis's session from the day before has expired by now, and the wrapper cannot ask for a login
 while the tool captures its output (SBX 2026-10-22: all 40 name-syncs of a pass failed that way,

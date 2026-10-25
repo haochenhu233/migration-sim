@@ -483,6 +483,13 @@ plus a review document for the client, built from the binding graph:
   sweep guids, int dry run, ext re-scan) as no longer needed. Open: `status` all-waves view lists services in
   `waves.tsv` (report) order, not by wave — display-only sort offered; release property for `max_connections`;
   sweep grace period.
+- 2026-10-25 (night) — **int: a .NET app rolled back** — `Accessed JArray values with invalid key value: "host"` from
+  a shared client cache library: the label lookup hard-coded in a library (cause #2), invisible to the scan; size the
+  class by buildpack over the bound apps; fix is the library's (accept `valkey` / select by tag) + rebuilds; until
+  then hazard. **`migrate/ROLLBACK-CAUSES.md` created** — the six causes seen (env-var label, library label, `\r`
+  password on the rollback bind, broken-before-the-wave, hollow Valkey, bind not landed) with signature, pre-wave
+  check, fix/owner, tool behaviour; linked from RUNBOOK §7. Proposed: `scan-apps` buildpack column +
+  `plan --hazard-buildpacks`.
 - 2026-10-24 — **NP re-scan with `8b41a32` (5516 apps / 280 orgs / 1294 spaces): platform line works live — 404
   windows, 5112 linux, 0 unknown; 333 SIs, 818 bindings, 16 static refs; stopped `exit 3` on 2 env timeouts
   (by design, re-run).** It also showed `manifest unreadable for 5514` = every manifest: since `2620eb9` the
