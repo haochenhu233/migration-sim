@@ -322,6 +322,11 @@ bash migrate/migrate.sh rollback --wave N --service <name>           --reason "<
 bash migrate/migrate.sh rollback --wave N --service <name> --app <app> --reason "<why>" --run runs/<env>   # one app
 ```
 
+`--service` takes a name **or a guid prefix** (`--service 9099605a`). A name is unique per space, not per
+wave: when two spaces hold a service of the same name (a shared instance's consumers, or just a common
+name), the name matches both and every command refuses with the two prefixes to choose from — use the
+prefix. (Before 2026-10-25 `apply`/`provision` took both services silently; ext did exactly that.)
+
 Names go back first (Valkey → `-valkey-staged`, Redis → `<name>`), then every app of the service
 is rebound to the Redis, unbound from the Valkey and restarted. Ctrl-C is ignored for the whole
 service rollback. Several services of one app: roll back in chain order away from the broken one,

@@ -925,9 +925,18 @@ rollback_service(){
   done < <(printf '%s\n' "$ROWS" | awk -F'\t' -v s="$sg" '$4==s && !seen[$9]++ {print $9"\t"$8"\t"$12}')
 }
 
+# svc_filter: ROWS := the wave's rows for --service (name, or guid prefix). A NAME is unique per space, not per wave: the
+#   same name in two spaces (a shared instance's consumers, or just a popular name) matches both, and apply would migrate
+#   both (ext 2026-10-25: --service <name> took two services in one go). Several services matched = refused with the
+#   guid prefixes to use; no match = refused. svc_select (rollback/confirm/retire) has had this guard since the start.
+svc_filter(){ [ -n "${SVCF:-}" ] || return 0
+  ROWS=$(printf '%s\n' "$ROWS" | awk -F'\t' -v f="$SVCF" '$3==f || index($4,f)==1'); [ -n "$ROWS" ] || { echo "wave $WAVE: no service matches --service $SVCF"; return 1; }
+  local n; n=$(printf '%s\n' "$ROWS" | cut -f4 | sort -u | wc -l | tr -d ' '); [ "$n" = 1 ] && return 0
+  echo "!! --service $SVCF matches $n services in wave $WAVE (same name, different spaces) -- nothing done; pick one by its guid prefix:"
+  printf '%s\n' "$ROWS" | awk -F'\t' '!s[$4]++ {printf "   --service %s   %s  (%s/%s)\n", substr($4,1,8), $3, $5, $6}'; return 1; }
 apply_wave(){
   ROWS=$(wave_rows "$WAVE"); [ -n "$ROWS" ] || { echo "wave $WAVE: no rows in $PLAN"; return 1; }
-  if [ -n "${SVCF:-}" ]; then ROWS=$(printf '%s\n' "$ROWS" | awk -F'\t' -v f="$SVCF" '$3==f || index($4,f)==1'); [ -n "$ROWS" ] || { echo "wave $WAVE: no service matches --service $SVCF"; return 1; }; fi
+  svc_filter || return 1
   local nsvc napp; nsvc=$(printf '%s\n' "$ROWS" | cut -f4 | sort -u | wc -l | tr -d ' '); napp=$(printf '%s\n' "$ROWS" | cut -f9 | sort -u | wc -l | tr -d ' ')
   echo "APPLY wave $WAVE: $nsvc service(s), $napp app(s)  run=$RUN  operator=$OP"
   # gate: preflight (unless --force), then the lock
@@ -957,7 +966,7 @@ apply_wave(){
 #   skipped; a staged Valkey that vanished from CF is recorded (create-valkey fail = void) and created again.
 provision_wave(){
   ROWS=$(wave_rows "$WAVE"); [ -n "$ROWS" ] || { echo "wave $WAVE: no rows in $PLAN"; return 1; }
-  if [ -n "${SVCF:-}" ]; then ROWS=$(printf '%s\n' "$ROWS" | awk -F'\t' -v f="$SVCF" '$3==f || index($4,f)==1'); [ -n "$ROWS" ] || { echo "wave $WAVE: no service matches --service $SVCF"; return 1; }; fi
+  svc_filter || return 1
   local nsvc; nsvc=$(printf '%s\n' "$ROWS" | cut -f4 | sort -u | wc -l | tr -d ' ')
   echo "PROVISION wave $WAVE: $nsvc service(s) -> Valkeys created now as <name>-valkey-staged; Redis and apps untouched  run=$RUN  operator=$OP"
   local info; info=$(cfcurl "/v3/info"); cf_json_ok "$info" || { echo "!! cf curl /v3/info failed -- not logged in?"; return 1; }
