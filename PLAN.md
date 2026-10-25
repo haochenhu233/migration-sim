@@ -470,6 +470,13 @@ plus a review document for the client, built from the binding graph:
   the label class is at risk, now `env-key`). int: no refresh-import, dry run still to be run. Also today: `--service`
   guard `2ae2131`, discovery `env-key` `b172ad6` + manifest leg `a9c79ad`, two knowledge notes (CR password,
   hollow sweep). Open: two sweep-removed guids vs the plan; ext re-scan/merge/plan with `env-key`; int dry run.
+- 2026-10-25 (night) — **int wave 1 (30 silent services): 13 hollow at `--max-inflight 10` → root cause #2 =
+  Blacksmith's write pool of 4** (`max_connections`, default, not in the release template): a Provision waiting for
+  a slot has its index line and no deployment, so the sweep takes it; 7 logged by the sweep, 6 the same one step
+  earlier. Hand-set `max_connections: 16` on the int Blacksmith VM + restart, re-provisioned with
+  `--max-inflight 15` → **0 hollow**. Rule now: inflight ≤ pool ≤ free workers (RUNBOOK §4, Friday checklist:
+  re-check the pool after any Blacksmith deploy). **ext still at 4 — set 16 before Sunday.** Follow-ups: release
+  property `bosh.max_connections` + kit param; sweep grace period.
 - 2026-10-24 — **NP re-scan with `8b41a32` (5516 apps / 280 orgs / 1294 spaces): platform line works live — 404
   windows, 5112 linux, 0 unknown; 333 SIs, 818 bindings, 16 static refs; stopped `exit 3` on 2 env timeouts
   (by design, re-run).** It also showed `manifest unreadable for 5514` = every manifest: since `2620eb9` the

@@ -17,7 +17,7 @@ does not repeat.
 | when | step | section |
 |---|---|---|
 | Thursday + Friday, twice a day | discovery scan, merge | 2 |
-| Friday | `plan` from the freshest report, review, `name-check --fix`, `provision`, `provision-check` | 3, 4, 5 |
+| Friday | `plan` from the freshest report, review, `name-check --fix`; on each Blacksmith VM `grep max_connections /var/vcap/jobs/blacksmith/config/blacksmith.conf` (16, else set + restart); `provision --max-inflight`, `provision-check` | 3, 4, 5 |
 | Saturday, Sunday morning | `provision-check` again (the Valkeys are still real) | 5 |
 | Sunday | `preflight`, `dry-run`, `apply` per lane; `status` in another terminal | 6, 7, 8 |
 | after | `name-sync` to 0, hand checks, numbers; `confirm` / `retire` weeks later | 9 |
@@ -166,9 +166,15 @@ of any create whose deploy task is still *queued* when its hourly sweep ticks; C
 `succeeded` for a Valkey that never came (a "hollow" — ext 2026-10-25, 7 of them; see
 `knowledge/blacksmith/hollow-valkey-orphan-sweep.md`). A task that has a worker is listed within
 seconds, so the rule is "never more creates alive than workers": the next create is issued only when
-fewer than N Valkey creates are still `in progress` in CF — this run's, a killed run's, anyone's. N = the
-director's `workers` minus what else runs there (Blacksmith batch jobs, other deploys): 20 workers idle →
-16; 20 with 8 batch jobs → 10. One `provision` per director at a time. No broker or director restart while
+fewer than N Valkey creates are still `in progress` in CF — this run's, a killed run's, anyone's. N must also fit
+**Blacksmith's own write pool** — every create takes one of `bosh.max_connections` slots (default **4**) and a
+create waiting for a slot is exposed to the sweep exactly like a queued task (int 2026-10-25: 13 hollow at
+N=10 with the default pool; 0 at pool 16 / N=15). So: `--max-inflight` ≤ `max_connections` ≤ the director's
+free workers. The pool key is not in the release template — set it by hand on the Blacksmith VM
+(`max_connections: 16` under `bosh:` in `/var/vcap/jobs/blacksmith/config/blacksmith.conf`, then `monit
+restart blacksmith` with nothing in flight) and **re-check it on the Friday**: a Blacksmith deploy resets it
+to 4. N = min(pool, workers minus other load): 20 workers idle, pool 16 → 15; 8 batch jobs running → 10.
+One `provision` per director at a time. No broker or director restart while
 creates are in flight (a broker restart moves the tick; a director restart kills queued tasks). The
 per-wave line says how often the gate waited; "not issued … (--max-inflight N)" lines mean the count
 never dropped within `INFLIGHT_TIMEOUT` (default 1500 s) — `provision` again later creates the rest.
