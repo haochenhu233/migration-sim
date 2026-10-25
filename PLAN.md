@@ -450,6 +450,14 @@ plus a review document for the client, built from the binding graph:
   Also: discovery manifest leg fixed (`a9c79ad`); `scan-ups` is O(UPS × Redis) process spawns — hours on NP,
   skipped (merge tolerates its absence). ext/int on one bastion: separate `CF_HOME`, separate run dirs with
   env-specific conf; endpoint guard proposed, not built.
+- 2026-10-25 (later) — **Hollow cause proven from the ext broker log**: `03:46:19Z Orphan check complete - removed 7
+  orphaned instances`, all `valkey-cache-*`, the five HOLLOW guids among them, 37 min after the 03:09 creates;
+  every later tick `removed 0`; tick phase moved `:46 → :52` with the 16:52 broker restart. Knowledge note
+  `knowledge/blacksmith/hollow-valkey-orphan-sweep.md`; primer updated. Rule for Sunday: in-flight creates ≤
+  director workers, no broker/director restart mid-provisioning, `provision-check` per batch; `provision
+  --max-inflight N` proposed (go/no-go pending). Two of the seven removed guids not yet matched to the plan.
+  Discovery `b172ad6` (`static-ref: env-key`, 13/13 on the bastion) and migration-sim `2ae2131` (`--service`
+  guard, 6/6 on the bastion) pulled on the bastion; client bundle = `redis-consumer-discovery.sh` + `USAGE.md`.
 - 2026-10-24 — **NP re-scan with `8b41a32` (5516 apps / 280 orgs / 1294 spaces): platform line works live — 404
   windows, 5112 linux, 0 unknown; 333 SIs, 818 bindings, 16 static refs; stopped `exit 3` on 2 env timeouts
   (by design, re-run).** It also showed `manifest unreadable for 5514` = every manifest: since `2620eb9` the
