@@ -464,6 +464,12 @@ plus a review document for the client, built from the binding graph:
   knowledge note (`bind-password-cr-spruce-cache.md`, Resolution 0–5). **int and the largest NP env: run the
   dry run before their windows** — if they were imported the same way they carry the same 38-style defect and
   every rollback there would fail until fixed.
+- 2026-10-25 (close) — **`provision/apply --max-inflight N` built (`8e4329f`)**, 22/22 offline and on the bastion, two
+  review rounds (9 findings; the count is CF's in-progress Valkey creates, not this run's). Workers: ext 20 → N=16;
+  largest int 20 with 8 RabbitMQ batch jobs → N=10. Valkey offering carries tag `redis` in ext (tag lookups safe; only
+  the label class is at risk, now `env-key`). int: no refresh-import, dry run still to be run. Also today: `--service`
+  guard `2ae2131`, discovery `env-key` `b172ad6` + manifest leg `a9c79ad`, two knowledge notes (CR password,
+  hollow sweep). Open: two sweep-removed guids vs the plan; ext re-scan/merge/plan with `env-key`; int dry run.
 - 2026-10-24 — **NP re-scan with `8b41a32` (5516 apps / 280 orgs / 1294 spaces): platform line works live — 404
   windows, 5112 linux, 0 unknown; 333 SIs, 818 bindings, 16 static refs; stopped `exit 3` on 2 env timeouts
   (by design, re-run).** It also showed `manifest unreadable for 5514` = every manifest: since `2620eb9` the
