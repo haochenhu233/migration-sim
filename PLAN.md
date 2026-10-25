@@ -458,6 +458,12 @@ plus a review document for the client, built from the binding graph:
   --max-inflight N` proposed (go/no-go pending). Two of the seven removed guids not yet matched to the plan.
   Discovery `b172ad6` (`static-ref: env-key`, 13/13 on the bastion) and migration-sim `2ae2131` (`--service`
   guard, 6/6 on the bastion) pulled on the bastion; client bundle = `redis-consumer-discovery.sh` + `USAGE.md`.
+- 2026-10-25 (evening) — **`\r` password fixed fleet-wide in ext**: `safe paths` dry run found 38 of the imported
+  Redis with a CR in `secret/<guid>/redis/system:password` (password only), stripped, verified 0, one
+  `monit restart blacksmith` (sweep tick moves), rolled-back apps rebound → connected. Procedure in the
+  knowledge note (`bind-password-cr-spruce-cache.md`, Resolution 0–5). **int and the largest NP env: run the
+  dry run before their windows** — if they were imported the same way they carry the same 38-style defect and
+  every rollback there would fail until fixed.
 - 2026-10-24 — **NP re-scan with `8b41a32` (5516 apps / 280 orgs / 1294 spaces): platform line works live — 404
   windows, 5112 linux, 0 unknown; 333 SIs, 818 bindings, 16 static refs; stopped `exit 3` on 2 env timeouts
   (by design, re-run).** It also showed `manifest unreadable for 5514` = every manifest: since `2620eb9` the
