@@ -477,6 +477,12 @@ plus a review document for the client, built from the binding graph:
   `--max-inflight 15` → **0 hollow**. Rule now: inflight ≤ pool ≤ free workers (RUNBOOK §4, Friday checklist:
   re-check the pool after any Blacksmith deploy). **ext still at 4 — set 16 before Sunday.** Follow-ups: release
   property `bosh.max_connections` + kit param; sweep grace period.
+- 2026-10-25 (late) — **ext migration finished** (every wave applied; first full env through the tool, with the
+  `\r` fix, the `--service` guard and the pool/inflight rule learned on the way). **int wave 1 (30 silent services)
+  provisioned clean at pool 16 / inflight 15 and being migrated.** Operator closed the open items (ext pool,
+  sweep guids, int dry run, ext re-scan) as no longer needed. Open: `status` all-waves view lists services in
+  `waves.tsv` (report) order, not by wave — display-only sort offered; release property for `max_connections`;
+  sweep grace period.
 - 2026-10-24 — **NP re-scan with `8b41a32` (5516 apps / 280 orgs / 1294 spaces): platform line works live — 404
   windows, 5112 linux, 0 unknown; 333 SIs, 818 bindings, 16 static refs; stopped `exit 3` on 2 env timeouts
   (by design, re-run).** It also showed `manifest unreadable for 5514` = every manifest: since `2620eb9` the
