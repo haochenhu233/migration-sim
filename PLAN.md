@@ -430,6 +430,26 @@ plus a review document for the client, built from the binding graph:
   hand-edited values → CR-tolerant, case-insensitive, odd values counted; the `/v3/apps` lifecycle shape not
   verified live yet (asked for a 5-app `jq` from SBX); `return 0` comment; docs. **NP needs one more scan
   before the plan is final** (the user has no NP access; the client runs it).
+- 2026-10-25 — **ext, first real waves: one wave clean, one wave stopped by the breaker (3 in a row), all rolled
+  back; five findings, all written down.** (1) **Hollow Valkeys** (CF `succeeded`, no deployment, broker index
+  empty — `"Instance has been deleted"` = not in index, `broker.go:480`): most likely the broker's **hourly
+  no-deployment sweep** (`main.go:903-919`, `broker.go:1209-1280`, no grace period) deleting index lines of
+  creates whose deploy task is still queued; second candidate the unlocked index read-modify-write
+  (`operations.go:148`). Rule: in-flight creates ≤ director workers, nothing redeploys director/broker during
+  provisioning, `provision-check` after every batch; broker-log proof still pending. (2) **Label-lookup class**:
+  apps selecting the binding by offering label (`REDIS_SERVICE=redis`, `VCAP_SERVICES.redis[0]`) die with
+  ioredis `ERR_MISSING_ARGS` on the Valkey binding; not a static ref, so not hazard — `env-label` kind for
+  `merge` to build; tag-based lookups (java-cfenv) depend on the Valkey offering carrying tag `redis`
+  (forge default `[blacksmith, dedicated, valkey]`) — kit `service.tags` change before Sunday. (3) **`\r`
+  password on rollback bind**: imported Redis have `secret/<guid>/redis/system:password` ending in CR; new
+  bindings (every rollback) get `WRONGPASS`; fix = strip + `monit restart blacksmith` (spruce vault cache) +
+  rebind — knowledge note `knowledge/blacksmith/bind-password-cr-spruce-cache.md`; fleet sweep per env
+  pending. (4) **`--service <name>` matched two same-named services** (shared instance, two spaces) and
+  migrated both — guard `svc_filter` in `2ae2131` (refuses, prints guid prefixes; case-service-filter 6/6,
+  negative check bites). (5) `apply` runs preflight per wave itself; whole-plan hand preflight not needed.
+  Also: discovery manifest leg fixed (`a9c79ad`); `scan-ups` is O(UPS × Redis) process spawns — hours on NP,
+  skipped (merge tolerates its absence). ext/int on one bastion: separate `CF_HOME`, separate run dirs with
+  env-specific conf; endpoint guard proposed, not built.
 - 2026-10-24 — **NP re-scan with `8b41a32` (5516 apps / 280 orgs / 1294 spaces): platform line works live — 404
   windows, 5112 linux, 0 unknown; 333 SIs, 818 bindings, 16 static refs; stopped `exit 3` on 2 env timeouts
   (by design, re-run).** It also showed `manifest unreadable for 5514` = every manifest: since `2620eb9` the
