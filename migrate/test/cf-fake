@@ -13,7 +13,9 @@
 #   CFFAKE_BROKEN=<app guid>:<r>[,..]  only r of that app's instances are RUNNING (the rest CRASHED), before and after any
 #                                      restart -- an app broken BEFORE its wave (lab 2026-10-22)
 #   CFFAKE_INSTANCES=<guid>=N[,..]     instance count per app (default 1)
-#   CFFAKE_CREATE_POLLS=N              job polls before a create completes (default 2)
+#   CFFAKE_CREATE_POLLS=N              job polls before a create completes (default 2); a GET of the instance list WITH
+#                                      service_plan_guids (the --max-inflight gate's) is one poll's worth for every pending create
+#   CFFAKE_TOUCH=<file>:<n>            create <file> on the n-th such listing (a STOP file appearing while the gate waits)
 #   CFFAKE_BIND_FAIL=<app guid>        binding create for that app FAILS (job); like CF, the binding record STAYS in state
 #                                      'create failed' and a new bind for the pair is refused until it is deleted
 #   CFFAKE_BIND_POLLS=N                job polls before a bind completes (default 1). A binding's last_operation.state follows
@@ -82,6 +84,15 @@ code=200; hdr={}; out=None
 def err(c,title,detail): global code,out; code=c; out={'errors':[{'title':title,'detail':detail}]}
 def job(kind, polls=1, fail=None):
     jg='job-'+uuid.uuid4().hex[:8]; st['jobs'][jg]={'kind':kind,'polls':polls,'n':0,'fail':fail}; return jg
+def job_tick(jg):   # one poll's worth of time for that job; its answer (and the instance's last_operation once it is done)
+    j=st['jobs'][jg]; j['n']+=1
+    if j['n']>=j['polls']:
+        if j['fail']:
+            if j['kind'].startswith('create:') and j['kind'][7:] in st['si']: st['si'][j['kind'][7:]]['last_op']={'type':'create','state':'failed'}
+            return {'guid':jg,'state':'FAILED','errors':[{'title':'CF-UnableToPerform','detail':j['fail']}]}
+        if j['kind'].startswith('create:'): st['si'][j['kind'][7:]]['last_op']={'type':'create','state':'succeeded'}
+        return {'guid':jg,'state':'COMPLETE','errors':[]}
+    return {'guid':jg,'state':'PROCESSING','errors':[]}
 def accepted(jg): global code; code=202; hdr['Location']='https://api.fake/v3/jobs/'+jg
 def listing(res): return {'pagination':{'total_results':len(res),'next':None},'resources':res}
 H=os.environ.get('CFFAKE_HOLLOW','')
@@ -119,15 +130,7 @@ elif p=='/v3/jobs/'+p[9:] and p.startswith('/v3/jobs/'):
     jg=p[9:]; j=st['jobs'].get(jg)
     if not j: err(404,'CF-ResourceNotFound','job')
     else:
-        j['n']+=1
-        if j['n']>=j['polls']:
-            if j['fail']:
-                out={'guid':jg,'state':'FAILED','errors':[{'title':'CF-UnableToPerform','detail':j['fail']}]}
-                if j['kind'].startswith('create:') and j['kind'][7:] in st['si']: st['si'][j['kind'][7:]]['last_op']={'type':'create','state':'failed'}
-            else:
-                out={'guid':jg,'state':'COMPLETE','errors':[]}
-                if j['kind'].startswith('create:'): st['si'][j['kind'][7:]]['last_op']={'type':'create','state':'succeeded'}
-        else: out={'guid':jg,'state':'PROCESSING','errors':[]}
+        out=job_tick(jg)
 elif p.startswith('/v3/service_plans/'):
     g=p.split('/')[3]; v=PLANS.get(g)
     if not v: err(404,'CF-ResourceNotFound','Service plan not found')
@@ -143,12 +146,21 @@ elif p.startswith('/v3/organizations/'):
     if g not in names: err(404,'CF-ResourceNotFound','Organization not found')
     else: out={'guid':g,'name':names[g]}
 elif p=='/v3/service_plans':
-    names=q.get('names',[''])[0].split(','); off=q.get('service_offering_names',[''])[0]
-    out=listing([{'guid':g,'name':v['name']} for g,v in st['plans'].items() if v['name'] in names and (not off or v['offering']==off)])
+    names=q['names'][0].split(',') if q.get('names') else None; off=q.get('service_offering_names',[''])[0]   # no names= -> every plan (of the offering), as on CF
+    out=listing([{'guid':g,'name':v['name']} for g,v in st['plans'].items() if (names is None or v['name'] in names) and (not off or v['offering']==off)])
 elif p=='/v3/service_instances' and method=='GET':
     bad=[k for k in q if k not in ('names','space_guids','guids','type','service_plan_guids','per_page','page')]
     if bad: err(400,'CF-BadQueryParameter',f"Unknown query parameter(s): '{','.join(bad)}'")
     else:
+        # time passes: a real deploy advances whether or not anyone polls its job; here every instance LISTING is one
+        # poll's worth for every pending create (the --max-inflight gate lists instead of polling jobs). CFFAKE_TOUCH=
+        # <file>:<n> creates <file> on the n-th listing (a STOP file appearing while the gate waits).
+        if q.get('service_plan_guids'):   # the gate's listing only (accept/leftover listings are by name and must not move time)
+            st['lists']=st.get('lists',0)+1
+            for jg,j in list(st['jobs'].items()):
+                if j['kind'].startswith('create:') and j['n']<j['polls']: job_tick(jg)
+            t=os.environ.get('CFFAKE_TOUCH','')
+            if t and st['lists']==int(t.rsplit(':',1)[1]): open(t.rsplit(':',1)[0],'w').close()
         res=[si_obj(g) for g,s in st['si'].items() if (not q.get('names') or s['name'] in q['names'][0].split(',')) and (not q.get('space_guids') or s['space'] in q['space_guids'][0].split(','))]
         out=listing(res)
 elif p=='/v3/service_instances' and method=='POST':
@@ -158,6 +170,9 @@ elif p=='/v3/service_instances' and method=='POST':
         # like CF: the instance is 'initial' until a job worker has called the broker; a POST while another create is
         # still 'initial' is what reaches Blacksmith concurrently -> counted in st['overlap'] (must stay 0)
         if any(s['last_op']['state']=='initial' for s in st['si'].values()): st['overlap']=st.get('overlap',0)+1
+        # creates alive (not yet succeeded/failed) at this POST, the new one included: the --max-inflight cap is asserted on its max
+        alive=1+sum(1 for s in st['si'].values() if s['last_op']['type']=='create' and s['last_op']['state'] in ('initial','in progress'))
+        st['maxinflight']=max(st.get('maxinflight',0), alive)
         g=str(uuid.uuid4()); st['si'][g]={'name':name,'space':sp,'plan':pl,'last_op':{'type':'create','state':'initial'},'seen':0}; broker_stores(g, name)
         fail=f"Service broker error: provision failed for {name}" if os.environ.get('CFFAKE_FAIL_CREATE')==name else None
         accepted(job('create:'+g, int(os.environ.get('CFFAKE_CREATE_POLLS','2')), fail))

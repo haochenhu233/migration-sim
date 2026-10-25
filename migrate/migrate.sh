@@ -8,9 +8,9 @@
 set -uo pipefail
 SUB="${1:-}"; shift || true
 RUN="."; WAVE=""
-WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; SVCRE=""; ARG=""; WAVES=""; SVCF=""; YES=""; FORCE=""; NO_ROLLING=""; FIX=""; ISOLATE=""
+WSIZE=""; MAXAPPS=""; SILENTMAX=""; ORDER=""; FREE_IPS=""; SVCRE=""; ARG=""; WAVES=""; SVCF=""; YES=""; FORCE=""; NO_ROLLING=""; FIX=""; ISOLATE=""; MAXINFLIGHT=""
 APPF=""; REASON=""; BY=""; GRACE="336h"; NO_CENSUS=""
-while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --waves) WAVES="$2"; shift 2;; --service) SVCF="$2"; shift 2;; --yes) YES=1; shift;; --force) FORCE=1; shift;; --fix) FIX=1; shift;; --no-rolling) NO_ROLLING=1; shift;; --no-bosh) NO_BOSH=1; shift;; --app) APPF="$2"; shift 2;; --reason) REASON="$2"; shift 2;; --by) BY="$2"; shift 2;; --grace) GRACE="$2"; shift 2;; --no-census) NO_CENSUS=1; shift;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --isolate) ISOLATE="$2"; shift 2;; --isolate=*) ISOLATE="${1#*=}"; shift;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
+while [ "${1:-}" ]; do case "$1" in --run) RUN="$2"; shift 2;; --wave) WAVE="$2"; shift 2;; --waves) WAVES="$2"; shift 2;; --service) SVCF="$2"; shift 2;; --yes) YES=1; shift;; --force) FORCE=1; shift;; --fix) FIX=1; shift;; --no-rolling) NO_ROLLING=1; shift;; --no-bosh) NO_BOSH=1; shift;; --app) APPF="$2"; shift 2;; --reason) REASON="$2"; shift 2;; --by) BY="$2"; shift 2;; --grace) GRACE="$2"; shift 2;; --no-census) NO_CENSUS=1; shift;; --wave-size) WSIZE="$2"; shift 2;; --max-apps) MAXAPPS="$2"; shift 2;; --silent-max-apps) SILENTMAX="$2"; shift 2;; --order) ORDER="$2"; shift 2;; --isolate) ISOLATE="$2"; shift 2;; --isolate=*) ISOLATE="${1#*=}"; shift;; --max-inflight) MAXINFLIGHT="$2"; shift 2;; --max-inflight=*) MAXINFLIGHT="${1#*=}"; shift;; --free-ips) FREE_IPS="$2"; shift 2;; --services) SVCRE="$2"; shift 2;; -*) shift;; *) ARG="$1"; shift;; esac; done
 PLAN="$RUN/waves.tsv"; LEDGER="$RUN/ledger.jsonl"
 
 
@@ -606,6 +606,7 @@ cmd_summary(){
 OP="${MIGRATE_OP:-${USER:-operator}}"
 JOB_POLL="${JOB_POLL:-5}"; CREATE_TIMEOUT="${CREATE_TIMEOUT:-1500}"; BIND_TIMEOUT="${BIND_TIMEOUT:-300}"
 ACCEPT_TIMEOUT="${ACCEPT_TIMEOUT:-120}"   # a create's last_operation must leave 'initial' (the broker answered) before the next is issued
+INFLIGHT_TIMEOUT="${INFLIGHT_TIMEOUT:-$CREATE_TIMEOUT}"   # --max-inflight: how long the next create may wait for the count to drop before the run stops issuing
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-300}"; SOAK="${SOAK:-30}"; BREAKER="${BREAKER:-3}"
 now(){ date -u +%FT%TZ; }
 ledger_add(){ # wave service app step outcome ms note
@@ -976,9 +977,10 @@ provision_wave(){
   fi
   wave_lock "$WAVE" || return 1
   svc_arrays
-  local sg name sorg ssp plan flags j cur vk rc=0
+  local sg name sorg ssp plan flags j cur vk rc=0 nseen=0
   while IFS=$'\t' read -r sg name sorg ssp plan flags; do
     halt_check || { rc=1; break; }
+    nseen=$((nseen+1))
     j=$(cfx "/v3/service_instances/$sg" 2>/dev/null); cf_json_ok "$j" || { ledger_add "$WAVE" "$sg" "" drift fail 0 "GET service: $(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)"; SKIP[$sg]=1; say "!! $name: cannot read instance $sg -- skipped"; continue; }
     cur=$(printf '%s' "$j" | jq -r .name); local sp; sp=$(printf '%s' "$j" | jq -r '.relationships.space.data.guid')
     local exp="$name"; [ -z "$(ledger_done "$sg" "" rename-standby)" ] || exp="${name}-redis-standby"
@@ -996,18 +998,23 @@ provision_wave(){
       ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "staged valkey $vk gone from CF ($(printf '%s' "$j" | jq -r '.errors[0].detail // "no JSON"' 2>/dev/null)) -- creating again"; say "!! $name: staged valkey ${vk:0:8} gone from CF -- creating again"
     fi
     svc_create_issue "$sg" "$name" "$sp" "$plan" "$(staged_name "$name")"
+    [ -z "$GATE_HALT" ] || { rc=1; break; }   # a halt inside the --max-inflight gate (nothing issued for this service): the wave halts here, not "provisioned"
   done < <(printf '%s\n' "$ROWS" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
   svc_create_wait
+  [ -z "${MAXINFLIGHT:-}" ] || { inflight_count || true; say "--max-inflight $MAXINFLIGHT: this wave the gate held the next create back $GATE_WAITS time(s), ${GATE_SECS}s in all; ${GATE_N:-?} create(s) in progress on the Valkey plans now"; }
   local nskip=0; for sg in "${!SKIP[@]}"; do nskip=$((nskip+1)); done
-  ledger_add "$WAVE" "" "" provision ok 0 "$nsvc services, $nskip failed/skipped"
+  if [ "$rc" = 0 ]; then ledger_add "$WAVE" "" "" provision ok 0 "$nsvc services, $nskip failed/skipped"
+    say "wave $WAVE provisioned ($nskip service(s) failed/skipped) -- review $RUN/inventory.tsv; status --wave $WAVE"
+  else ledger_add "$WAVE" "" "" provision ok 0 "halted after $nseen of $nsvc services ($nskip failed/skipped); the issued creates were waited for"
+    say "wave $WAVE HALTED after $nseen of $nsvc service(s) -- the rest is untouched; provision --wave $WAVE again to continue"; fi
   write_inventory; wave_unlock
-  say "wave $WAVE provisioned ($nskip service(s) failed/skipped) -- review $RUN/inventory.tsv; status --wave $WAVE"
   [ -z "${ISSUE_STOP:-}" ] || { say "!! not every create of wave $WAVE was issued ($ISSUE_STOP) -- no later wave is started by this run"; rc=1; }
   return $rc
 }
 cmd_provision(){
-  local list; list=$(wave_list); [ -n "$list" ] || { echo "usage: migrate.sh provision --wave N | --waves A-B [--service X] [--yes] [--run dir]"; exit 1; }
+  local list; list=$(wave_list); [ -n "$list" ] || { echo "usage: migrate.sh provision --wave N | --waves A-B [--service X] [--max-inflight N] [--yes] [--run dir]"; exit 1; }
   [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
+  [ -z "${MAXINFLIGHT:-}" ] || [[ "$MAXINFLIGHT" =~ ^[1-9][0-9]*$ ]] || { echo "!! --max-inflight: a whole number above 0 (the director's free workers), got '$MAXINFLIGHT' -- nothing done"; exit 1; }
   STOP_REQ=0; trap 'STOP_REQ=1; echo; echo "!! Ctrl-C: the running step completes and is recorded, then provision stops"' INT
   trap 'write_inventory; inventory_counts; wave_unlock' EXIT     # the inventory is current however provision ends
   ISSUE_STOP=""; local w; for w in $list; do WAVE="$w"; provision_wave || { echo "!! stopped at wave $w"; return 1; }; done
@@ -1310,7 +1317,7 @@ cmd_namecheck(){
   [ "$bad" = 0 ]
 }
 
-svc_arrays(){ unset VK SKIP JOBS PLANG SPACE CLEANED VNAME ACC; declare -gA VK SKIP JOBS PLANG SPACE CLEANED VNAME ACC; }   # per wave (ISSUE_STOP is per RUN: cmd_provision / cmd_apply reset it)
+svc_arrays(){ unset VK SKIP JOBS PLANG SPACE CLEANED VNAME ACC; declare -gA VK SKIP JOBS PLANG SPACE CLEANED VNAME ACC; GATE_WAITS=0; GATE_SECS=0; }   # per wave (ISSUE_STOP is per RUN: cmd_provision / cmd_apply reset it)
 # svc_create_accept <sg> <name> <vname> <space>: ONE CREATE AT A TIME AS BLACKSMITH SEES IT. CF answers the POST at
 #   once and calls the broker later from a job worker; the instance's last_operation.state stays 'initial' until the
 #   broker answered 202 -- and Blacksmith writes its index line inside Provision, before that 202 (SBX 2026-10-20:
@@ -1330,6 +1337,35 @@ svc_create_accept(){
     sleep "$JOB_POLL"
   done
 }
+# --max-inflight N (DESIGN: hollow Valkeys, 2026-10-25): a create whose deploy task is still QUEUED on the director when
+#   Blacksmith's hourly no-deployment sweep ticks loses its index line (CF then says "succeeded" for a Valkey that never
+#   came). A task that has a worker is listed within seconds, so the rule is "never more creates alive than workers".
+#   The count is CF's, not this run's: managed instances on the Valkey offering's plans whose create is still 'initial'
+#   or 'in progress' -- this run's, a killed run's stragglers, anyone's (review 2026-10-25: a Ctrl-C-then-rerun must not
+#   stack N on top of what is still deploying). One listing per poll; a failed listing counts as "unknown = full" (fail
+#   closed), three in a row stop the run issuing (ISSUE_STOP, like the accept timeout); past INFLIGHT_TIMEOUT likewise.
+#   Blacksmith's own batch jobs (stemcell upgrades) are not CF operations: leave them out of N by hand. Check-then-POST:
+#   two runs (or a run and another operator) can both read N-1 and both POST -- the count is CF's, not a lock; one
+#   provision at a time per director, and N below the free workers, is what makes it safe.
+#   Unset = no cap (today's behaviour). GATE_* are per wave (svc_arrays); GATE_HALT ends the wave like any halt.
+VK_PLANS=""; GATE_WAITS=0; GATE_SECS=0; GATE_N=""; GATE_HALT=""
+inflight_count(){ GATE_N=""   # sets GATE_N; 1 when CF could not be asked (plans or instances listing failed)
+  if [ -z "$VK_PLANS" ]; then local pj; pj=$(cflist "/v3/service_plans?service_offering_names=valkey&per_page=200") || return 1
+    printf '%s' "$pj" | jq -e '.pagination.next == null' >/dev/null 2>&1 || return 1   # more pages than one = not counted = fail closed
+    VK_PLANS=$(printf '%s' "$pj" | jq -r '[.resources[].guid]|join(",")' 2>/dev/null); [ -n "$VK_PLANS" ] || return 1; fi
+  local lj; lj=$(cflist "/v3/service_instances?type=managed&service_plan_guids=$VK_PLANS&per_page=5000") || return 1
+  printf '%s' "$lj" | jq -e '.pagination.next == null' >/dev/null 2>&1 || return 1   # per_page=5000 is CF's maximum; a second page would mean an undercount
+  GATE_N=$(printf '%s' "$lj" | jq -r '[.resources[]|select(.last_operation.type=="create" and (.last_operation.state=="initial" or .last_operation.state=="in progress"))]|length' 2>/dev/null)
+  [[ "$GATE_N" =~ ^[0-9]+$ ]] || { GATE_N=""; return 1; }; }
+inflight_gate(){ [ -n "${MAXINFLIGHT:-}" ] || return 0
+  local t0 said="" bad=0; t0=$(date +%s)
+  while :; do
+    if inflight_count; then bad=0; [ "$GATE_N" -lt "$MAXINFLIGHT" ] && { [ -z "$said" ] || GATE_SECS=$((GATE_SECS + $(date +%s) - t0)); return 0; }
+    else bad=$((bad+1)); [ "$bad" -ge 3 ] && { ISSUE_STOP="cannot count the creates in progress (listing failed ${bad}x; --max-inflight $MAXINFLIGHT) -- no further create issued; provision again later for the rest"; say "!! $ISSUE_STOP"; return 1; }; fi
+    halt_check || { GATE_HALT=1; return 1; }
+    [ $(( $(date +%s)-t0 )) -ge "$INFLIGHT_TIMEOUT" ] && { ISSUE_STOP="${GATE_N:-?} create(s) still in progress after ${INFLIGHT_TIMEOUT}s (--max-inflight $MAXINFLIGHT) -- no further create issued; provision again later for the rest"; say "!! $ISSUE_STOP"; GATE_SECS=$((GATE_SECS + $(date +%s) - t0)); return 1; }
+    [ -n "$said" ] || { say "   --max-inflight $MAXINFLIGHT: ${GATE_N:-?} create(s) in progress on the Valkey plans -- next create waits"; said=1; GATE_WAITS=$((GATE_WAITS+1)); }
+    sleep "$JOB_POLL"; done; }
 # svc_create_issue <sg> <name> <space> <plan> <vname>: plan lookup, leftover rules on <vname>, POST (waited by
 #   svc_create_wait). <vname> is <name> on cutover day or <name>-valkey-staged from provision (note: "(staged").
 #   Outcome: JOBS (issued) | VK (adopted, ledger ok) | SKIP (ledger create-valkey fail).
@@ -1359,6 +1395,7 @@ svc_create_issue(){
     else ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "name $vname taken by $lg ($lst, plan $lpl) -- not ours to touch"; SKIP[$sg]=1; say "!! $name: name $vname taken by ${lg:0:8} ($lst) -- skipped"; return; fi
   fi
   issue_blocked && return
+  inflight_gate || { issue_blocked && return; [ -z "$GATE_HALT" ] || { ledger_add "$WAVE" "$sg" "" create-valkey fail 0 "not issued: halted (STOP / Ctrl-C) while waiting in the --max-inflight gate"; SKIP[$sg]=1; say "!! $name: create not issued -- halted in the gate"; }; return; }   # SKIP: svc_names_back puts its name back (apply renamed it first)
   if cfreq POST "/v3/service_instances" "{\"type\":\"managed\",\"name\":\"$vname\",\"relationships\":{\"space\":{\"data\":{\"guid\":\"$sp\"}},\"service_plan\":{\"data\":{\"guid\":\"$pg\"}}}}" && [ -n "$R_JOB" ]; then
     JOBS[$sg]="$R_JOB $(date +%s)"; say "$name: valkey create issued as $vname ($tag) -> $R_JOB"
     svc_create_accept "$sg" "$name" "$vname" "$sp" || true   # the issued create is still waited for; only the NEXT ones are held back
@@ -1442,6 +1479,7 @@ apply_services(){
       continue
     fi
     svc_create_issue "$sg" "$name" "$sp" "$plan" "$name"
+    [ -z "$GATE_HALT" ] || { halted=1; break; }   # a halt inside the --max-inflight gate: this service's names go back below, the wave halts
   done < <(printf '%s\n' "$ROWS" | awk -F'\t' '!seen[$4]++ {print $4"\t"$3"\t"$5"\t"$6"\t"$7"\t"$12}')
   svc_create_wait
   [ -z "$halted" ] || { say "!! halted: the issued creates were waited for; names of the services given up on go back; the rest resumes with apply"; svc_names_back; return 1; }
@@ -1586,6 +1624,7 @@ cmd_apply(){
   local list; list=$(wave_list)
   [ -n "$list" ] || { echo "usage: migrate.sh apply --wave N | --waves A-B [--service X] [--yes] [--force] [--run dir]"; exit 1; }
   [ -s "$PLAN" ] || { echo "no $PLAN"; exit 1; }
+  [ -z "${MAXINFLIGHT:-}" ] || [[ "$MAXINFLIGHT" =~ ^[1-9][0-9]*$ ]] || { echo "!! --max-inflight: a whole number above 0 (the director's free workers), got '$MAXINFLIGHT' -- nothing done"; exit 1; }
   STOP_REQ=0; trap 'STOP_REQ=1; echo; echo "!! Ctrl-C: the running step completes and is recorded, then apply stops"' INT
   trap 'wave_unlock' EXIT
   ISSUE_STOP=""; local w; for w in $list; do WAVE="$w"; apply_wave || { echo "!! lane stopped at wave $w"; return 1; }; done   # a day-of create not accepted in time holds back every later create of this run

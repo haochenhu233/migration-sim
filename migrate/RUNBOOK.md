@@ -156,10 +156,22 @@ Before the first provision on a foundation: every non-BOSH address in the servic
 export BOSH_CMD="genesis @<env> b"
 bash migrate/free-ips.sh --network <services network> --cloud-config <cloud-config name> \
      --plan runs/<env>/waves.tsv --out runs/<env>/free-ips.txt       # free IPs vs Valkeys to create
-time bash migrate/migrate.sh provision --waves 1-<last> --run runs/<env>
+time bash migrate/migrate.sh provision --waves 1-<last> --max-inflight <N> --run runs/<env>
 bash migrate/migrate.sh provision-status --run runs/<env>            # ledger view: per wave staged / create-failed / not-provisioned
 column -ts $'\t' runs/<env>/inventory.tsv | less -S                   # the client's review list (names inside)
 ```
+
+**`--max-inflight <N>` — always, and N = the director's free workers.** Blacksmith deletes the index line
+of any create whose deploy task is still *queued* when its hourly sweep ticks; CF then reports
+`succeeded` for a Valkey that never came (a "hollow" — ext 2026-10-25, 7 of them; see
+`knowledge/blacksmith/hollow-valkey-orphan-sweep.md`). A task that has a worker is listed within
+seconds, so the rule is "never more creates alive than workers": the next create is issued only when
+fewer than N Valkey creates are still `in progress` in CF — this run's, a killed run's, anyone's. N = the
+director's `workers` minus what else runs there (Blacksmith batch jobs, other deploys): 20 workers idle →
+16; 20 with 8 batch jobs → 10. One `provision` per director at a time. No broker or director restart while
+creates are in flight (a broker restart moves the tick; a director restart kills queued tasks). The
+per-wave line says how often the gate waited; "not issued … (--max-inflight N)" lines mean the count
+never dropped within `INFLIGHT_TIMEOUT` (default 1500 s) — `provision` again later creates the rest.
 
 What `provision` does: for every service of those waves, one Valkey under the staged name
 `<name>-valkey-staged`, same space, the plan from `waves.tsv`. Redis and apps are not touched.
